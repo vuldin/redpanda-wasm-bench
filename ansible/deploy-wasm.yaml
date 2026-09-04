@@ -1,0 +1,668 @@
+#
+# Provision a multi-broker Redpanda cluster for the wasm-transforms
+# high-consumer-fanout investigation - NOT percore-benchmark's own
+# single-hot-core isolation methodology (the project this playbook
+# was forked from). Reuses that project's real dedicated-hardware setup
+# (no --overprovisioned, SMT disabled, production mode, multi-AZ) but
+# changes two things deliberately:
+#
+#   1. Most physical cores active per broker (mem_per_core_gib=16, same
+#      as deploy.yaml's own default) instead of deploy.yaml's "isolate
+#      one hot core" default, because this investigation is specifically
+#      about cross-shard/cross-broker placement and contention (G2/G16/
+#      G18 in the wasm-transforms roadmap), which a single active shard
+#      can't exercise at all. Always reserves os_reserved_cores physical
+#      cores so the OS/management plane (sshd, monitoring, etc.) never
+#      has to contend with Redpanda's own reactor threads for a core -
+#      an earlier version of this file gave every physical core to
+#      Redpanda with zero reservation, which is not how any real
+#      deployment is run.
+#   2. The client role ships this project's own Go/Rust tools
+#      (cmd/bench, cmd/wasm-client, cmd/fanout-load, the wasm-matcher
+#      .wasm binary, plus a local rpk copy and
+#      bench/check-bottlenecks.sh) instead of building/running OMB.
+#
+# Variables (override with -e), on top of deploy.yaml's own:
+#   mem_per_core_gib     default 16, same as deploy.yaml
+#   os_reserved_cores    default 1 - physical cores left for the OS,
+#                        excluded from Redpanda's --cpuset/--smp
+#   data_transforms_*    applied unconditionally (deploy.yaml doesn't
+#                        touch these at all - OMB never deploys transforms)
+#   enable_rack_awareness  default true - RF=3 across 3 AZs is the point
+#   local_artifacts_dir  path to the prebuilt bin/ + *.wasm this playbook
+#                        ships to clients (default: ../../wasm-orderbook
+#                        relative artifacts staged under /tmp/cloud-deploy
+#                        by the caller before running this playbook)
+
+- name: Pre-flight - fail fast if the seed already reports an unhealthy cluster
+  # Catches a stuck/unhealthy cluster in seconds, before any of the real
+  # work below (base packages, binary shipping, broker restarts) runs.
+  # Without this, a no-elected-controller cluster - e.g. stale ghost
+  # broker records left behind by a terraform destroy that skipped
+  # decommission - runs silently through the ENTIRE deploy (15-20+
+  # minutes of legitimate-looking ansible output) before finally
+  # failing at the very last health-gated restart step, with no signal
+  # anywhere in between that anything was wrong (2026-07-29 incident).
+  # No jq dependency here deliberately - this play runs before "Base
+  # packages" installs it, and a fresh instance may not have it yet.
+  hosts: "{{ groups['broker'][0] }}"
+  gather_facts: false
+  tasks:
+    - name: Check seed's cluster health before doing any real work
+      shell: |
+        overview=$(curl -sf --max-time 5 http://{{ private_ip }}:9644/v1/cluster/health_overview 2>/dev/null) || { echo "seed not reachable yet on :9644 - treating as a fresh cluster, continuing"; exit 0; }
+        echo "$overview"
+        echo "$overview" | grep -q '"is_healthy":[[:space:]]*true' && exit 0
+        echo "PRE-FLIGHT FAIL: seed already reports an unhealthy cluster - see health_overview above. nodes_down/no_elected_controller here usually means a broker was destroyed without being decommissioned first (see switch-topology.sh's decommission-first guard). Fix this (most likely: stop redpanda + wipe /var/lib/redpanda/data on all brokers and let them re-bootstrap) before re-running this playbook - shipping new binaries onto a cluster that can't elect a controller will not fix it and will burn 15-20 minutes finding that out the hard way." >&2
+        exit 1
+      args: { executable: /bin/bash }
+      register: preflight_health
+      changed_when: false
+    - debug: { var: preflight_health.stdout_lines }
+
+- name: Base packages
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Install common packages
+      apt:
+        name: [mdadm, xfsprogs, curl, chrony, vim, sysstat, jq]
+        state: present
+        update_cache: true
+    - name: Enable chrony (clean latency measurements)
+      service: { name: chrony, state: started, enabled: true }
+
+    # --- PTP hardware clock -------------------------------------------------
+    # Why this matters and is not optional cleanup: the benchmark's `match` and
+    # `total` stages each subtract a CLIENT-clock reading from a BROKER-guest-
+    # clock reading, so they carry the full offset between the two hosts. Public
+    # NTP leaves that offset at hundreds of microseconds to milliseconds, which
+    # is larger than the entire quantity being measured - it would silently
+    # dominate any "microsecond e2e" claim. Single-clock stages (`produce`,
+    # `send_lateness`, `relay_consume`) are unaffected either way.
+    #
+    # Nitro instances expose a PTP hardware clock via the ENA driver, which
+    # chrony can use as a local refclock for sub-100us (usually far better)
+    # sync with no network path at all. See wasm-orderbook/bench/
+    # SCALING-TEST-PLAN.md P0.5.
+    - name: Find the ENA PTP hardware clock, if this instance has one
+      shell: |
+        set -e
+        for d in /sys/class/ptp/ptp*; do
+          [ -e "$d/clock_name" ] || continue
+          if grep -qi 'ena' "$d/clock_name" 2>/dev/null; then
+            echo "/dev/$(basename "$d")"
+            exit 0
+          fi
+        done
+        exit 1
+      register: phc_device
+      changed_when: false
+      failed_when: false
+
+    - name: Point chrony at the PTP hardware clock
+      # poll 0 = poll every second; delay 0.000010 is AWS's own recommended
+      # value for the PHC path. `prefer` keeps the network sources present as a
+      # sanity check without letting them pull the clock around.
+      blockinfile:
+        path: /etc/chrony/chrony.conf
+        marker: "# {mark} ANSIBLE MANAGED - wasm bench PTP refclock"
+        block: |
+          refclock PHC {{ phc_device.stdout }} poll 0 delay 0.000010 prefer
+      when: phc_device.rc == 0
+      notify: restart chrony
+
+    # Verified on r8id.8xlarge / Ubuntu 22.04.5 / kernel 6.8.0-1063-aws
+    # (2026-08-28): `ethtool -T` reports "PTP Hardware Clock: none", so the
+    # refclock path above does NOT engage on this AMI - the in-tree ENA driver
+    # does not expose a PHC. Getting one would mean building the out-of-tree ENA
+    # driver (2.10.0+) via DKMS or moving to a newer AMI, neither of which is
+    # done here.
+    #
+    # So the fallback IS the measurement path, and it needs to be deliberate
+    # rather than inherited. Amazon Time Sync on the link-local address is
+    # stratum 1 over a path with no internet hop: measured last-sample offsets
+    # of +792ns and an RMS of 152us two minutes after boot, against 1-5ms for
+    # the Ubuntu pool servers the default config also lists. Pin to it with
+    # `prefer` and fast polling so a blip can never hand the clock to a
+    # millisecond-scale source mid-benchmark.
+    - name: Pin chrony to Amazon Time Sync as the preferred source
+      blockinfile:
+        path: /etc/chrony/chrony.conf
+        marker: "# {mark} ANSIBLE MANAGED - wasm bench preferred time source"
+        block: |
+          server 169.254.169.123 prefer iburst minpoll 4 maxpoll 4
+      when: phc_device.rc != 0
+      notify: restart chrony
+
+    - name: Warn loudly if no PTP clock is available
+      # Deliberately a warning, not a failure: every single-clock measurement in
+      # the plan is still valid without it. But any run on this cluster must
+      # then treat `match`/`total` as unquotable, and bench/lib-cluster.sh's
+      # record_clock_sync will record that in each run's own report.
+      debug:
+        msg: >-
+          No ENA PTP hardware clock on {{ inventory_hostname }} (expected on
+          this AMI - see the comment above). Falling back to Amazon Time Sync,
+          pinned and preferred. Cross-clock stages (match, total) carry that
+          residual and must be quoted WITH it, never as bare microsecond
+          results; single-clock stages (produce, send_lateness, relay_consume)
+          are unaffected. bench/lib-cluster.sh records the achieved residual
+          into every run's own results directory.
+      when: phc_device.rc != 0
+
+    - name: Force chrony to step to the refclock now rather than slewing slowly
+      # Without this the first benchmark after provisioning can run while chrony
+      # is still walking the clock in, which shows up as a drifting cross-clock
+      # stage and looks exactly like a real latency trend.
+      shell: chronyc makestep
+      when: phc_device.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Record the achieved sync residual, so every run has its error bar
+      shell: chronyc tracking
+      register: chrony_tracking
+      changed_when: false
+      failed_when: false
+
+    - name: Show the sync residual
+      debug:
+        msg: "{{ inventory_hostname }}: {{ chrony_tracking.stdout_lines | select('search', 'RMS offset|System time|Reference ID') | list }}"
+
+  handlers:
+    - name: restart chrony
+      service: { name: chrony, state: restarted }
+
+# --- Broker: NVMe -> XFS, install + configure Redpanda ----------------------
+# Identical to deploy.yaml through the SMT/install/bootstrap/production-mode
+# steps - copied rather than imported (ansible has no native "include another
+# playbook's tasks with overridden vars" primitive that's cleaner than this
+# for a one-off), with only the two deliberate changes named above.
+
+- name: Prepare NVMe storage on broker
+  hosts: broker
+  become: true
+  tasks:
+    - name: Check whether /var/lib/redpanda is already mounted (idempotency across re-runs)
+      command: mountpoint -q /var/lib/redpanda
+      register: already_mounted
+      ignore_errors: true
+      changed_when: false
+
+    - name: Discover instance-store NVMe devices (no partitions = not the root EBS volume)
+      set_fact:
+        nvme_devices: >-
+          {{ ansible_devices
+             | dict2items
+             | selectattr('key', 'match', '^nvme')
+             | selectattr('value.partitions', 'eq', {})
+             | map(attribute='key')
+             | map('regex_replace', '^(.*)$', '/dev/\1')
+             | list }}
+    - name: Fail if no instance-store NVMe found
+      fail: { msg: "No unpartitioned NVMe device found; this instance type may not have local NVMe." }
+      when: already_mounted.rc != 0 and nvme_devices | length == 0
+
+    - name: Create RAID0 across NVMe devices (only when more than one)
+      command: "mdadm --create --verbose /dev/md0 --level=0 --raid-devices={{ nvme_devices | length }} {{ nvme_devices | join(' ') }} --run"
+      args: { creates: /dev/md0 }
+      when: already_mounted.rc != 0 and nvme_devices | length > 1
+
+    - name: Select data device
+      set_fact:
+        data_device: "{{ '/dev/md0' if (nvme_devices | length > 1) else nvme_devices[0] }}"
+      when: already_mounted.rc != 0
+
+    - name: Make XFS filesystem
+      filesystem: { fstype: xfs, dev: "{{ data_device }}", force: true }
+      when: already_mounted.rc != 0
+
+    - name: Mount data device at /var/lib/redpanda
+      mount:
+        path: /var/lib/redpanda
+        src: "{{ data_device }}"
+        fstype: xfs
+        opts: noatime,nodiscard
+        state: mounted
+      when: already_mounted.rc != 0
+
+- name: Install and configure Redpanda (multi-broker, real RF)
+  hosts: broker
+  become: true
+  vars:
+    # Matches deploy.yaml's own production default (16 GiB/core) rather
+    # than diverging from it - an earlier version of this file used 4
+    # GiB/core specifically to force every physical core active with zero
+    # OS headroom, which is not how a real deployment is run: always
+    # leave at least one physical core for the OS/management plane
+    # (sshd, cloud-init, monitoring agents, etc.), not just whatever
+    # memory math happens to leave over.
+    mem_per_core_gib: 16
+    os_reserved_cores: 1
+  tasks:
+    - name: Disable hyperthreading (SMT) on the broker
+      shell: |
+        if [ -e /sys/devices/system/cpu/smt/control ]; then
+          echo off > /sys/devices/system/cpu/smt/control 2>/dev/null || true
+          ctl=$(cat /sys/devices/system/cpu/smt/control)
+        else
+          ctl="absent"
+        fi
+        tpc=$(lscpu | awk -F: '/^Thread\(s\) per core/{gsub(/ /,"",$2);print $2}')
+        echo "smt_control=$ctl threads_per_core=$tpc online_cpus=$(nproc)"
+        [ "${tpc:-2}" = "1" ] || { echo "ERROR: SMT still enabled (threads_per_core=$tpc)"; exit 1; }
+      args: { executable: /bin/bash }
+      register: smt
+    - debug: { var: smt.stdout_lines }
+
+    - name: Add the public Redpanda apt repository
+      shell: |
+        curl -1sLf 'https://dl.redpanda.com/nzc4ZYQK3WRGd9sy/redpanda/cfg/setup/bash.deb.sh' | sudo -E bash
+      args: { creates: /etc/apt/sources.list.d/redpanda-redpanda.list }
+
+    - name: Install Redpanda (package only - gives us the redpanda user/group,
+        systemd units, config skeleton, and rpk CLI; the actual redpanda
+        binary this package installs gets overwritten by the next task)
+      apt:
+        name: "redpanda{{ ('=' + redpanda_version) if (redpanda_version | default('') | length > 0) else '' }}"
+        state: present
+        update_cache: true
+
+    # This whole cloud run exists to test THIS session's own wasm-engine
+    # PR fixes (readers-cache/scheduling-shares/yield-mechanism/etc.) -
+    # none of which are in any public release, since none of the PRs are
+    # merged upstream yet. The apt package above is only a vehicle for the
+    # user/group + systemd unit + config skeleton; the binary it ships is
+    # the wrong one for this test and gets replaced here with our own
+    # local build of the transform-latency-instrumentation branch
+    # (confirmed via `redpanda --version` -> "v0.0.0-dev" dev-build stamp,
+    # not a real release tag - an easy post-deploy sanity check that the
+    # right binary made it onto each broker).
+    - name: "Ship our patched redpanda build (transform-latency-instrumentation branch) as redpanda.real"
+      copy:
+        src: "{{ redpanda_binary_path | default(lookup('env', 'HOME') + '/redpanda/redpanda/bazel-bin/src/v/redpanda/redpanda') }}"
+        dest: /opt/redpanda/bin/redpanda.real
+        owner: root
+        group: root
+        mode: "0755"
+
+    # Our binary's RPATH points at bazel's own _solib_k8 tree (relative to
+    # bazel-bin, not to /opt/redpanda/bin) for the krb5/openssl libs it was
+    # linked against, so copying the single binary file alone breaks
+    # dynamic linking on the target (confirmed: "libcom_err.so.3: cannot
+    # open shared object file" on first attempt). Ship the handful of
+    # non-glibc .so files it actually needs (resolved locally via `ldd` +
+    # `readlink -f`; libc/libm/libgcc_s are standard and already present)
+    # and point the loader at them via LD_LIBRARY_PATH in the same
+    # /etc/default/redpanda the systemd unit already loads, rather than
+    # trying to replicate bazel's internal directory layout on the broker.
+    - name: Create the directory for our shipped shared libraries
+      file: { path: /opt/redpanda/lib-patched, state: directory, owner: root, group: root, mode: "0755" }
+
+    - name: Ship the non-system shared libraries our build links against
+      copy:
+        src: "{{ local_artifacts_dir | default('/tmp/cloud-deploy') }}/redpanda-libs/{{ item }}"
+        dest: "/opt/redpanda/lib-patched/{{ item }}"
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - libcom_err.so.3
+        - libgssapi_krb5.so.2
+        - libk5crypto.so.3
+        - libkrb5.so.3
+        - libkrb5support.so.0
+        - libcrypto.so.3
+        - libssl.so.3
+
+    # LD_LIBRARY_PATH via /etc/default/redpanda does NOT work here: systemd's
+    # ExecStart runs `rpk redpanda start`, and rpk execs the real redpanda
+    # binary with its own constructed environment rather than passing
+    # through what it inherited - confirmed by the --version check passing
+    # inline but the actual systemd-started service still failing on the
+    # same missing-library error.
+    #
+    # IMPORTANT: do NOT register /opt/redpanda/lib-patched with the
+    # system-wide dynamic linker (ld.so.conf.d + ldconfig) - an earlier
+    # version of this task did exactly that, and it silently broke sshd on
+    # every broker (sshd also links libssl/libcrypto/libkrb5, and started
+    # resolving against our differently-built copies instead of the
+    # system's own - visible as sshd resetting the connection right after
+    # the TCP handshake, on every broker, surviving even a reboot since
+    # ld.so.cache is written to disk). Scope the override to ONLY this one
+    # binary via a wrapper script instead, so nothing system-wide changes.
+    - name: "Install the redpanda wrapper (sets LD_LIBRARY_PATH only for redpanda.real, not system-wide)"
+      copy:
+        dest: /opt/redpanda/bin/redpanda
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          exec env LD_LIBRARY_PATH="/opt/redpanda/lib-patched:${LD_LIBRARY_PATH:-}" /opt/redpanda/bin/redpanda.real "$@"
+
+    - name: Sanity-check the installed binary is our dev build, not a release
+      command: /opt/redpanda/bin/redpanda --version
+      register: rp_binary_version
+      changed_when: false
+    - debug: { var: rp_binary_version.stdout }
+
+    - name: Ensure data directory exists and is owned by redpanda
+      file: { path: /var/lib/redpanda/data, state: directory, owner: redpanda, group: redpanda, mode: "0755" }
+
+    - name: Bootstrap cluster config (broker 0 is the seed; others join it)
+      shell: |
+        if [ "{{ id }}" = "0" ]; then
+          rpk redpanda config bootstrap --id 0 --self {{ private_ip }}
+        else
+          rpk redpanda config bootstrap --id {{ id }} --self {{ private_ip }} --ips {{ seed_private_ip }}
+        fi
+        rpk redpanda config set redpanda.advertised_kafka_api '[{address: {{ private_ip }}, port: 9092}]'
+      args: { executable: /bin/bash }
+
+    - name: Production mode (runs the standard tuners)
+      command: rpk redpanda mode production
+
+    - name: "Pin Redpanda to {{ mem_per_core_gib }} GiB per PHYSICAL core, reserving {{ os_reserved_cores }} core(s) for the OS"
+      shell: |
+        set -euo pipefail
+        MPC={{ mem_per_core_gib }}
+        RESERVE={{ os_reserved_cores }}
+        MEMMB=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
+        # Enumerate PHYSICAL cores from the ONLINE cpus only, and derive the
+        # count from that list rather than from nproc/threads-per-core.
+        #
+        # Both of those were wrong on r6id.32xlarge (2026-09-02), which presents
+        # 128 cpus but keeps only 0-63 ONLINE - the SMT siblings are offline:
+        #   * `nproc` counts ONLINE cpus (64) while lscpu reports threads-per-core
+        #     from PRESENT siblings (2), so VCPUS/TPC computed 32 physical cores
+        #     when the machine has 64. That silently halves the cluster.
+        #   * the old loop globbed /sys/.../cpu[0-9]* (all 128 PRESENT dirs) and
+        #     read topology/thread_siblings_list from each, but an OFFLINE cpu has
+        #     no topology/ subdirectory - so `cut` failed, and with `set -e` the
+        #     whole task died and Redpanda was never started.
+        # Reading /sys/devices/system/cpu/online and skipping anything without a
+        # topology dir handles SMT-on, SMT-off, and partially-offline uniformly.
+        ONLINE=$(cat /sys/devices/system/cpu/online)
+        expand_cpulist() {  # "0-63,96-127" -> one cpu number per line
+          echo "$1" | tr ',' '\n' | while IFS= read -r r; do
+            [ -n "$r" ] || continue
+            case "$r" in
+              *-*) seq "${r%%-*}" "${r##*-}" ;;
+              *)   echo "$r" ;;
+            esac
+          done
+        }
+        CORES=$(for c in $(expand_cpulist "$ONLINE"); do
+                  tsl="/sys/devices/system/cpu/cpu$c/topology/thread_siblings_list"
+                  [ -r "$tsl" ] || continue
+                  cut -d, -f1 "$tsl" | cut -d- -f1
+                done | sort -n -u)
+        PHYS=$(echo "$CORES" | grep -c .)
+        VCPUS=$(nproc)
+        TPC=$(( VCPUS / (PHYS > 0 ? PHYS : 1) ))
+        AVAIL_PHYS=$(( PHYS - RESERVE )); [ "$AVAIL_PHYS" -lt 1 ] && AVAIL_PHYS=1
+        MEM_SMP=$(( (MEMMB * 90 / 100) / (MPC * 1024) ))
+        SMP=$MEM_SMP; [ "$SMP" -gt "$AVAIL_PHYS" ] && SMP=$AVAIL_PHYS; [ "$SMP" -lt 1 ] && SMP=1
+        # Skip the lowest-numbered RESERVE physical cores (conventionally
+        # closest to the kernel's own IRQ/bookkeeping affinity) so the OS,
+        # sshd, and any monitoring agents keep dedicated headroom instead
+        # of contending with Redpanda's own reactor threads for every core.
+        CPUSET=$(echo "$CORES" | tail -n "+$((RESERVE + 1))" | head -n "$SMP" | paste -sd,)
+        MEM=$(( SMP * MPC * 1024 ))
+        rpk redpanda config set rpk.additional_start_flags \
+          "[\"--smp=$SMP\",\"--cpuset=$CPUSET\",\"--memory=${MEM}M\"]"
+        echo "online_cpus=[$ONLINE] vcpus=$VCPUS threads_per_core=$TPC physical_cores=$PHYS reserved_for_os=$RESERVE -> smp=$SMP, cpuset=$CPUSET, --memory=${MEM}M, mem/core=${MPC}GiB"
+      args: { executable: /bin/bash }
+      register: rp_pin
+    - debug: { var: rp_pin.stdout_lines }
+
+    - name: Fix /etc/redpanda ownership so the service can read its config
+      file: { path: /etc/redpanda, owner: redpanda, group: redpanda, recurse: true }
+
+    - name: Start Redpanda (dump the journal if it fails to come up)
+      block:
+        - systemd: { name: redpanda-tuner, state: restarted, enabled: true }
+        - systemd: { name: redpanda, state: restarted, enabled: true }
+        - name: Wait for the Kafka API
+          wait_for: { host: "{{ private_ip }}", port: 9092, timeout: 120 }
+      rescue:
+        - command: journalctl -u redpanda --no-pager -n 120
+          register: rp_journal
+        - debug: { var: rp_journal.stdout_lines }
+        - fail: { msg: "redpanda failed to start; see journal above" }
+
+    - name: Wait for all brokers to join the cluster AND be alive (run once, from the seed)
+      # Deliberately checks health_overview's nodes_down (authoritative
+      # liveness), not `brokers list`'s row count - a stale/ghost broker
+      # record from an earlier un-decommissioned destroy still shows up
+      # as a row (wrong IP, is-alive=false) and was silently counted as
+      # "joined" by the row-count version of this check, which is
+      # exactly how a no-elected-controller cluster made it all the way
+      # to the restart-and-health-check step before failing
+      # (2026-07-29) - the row count matched "$want" while two of those
+      # three rows were dead ghosts stuck in an infinite registration
+      # retry loop, never actually alive.
+      shell: |
+        want={{ groups['broker'] | length }}
+        for i in $(seq 1 45); do
+          overview=$(curl -sf http://{{ private_ip }}:9644/v1/cluster/health_overview 2>/dev/null || echo '{}')
+          # is_healthy true already implies nodes_down is empty and a
+          # controller is elected - no need to separately count
+          # all_nodes here.
+          if echo "$overview" | grep -q '"is_healthy":[[:space:]]*true'; then
+            echo "cluster healthy with all $want brokers: $overview"; exit 0
+          fi
+          sleep 4
+        done
+        echo "brokers did not all join/stay alive after waiting; last health_overview: $overview" >&2; exit 1
+      args: { executable: /bin/bash }
+      run_once: true
+      delegate_to: "{{ groups['broker'][0] }}"
+      register: cluster_join
+    - debug: { var: cluster_join.stdout_lines }
+      run_once: true
+
+    # Everything below is new vs. deploy.yaml - OMB never deploys
+    # transforms or needs follower fetching, so none of this existed
+    # for that workload.
+    - name: Apply cluster config for the wasm-transforms/fanout workload (run once from the seed)
+      # Note: intentionally NOT re-declaring these same names in a
+      # task-level vars: block (as an earlier version of this task
+      # did) - a var referencing "{{ name | default(x) }}" under the
+      # SAME name it's defining is a self-reference, not a layered
+      # default, and Ansible resolves it as infinite recursion. Extra
+      # vars passed via -e already take precedence over the
+      # default(...) filter below with no vars: block needed at all.
+      # This cluster runs our own transform-latency-instrumentation build
+      # (installed by the "Ship our patched redpanda build" play below),
+      # not the public apt release - that's the whole point of this
+      # exercise, since data_transforms_max_instances_per_core and
+      # several of the other PR-fixes under test don't exist upstream.
+      shell: |
+        set -e
+        rpk cluster config set readers_cache_target_max_size {{ readers_cache_target_max_size | default(5000) }}
+        rpk cluster config set enable_rack_awareness {{ enable_rack_awareness | default(true) }}
+        rpk cluster config set data_transforms_enabled true
+        rpk cluster config set data_transforms_per_function_memory_limit 4194304
+        rpk cluster config set data_transforms_max_instances_per_core 100
+        rpk cluster config set data_transforms_runtime_limit_ms 30000
+        echo "wasm-transforms/fanout cluster config now:"
+        for k in readers_cache_target_max_size enable_rack_awareness data_transforms_enabled data_transforms_per_function_memory_limit data_transforms_max_instances_per_core data_transforms_runtime_limit_ms; do
+          printf '  %s = %s\n' "$k" "$(rpk cluster config get "$k" 2>/dev/null)"
+        done
+      args: { executable: /bin/bash }
+      run_once: true
+      delegate_to: "{{ groups['broker'][0] }}"
+      register: wasm_cfg
+    - debug: { var: wasm_cfg.stdout_lines }
+      run_once: true
+
+# `rpk cluster config set` frequently applies live but still reports
+# "Cluster needs to be restarted" for properties that don't take effect
+# until the broker process restarts (confirmed here: data_transforms_enabled
+# silently stayed inactive - transform deploy failed with "data transforms
+# disabled" - even though `rpk cluster config get` already echoed back
+# `true`, because no one restarted anything after the apply task above).
+# Roll the whole cluster one broker at a time so this can never again be
+# missed, and so the harness never has to restart all 3 brokers'
+# replicas of every partition simultaneously (unsafe even with RF=3, and
+# genuinely unsafe at RF=1). Restarting a node with nothing pending is a
+# harmless no-op (~10-20s), so this always runs rather than trying to
+# parse `rpk cluster config status` per-node.
+- name: Roll the cluster to apply any config changes that require a restart
+  hosts: broker
+  become: true
+  serial: 1
+  tasks:
+    - name: Restart redpanda on this node
+      systemd: { name: redpanda, state: restarted }
+    - name: Wait for this node's Kafka API to come back
+      wait_for: { host: "{{ private_ip }}", port: 9092, timeout: 120 }
+    - name: Wait for the cluster to report healthy before moving to the next node
+      # The admin API actually emits "is_healthy": true (with a space) -
+      # a prior version of this grep pattern omitted the space and could
+      # never match, so this check always ran the full retry budget and
+      # failed regardless of real cluster health. Also widened the
+      # budget itself: a config-driven restart (SMP/cpuset/memory
+      # changes, not just a plain process bounce) needs full raft
+      # leadership recovery across every partition on the node, which
+      # took ~150-180s in practice - comfortably over the old 120s cap.
+      shell: |
+        for i in $(seq 1 60); do
+          curl -sf http://{{ private_ip }}:9644/v1/cluster/health_overview 2>/dev/null | grep -q '"is_healthy":[[:space:]]*true' && exit 0
+          sleep 5
+        done
+        echo "cluster did not report healthy in time"; exit 1
+      args: { executable: /bin/bash }
+    - name: Confirm no config changes are still pending a restart on this node
+      # rpk cluster config status lists every node's row, not just this
+      # one - a bare 'true' in cfg_status_after_restart.stdout matched
+      # ANY node's row, including brokers later in this same serial
+      # rollout that legitimately still say needs-restart=true because
+      # their turn hasn't come yet. That false positive halted the
+      # whole rollout on whichever broker got checked first (serial
+      # strategy stops advancing to the next batch on any failure),
+      # leaving the rest of the cluster never actually restarted -
+      # confirmed for real on 2026-07-29. Scope the check to this
+      # node's own row (first column == its numeric id) instead.
+      command: rpk cluster config status
+      register: cfg_status_after_restart
+      changed_when: false
+    - debug: { var: cfg_status_after_restart.stdout_lines }
+    - set_fact:
+        this_node_needs_restart: "{{ cfg_status_after_restart.stdout_lines
+          | select('match', '^' + (id | string) + '\\s')
+          | list
+          | first
+          | default('')
+          | regex_search('true') is not none }}"
+    - fail:
+        msg: "{{ private_ip }} (node {{ id }}) still reports a pending config-triggered restart after restarting - see status above"
+      when: this_node_needs_restart
+
+# --- Client: ship this project's own tools, not OMB --------------------------
+
+- name: Set up the load client with this project's own tools
+  hosts: client
+  become: true
+  vars:
+    local_artifacts_dir: /tmp/cloud-deploy
+  tasks:
+    - name: Create the tool directory
+      file: { path: /opt/wasm-bench, state: directory, owner: ubuntu, group: ubuntu, mode: "0755" }
+
+    - name: Ship prebuilt Go binaries (cross-compiled locally for linux/amd64, not built on the client)
+      copy:
+        src: "{{ local_artifacts_dir }}/bin/{{ item }}"
+        dest: "/opt/wasm-bench/{{ item }}"
+        mode: "0755"
+      # push-relay removed 2026-08-28: the external Go relay stub no longer
+      # exists in the client repo (the relay moved into the broker binary), so
+      # copying it was a hard failure. loadgen and the relay-* tools added for
+      # SCALING-TEST-PLAN.md's phases.
+      # Trimmed 2026-09-04 for the two-repo split: bench, kafka-matcher,
+      # relay-consumer, relay-fanout-load and relay-wasm-fanout-bench no longer
+      # exist. loadgen is the only measurement path any published number came
+      # from; wasm-client is the external host, built in the clients repo.
+      loop:
+        - wasm-client
+        - fanout-load
+        - loadgen
+
+    - name: Ship the wasm guest binaries (architecture-independent bytecode)
+      copy:
+        src: "{{ local_artifacts_dir }}/{{ item }}"
+        dest: "/opt/wasm-bench/{{ item }}"
+        mode: "0644"
+      # wasm-matcher-push.wasm removed with the push-relay stub. relay-probe is
+      # the in-broker relay consumer every relay measurement needs; passthrough
+      # is E2.3's zero-work control.
+      loop: [wasm-matcher.wasm, relay-probe.wasm, relay-sink.wasm, passthrough.wasm]
+
+    # The push-relay systemd unit that used to live here is gone along with the
+    # external Go relay stub it ran: the relay is part of the broker binary now
+    # (src/v/relay, cluster properties relay_enabled / relay_port), so there is
+    # no separate service to install, network, or keep alive on client[0].
+    # Nothing replaces it - one less moving part in every deploy.
+    - name: Remove any stale push-relay unit left by an earlier deploy
+      # A no-op on a fresh cluster; matters only when re-deploying over a host
+      # provisioned before the relay moved in-broker, where the old unit would
+      # otherwise keep restarting a binary that is no longer shipped.
+      systemd: { name: push-relay, state: stopped, enabled: false }
+      failed_when: false
+
+    - name: Delete the stale push-relay unit file
+      file: { path: /etc/systemd/system/push-relay.service, state: absent }
+      notify: reload systemd
+
+    - name: Ship a local rpk binary (CLI only - no broker install needed on clients)
+      copy:
+        src: "{{ local_artifacts_dir }}/rpk"
+        dest: /opt/wasm-bench/rpk
+        mode: "0755"
+
+    - name: Ship check-bottlenecks.sh (shard placement + reader/batch cache verification)
+      copy:
+        src: "{{ local_artifacts_dir }}/check-bottlenecks.sh"
+        dest: /opt/wasm-bench/check-bottlenecks.sh
+        mode: "0755"
+
+    # These two were previously copied to the client by hand, ad hoc,
+    # every time a fresh instance needed them - missed entirely on the
+    # 2026-07-29 us-east-2 rebuild until a run failed with "No such
+    # file or directory". Shipping them here means every fresh client
+    # has them from the first deploy, with no separate manual step to
+    # remember.
+    - name: Ship the canonical benchmark orchestration scripts
+      copy:
+        src: "{{ local_artifacts_dir }}/{{ item }}"
+        dest: "/opt/wasm-bench/{{ item }}"
+        mode: "0755"
+      # This list MUST agree with the staging list in
+      # scripts/deploy-wasm-cluster.sh. A script listed here but not staged
+      # fails the deploy with "Could not find or access
+      # '/tmp/cloud-deploy/<file>'", discovered minutes into a deploy against
+      # already-billing hardware. Trimmed 2026-09-04 for the two-repo split -
+      # the round-specific and relay-fanout runners are not carried over.
+      #
+      # lib-cluster.sh is SOURCED by the runners, so it must land in the same
+      # directory or they abort at startup; scrape-metrics.sh is invoked by
+      # run-e2-throughput.sh.
+      loop:
+        - lib-cluster.sh
+        - scrape-metrics.sh
+        - check-bottlenecks.sh
+        - run-e2-throughput.sh
+        - run-traditional-sharded.sh
+        - run-inbroker-vs-external.sh
+        - run-cloud-fanout-comparison.sh
+
+    - name: Own the tool directory
+      file: { path: /opt/wasm-bench, state: directory, owner: ubuntu, group: ubuntu, recurse: true }
+
+  handlers:
+    - name: reload systemd
+      systemd: { daemon_reload: true }
