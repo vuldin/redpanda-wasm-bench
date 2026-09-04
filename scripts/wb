@@ -1,0 +1,706 @@
+#!/usr/bin/env bash
+# wb - one entry point for the wasm-transforms benchmark cluster.
+#
+# WHY THIS EXISTS: every fact below was learned by hitting it, and without this
+# script it gets re-learned every session. Each one cost a cycle at least once:
+#
+#   1. SSH from the DEV MACHINE must target PUBLIC IPs. The private 10.0.0.x
+#      addresses are only routable between instances. An ssh to a private IP
+#      does not error - it HANGS until timeout (rc=124), which reads like a
+#      broken broker rather than a broken command.
+#   2. rpk/curl/BROKERS strings, run ON the instances, must use PRIVATE IPs.
+#      The admin API binds to the private address; localhost is refused.
+#   3. Every ssh needs `-o IdentitiesOnly=yes`. Without it a populated agent
+#      offers too many keys first and the server closes with "Too many
+#      authentication failures" before reaching the right one.
+#   4. ensure-cluster-ready.sh calls bare `ansible` with no --private-key, so it
+#      needs ANSIBLE_PRIVATE_KEY_FILE exported or every task is unreachable
+#      (ansible exits 4, and `set -e` makes it look like a health failure).
+#   5. Cluster health must be parsed with jq. The raw body is
+#      `"is_healthy": true` WITH a space, and `ansible -o` mangles the JSON, so
+#      grep patterns silently never match and burn the whole retry budget.
+#   6. data_transforms_* sizing properties are needs_restart:yes. `rpk cluster
+#      config get` reports the NEW value immediately while the running broker
+#      keeps its BOOT value, so a config change that was never followed by a
+#      restart looks applied and is not. `wb set` handles this for you.
+#   7. r8id.8xlarge capacity is regularly unavailable per-AZ. Probe before
+#      applying; `wb up` does.
+#   8. num_cores is 13, not 32 - SMT is disabled and cores are reserved for the
+#      OS. Any per-core arithmetic must read it live, never assume vCPU count.
+#
+# Usage: wb <command> [args]
+#   doctor              check every precondition and report what is wrong
+#   env                 print/refresh cluster facts from terraform outputs
+#   up [single-az]      capacity-probe then provision (safe; never blind-applies)
+#   deploy              build artifacts and ship them to the cluster
+#   ready               config preflight + rolling restart if needed
+#   status              health, running binary vs local build, config, clocks
+#   restart             safe rolling restart, health-gated between nodes
+#   set <prop> <val>    cluster config set, auto-rolling when needs_restart
+#   run e1|e2 [K=V...]  run a phase runner on client[0] with correct env
+#   results [dir]       copy result JSON back from client[0]
+#   ssh <target> [cmd]  broker0..2 / client0..1, correct flags applied
+#   logs <target> [n]   redpanda journal from a broker
+#   teardown            terraform destroy (prompts unless --yes)
+#   reproduce           one command: prereqs -> region -> provision -> deploy
+#                       -> both arms -> tables. See REPRODUCE.md
+#   cleanup-orphans     delete benchmark transforms/topics left by a killed
+#                       run (refuses while a runner is alive; --force)
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# wb lives in scripts/ now; terraform/ and ansible/ are its siblings.
+ROOT="$(cd "$HERE/.." && pwd)"
+TF="$ROOT/terraform"
+
+# --- defaults that were correct for this project, overridable ---------------
+export AWS_PROFILE="${AWS_PROFILE:-sandbox-cse}"
+BENCH_PUB_KEY="${BENCH_PUB_KEY:-$HOME/.ssh/jlp-aws-iceberg.pub}"
+BENCH_SSH_KEY="${BENCH_SSH_KEY:-$HOME/.ssh/jlp-aws-iceberg.pem}"
+REDPANDA_SRC="${REDPANDA_SRC:-$HOME/redpanda/redpanda}"
+WASM_ORDERBOOK_SRC="${WASM_ORDERBOOK_SRC:-$HOME/redpanda/projects/wasm-orderbook}"
+TFVARS_SINGLE="r8id-8xl-wasm-single-az.tfvars"
+TFVARS_MULTI="r8id-8xl-wasm-multi-az.tfvars"
+# Overridable so the binary gate can be self-tested against a deliberately
+# mismatched binary. It was hardcoded, which made the gate untestable - and an
+# untested guard is not a guard.
+REDPANDA_BIN="${REDPANDA_BIN:-$REDPANDA_SRC/bazel-bin/src/v/redpanda/redpanda}"
+REMOTE_BIN=/opt/redpanda/bin/redpanda.real
+REMOTE_TOOLS=/opt/wasm-bench
+
+# Properties whose value the running broker only picks up at boot. `wb set`
+# rolls the cluster after changing any of these. Keep in sync with
+# `rpk cluster config status` NEEDS-RESTART, which is the source of truth.
+NEEDS_RESTART_PROPS="
+data_transforms_max_instances_per_core
+data_transforms_per_function_memory_limit
+data_transforms_per_core_memory_reservation
+data_transforms_read_buffer_memory_percentage
+data_transforms_write_buffer_memory_percentage
+data_transforms_runtime_limit_ms
+data_transforms_enabled
+relay_enabled
+relay_port
+"
+
+die() { echo "wb: $*" >&2; exit 1; }
+note() { echo "  $*"; }
+
+SSH_OPTS=(-o IdentitiesOnly=yes -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=15)
+
+# --- cluster facts ----------------------------------------------------------
+# Cached so every command does not re-shell terraform, but always derived from
+# terraform outputs rather than hand-maintained.
+ENVFILE="$HERE/.wb-env"
+
+# `terraform output <name>` exits 0 with only a warning when the output does not
+# exist, so its exit status is NOT a usable "cluster exists" test - that false
+# positive made `wb doctor` print "OK cluster exists" and then abort. Check for
+# actual content instead.
+cluster_in_state() {
+  [ -d "$TF/.terraform" ] || return 1
+  local out
+  out="$(cd "$TF" && terraform output -json broker_public_ips 2>/dev/null)" || return 1
+  [ -n "$out" ] && [ "$out" != "null" ] && [ "$out" != "[]" ]
+}
+
+load_env() {
+  if [ ! -s "$ENVFILE" ] || [ "${1:-}" = "refresh" ]; then
+    [ -d "$TF/.terraform" ] || die "terraform not initialized - run: cd terraform && terraform init"
+    local bp bpv cp cpv
+    bp=$(cd "$TF" && terraform output -json broker_public_ips 2>/dev/null | jq -r 'join(" ")') || true
+    bpv=$(cd "$TF" && terraform output -json broker_private_ips 2>/dev/null | jq -r 'join(" ")') || true
+    cp=$(cd "$TF" && terraform output -json client_public_ips 2>/dev/null | jq -r 'join(" ")') || true
+    cpv=$(cd "$TF" && terraform output -json client_private_ips 2>/dev/null | jq -r 'join(" ")') || true
+    [ -n "${bp// /}" ] || die "no terraform outputs - no cluster is provisioned. Run: wb up single-az"
+    {
+      echo "BROKER_PUB=\"$bp\""
+      echo "BROKER_PRIV=\"$bpv\""
+      echo "CLIENT_PUB=\"$cp\""
+      echo "CLIENT_PRIV=\"$cpv\""
+      echo "SEED_PRIV=\"$(echo "$bpv" | awk '{print $1}')\""
+      echo "BROKERS=\"$(echo "$bpv" | tr ' ' '\n' | sed 's/$/:9092/' | paste -sd, -)\""
+      echo "ADMIN_URL=\"http://$(echo "$bpv" | awk '{print $1}'):9644\""
+      # EVERY broker's admin endpoint. Transform/wasm-engine metrics are
+      # per-node and follow partition leadership, so a single-endpoint scrape
+      # silently loses the transform or reports an idle duplicate. Runners
+      # should pass ADMIN_URLS for metrics and ADMIN_URL only where a single
+      # control-plane endpoint is wanted.
+      echo "ADMIN_URLS=\"$(echo "$bpv" | tr ' ' '\n' | sed 's|^|http://|; s|$|:9644|' | paste -sd, -)\""
+    } > "$ENVFILE"
+  fi
+  # shellcheck disable=SC1090
+  source "$ENVFILE"
+}
+
+resolve_host() {
+  load_env
+  local t="$1" idx
+  case "$t" in
+    broker0|broker1|broker2) idx=${t#broker}; echo "$BROKER_PUB" | awk -v i=$((idx+1)) '{print $i}' ;;
+    client*)
+      # Any index, not just 0/1: client_count went to 8 on 2026-09-03 so the
+      # traditional-deployment leg could shard 499 consumer groups off the
+      # measuring host. Bounded by the actual list so a typo still fails loudly
+      # instead of resolving to an empty host and producing a confusing ssh
+      # error.
+      idx=${t#client}
+      case "$idx" in ''|*[!0-9]*) die "bad client index in '$t'" ;; esac
+      local n; n=$(echo "$CLIENT_PUB" | wc -w)
+      [ "$idx" -lt "$n" ] || die "no such target '$t' - only $n client(s) exist"
+      echo "$CLIENT_PUB" | awk -v i=$((idx+1)) '{print $i}' ;;
+    *) die "unknown target '$t' (want broker0..2 or client<N>)" ;;
+  esac
+}
+
+node_priv() { # private IP for a target, for on-instance addressing
+  load_env
+  local t="$1" idx
+  case "$t" in
+    broker0|broker1|broker2) idx=${t#broker}; echo "$BROKER_PRIV" | awk -v i=$((idx+1)) '{print $i}' ;;
+    client*)
+      idx=${t#client}
+      case "$idx" in ''|*[!0-9]*) die "bad client index in '$t'" ;; esac
+      local n; n=$(echo "$CLIENT_PRIV" | wc -w)
+      [ "$idx" -lt "$n" ] || die "no such target '$t' - only $n client(s) exist"
+      echo "$CLIENT_PRIV" | awk -v i=$((idx+1)) '{print $i}' ;;
+    *) die "unknown target '$t'" ;;
+  esac
+}
+
+# rsh <target> <command> - short-lived commands only.
+#
+# RSH_TIMEOUT bounds it so a wedged host cannot hang the harness forever. The
+# default is deliberately short because almost every call here is a status or
+# config query. LONG-RUNNING WORK MUST NOT USE THIS DEFAULT: an experiment sweep
+# takes many minutes, and a 300s cap silently killed one mid-run, leaving the
+# earlier levels' results on disk and looking exactly like a stalled cluster.
+# cmd_run overrides it (see RSH_TIMEOUT there).
+rsh() { # rsh <target> <command>
+  local h; h="$(resolve_host "$1")"; shift
+  timeout "${RSH_TIMEOUT:-300}" ssh -i "$BENCH_SSH_KEY" "${SSH_OPTS[@]}" \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=1000 "ubuntu@$h" "$@"
+}
+
+# jq, never grep - see header note 5.
+health_json() {
+  load_env
+  rsh broker0 "curl -sf $ADMIN_URL/v1/cluster/health_overview" 2>/dev/null
+}
+
+# is_healthy alone is NOT sufficient after a restart: it can read true while
+# raft leadership is still being reacquired, and a benchmark started in that
+# window measures leadership churn rather than steady state. The ansible
+# playbook learned the same thing the hard way and budgets 150-180s for a
+# config-driven restart. Require no nodes down, no leaderless partitions, and
+# nothing under-replicated.
+cluster_healthy() {
+  local out; out="$(health_json)" || return 1
+  [ -n "$out" ] || return 1
+  echo "$out" | jq -e '
+    .is_healthy == true
+    and (.nodes_down | length) == 0
+    and (.leaderless_count // (.leaderless_partitions | length)) == 0
+    and (.under_replicated_count // (.under_replicated_partitions | length)) == 0
+  ' >/dev/null 2>&1
+}
+
+# Reports WHY it is not ready, so a stall is diagnosable instead of just slow.
+health_why() {
+  local out; out="$(health_json)"
+  [ -n "$out" ] || { echo "admin API unreachable"; return; }
+  echo "$out" | jq -r '"is_healthy=\(.is_healthy) nodes_down=\(.nodes_down) leaderless=\(.leaderless_count // 0) under_replicated=\(.under_replicated_count // 0) reasons=\(.unhealthy_reasons)"' 2>/dev/null
+}
+
+# Waits for a specific node's Kafka API to accept connections again. A restarted
+# broker answers the admin API before it is serving Kafka.
+wait_kafka_api() {
+  local target="$1" priv
+  priv="$(node_priv "$target")"
+  for _ in $(seq 1 60); do
+    if rsh "$target" "timeout 3 bash -c '</dev/tcp/$priv/9092'" >/dev/null 2>&1; then return 0; fi
+    sleep 5
+  done
+  note "$target Kafka API (9092) never came back"
+  return 1
+}
+
+wait_healthy() {
+  local tries="${1:-45}"   # 45 x 8s = 360s, covering the 150-180s the playbook
+                           # measured for full leadership recovery
+  for i in $(seq 1 "$tries"); do
+    cluster_healthy && { note "fully healthy (no leaderless / under-replicated) after $((i*8))s"; return 0; }
+    [ $((i % 5)) -eq 0 ] && note "  still recovering: $(health_why)"
+    sleep 8
+  done
+  note "NOT fully healthy after $((tries*8))s: $(health_why)"
+  return 1
+}
+
+rpk_remote() { # run rpk on client0 against the cluster's private addresses
+  load_env
+  rsh client0 "cd $REMOTE_TOOLS && ./rpk -X brokers=$BROKERS -X admin.hosts=${ADMIN_URL#http://} $*"
+}
+
+# --- commands ---------------------------------------------------------------
+
+cmd_doctor() {
+  local bad=0
+  echo "=== local tooling ==="
+  for t in terraform ansible-playbook jq aws rpk ssh; do
+    if command -v "$t" >/dev/null; then note "OK   $t"; else note "MISS $t"; bad=1; fi
+  done
+  echo "=== aws session ==="
+  if aws sts get-caller-identity >/dev/null 2>&1; then
+    note "OK   $(aws sts get-caller-identity --query Arn --output text 2>/dev/null | sed 's/.*\///')"
+  else
+    note "EXPIRED - run: aws sso login --profile $AWS_PROFILE"; bad=1
+  fi
+  echo "=== keys ==="
+  [ -f "$BENCH_PUB_KEY" ] && note "OK   $BENCH_PUB_KEY" || { note "MISS $BENCH_PUB_KEY"; bad=1; }
+  [ -f "$BENCH_SSH_KEY" ] && note "OK   $BENCH_SSH_KEY" || { note "MISS $BENCH_SSH_KEY"; bad=1; }
+  echo "=== local redpanda build ==="
+  if [ -f "$REDPANDA_BIN" ]; then
+    note "OK   $(date -r "$REDPANDA_BIN" '+%Y-%m-%d %H:%M')  sha=$(sha256sum "$REDPANDA_BIN" | cut -c1-16)"
+    # `bazel-bin` is a CONVENIENCE SYMLINK that bazel repoints to whichever
+    # configuration it built LAST. Any `bazel build`/`bazel test` without
+    # `-c opt` silently aims it at k8-fastbuild, and since we ship through it,
+    # `wb deploy` would then push an unoptimized - and possibly weeks-old -
+    # binary while every check still said "deployed successfully". Hit for real
+    # on 2026-08-29: bazel-bin pointed at an 11-day-old 762MB fastbuild binary
+    # that did not contain the change under test. Latency numbers from a
+    # fastbuild broker are meaningless, so this must fail loudly, not warn.
+    _bin_cfg="$(readlink -f "$(dirname "$REDPANDA_BIN")" 2>/dev/null | grep -oE 'k8-[a-z]+' | head -1)"
+    if [ "$_bin_cfg" != "k8-opt" ]; then
+      note "BAD  bazel-bin points at '${_bin_cfg:-unknown}', not k8-opt."
+      note "     A fastbuild/dbg binary must never be benchmarked. Re-point it with:"
+      note "       cd $REDPANDA_SRC && bazel build //src/v/redpanda:redpanda -c opt --jobs=6 --local_resources=memory=16384"
+      note "     (and pass -c opt to bazel test too, or the next test run re-points it)"
+      bad=1
+    else
+      note "OK   config k8-opt"
+    fi
+  else
+    note "MISS $REDPANDA_BIN - build with: cd $REDPANDA_SRC && bazel build //src/v/redpanda:redpanda -c opt --jobs=6 --local_resources=memory=16384"
+    bad=1
+  fi
+  echo "=== terraform state ==="
+  if cluster_in_state; then
+    note "OK   cluster exists"
+    load_env refresh
+    note "     brokers(pub) $BROKER_PUB"
+    note "     BROKERS      $BROKERS"
+    note "     ADMIN_URL    $ADMIN_URL"
+    echo "=== cluster reachability ==="
+    if rsh broker0 true >/dev/null 2>&1; then note "OK   ssh broker0"; else note "FAIL ssh broker0"; bad=1; fi
+    if cluster_healthy; then note "OK   cluster healthy"; else note "FAIL cluster not healthy"; bad=1; fi
+  else
+    note "none - no cluster provisioned. Next: wb up single-az"
+    rm -f "$ENVFILE"   # stale facts would otherwise point at dead hosts
+  fi
+  echo
+  [ "$bad" -eq 0 ] && echo "wb doctor: all preconditions OK" || echo "wb doctor: PROBLEMS above"
+  return "$bad"
+}
+
+cmd_env() { load_env refresh; cat "$ENVFILE"; }
+
+# Terraform's AWS provider cannot reliably read the SSO cache: it has failed with
+# "the SSO session has expired or is invalid" against a session where
+# `aws sts get-caller-identity` succeeds. Exporting the session as plain env
+# credentials is what actually works.
+#
+# This was originally fixed in teardown only, after a failed destroy left 5
+# instances billing. On 2026-08-30 `wb up` hit the SAME failure - doctor reported
+# the session OK and terraform refused - because the fix had never been applied
+# here. Any terraform-invoking command must call this.
+export_aws_creds() {
+  local creds
+  creds="$(aws configure export-credentials --profile "$AWS_PROFILE" --format env 2>/dev/null)" || true
+  if [ -n "$creds" ]; then
+    note "exporting SSO session as env credentials (terraform's provider cannot read the SSO cache reliably)"
+    eval "$creds"
+  fi
+}
+
+cmd_up() {
+  local topo="${1:-single-az}"   # single-az | multi-az | highcore
+  command -v terraform >/dev/null || die "terraform not installed"
+  aws sts get-caller-identity >/dev/null 2>&1 || die "AWS session expired - run: aws sso login --profile $AWS_PROFILE"
+  export_aws_creds
+  [ -d "$TF/.terraform" ] || (cd "$TF" && terraform init -input=false) || die "terraform init failed"
+  # switch-topology.sh does the capacity probe and the instance-count check.
+  # It reads the public key from BENCH_PUB_KEY, defaulting to id_rsa.pub - the
+  # export below is why the right key gets imported.
+  ( cd "$TF" && BENCH_PUB_KEY="$BENCH_PUB_KEY" BENCH_SSH_KEY="$BENCH_SSH_KEY" \
+      bash "$HERE/switch-topology.sh" "$topo" ) || die "provisioning failed (capacity? see output above)"
+  load_env refresh
+  echo "wb: provisioned. next: wb deploy"
+}
+
+cmd_deploy() {
+  [ -f "$REDPANDA_BIN" ] || die "no local redpanda binary at $REDPANDA_BIN"
+  load_env
+  BENCH_SSH_KEY="$BENCH_SSH_KEY" REDPANDA_SRC="$REDPANDA_SRC" \
+  WASM_ORDERBOOK_SRC="$WASM_ORDERBOOK_SRC" \
+  ANSIBLE_PRIVATE_KEY_FILE="$BENCH_SSH_KEY" \
+    bash "$HERE/deploy-wasm-cluster.sh" "$@" || die "deploy failed"
+  # Verify the thing deploy exists to do actually happened. deploy-wasm-cluster.sh
+  # can report success for the ansible run while the binary on the brokers is
+  # unchanged, and a caller that only checks the exit code will not notice.
+  if binary_matches_everywhere; then
+    echo "wb: deployed and VERIFIED - all brokers running the local build"
+  else
+    die "deploy reported success but at least one broker is NOT running the local
+       build (see mismatches above). Do not measure until this is resolved."
+  fi
+}
+
+cmd_ready() {
+  # ANSIBLE_PRIVATE_KEY_FILE is required here - see header note 4.
+  ANSIBLE_PRIVATE_KEY_FILE="$BENCH_SSH_KEY" BENCH_SSH_KEY="$BENCH_SSH_KEY" \
+    bash "$ROOT/ansible/ensure-cluster-ready.sh" || die "readiness check failed"
+}
+
+# Every broker running the local build? Echoes a diagnosis, returns non-zero if not.
+#
+# Exists because `wb status` only PRINTED this. On 2026-09-02 a deploy failed, the
+# chain driving it checked the BUILD result but not the DEPLOY result, and three
+# trials then measured the previous binary - the histogram change under test was
+# never on the brokers. status said DIFFERS and nobody was reading it. cmd_run now
+# enforces it (see BINARY GATE there) instead of leaving it to whoever is watching.
+binary_matches_everywhere() {
+  local local_sha; local_sha=$(sha256sum "$REDPANDA_BIN" 2>/dev/null | cut -c1-16)
+  if [ -z "$local_sha" ]; then
+    echo "wb: no local redpanda binary at $REDPANDA_BIN" >&2
+    return 1
+  fi
+  local bad=0 t r
+  for t in broker0 broker1 broker2; do
+    r=$(rsh "$t" "sudo sha256sum $REMOTE_BIN 2>/dev/null | cut -c1-16" 2>/dev/null | tr -d '\r\n')
+    if [ "$r" != "$local_sha" ]; then
+      echo "wb:   $t sha=${r:-<none>} != local $local_sha" >&2
+      bad=1
+    fi
+  done
+  return "$bad"
+}
+
+cmd_status() {
+  load_env
+  echo "=== cluster ==="
+  cluster_healthy && note "healthy" || note "NOT HEALTHY"
+  echo "=== running binary vs local build ==="
+  local local_sha; local_sha=$(sha256sum "$REDPANDA_BIN" 2>/dev/null | cut -c1-16)
+  note "local  sha=$local_sha  ($(date -r "$REDPANDA_BIN" '+%Y-%m-%d %H:%M' 2>/dev/null))"
+  local i=0
+  for t in broker0 broker1 broker2; do
+    local r; r=$(rsh "$t" "sudo sha256sum $REMOTE_BIN 2>/dev/null | cut -c1-16" 2>/dev/null | tr -d '\r\n')
+    if [ "$r" = "$local_sha" ]; then note "$t sha=$r MATCHES local build"
+    else note "$t sha=$r DIFFERS from local build - run wb deploy before measuring"; fi
+    i=$((i+1))
+  done
+  echo "=== shard count (per-core arithmetic depends on this, do not assume vCPUs) ==="
+  rsh broker0 "curl -sf $ADMIN_URL/v1/brokers | jq -r '.[] | \"node \(.node_id): num_cores=\(.num_cores)\"'" 2>/dev/null
+  echo "=== transform / relay config ==="
+  for k in data_transforms_enabled data_transforms_max_instances_per_core \
+           data_transforms_per_function_memory_limit data_transforms_per_core_memory_reservation \
+           data_transforms_scheduling_group_shares data_transforms_runtime_limit_ms \
+           relay_enabled relay_port relay_max_queue_size readers_cache_target_max_size \
+           kafka_fetch_read_coalescing_enabled; do
+    printf '  %-52s = %s\n' "$k" "$(rsh broker0 "rpk cluster config get $k" 2>/dev/null | tr -d '\r\n')"
+  done
+  echo "=== pending restarts (desired != booted) ==="
+  rsh broker0 "rpk cluster config status" 2>/dev/null | head -5
+  echo "=== clock sync residual (the error bar on any cross-clock stage) ==="
+  _targets="broker0 broker1 broker2"
+  _nc=$(echo "$CLIENT_PUB" | wc -w)
+  for _i in $(seq 0 $((_nc - 1))); do _targets="$_targets client$_i"; done
+  for t in $_targets; do
+    printf '  %-8s %s\n' "$t" "$(rsh "$t" "chronyc -n tracking 2>/dev/null | awk -F': *' '/RMS offset|Reference ID/{printf \"%s=%s  \", \$1, \$2}'" 2>/dev/null | tr -s ' ')"
+  done
+}
+
+cmd_restart() {
+  load_env
+  echo "=== rolling restart, health-gated between nodes ==="
+  for t in broker0 broker1 broker2; do
+    note "restarting $t"
+    rsh "$t" "sudo systemctl restart redpanda" || die "$t restart failed"
+    sleep 10
+    wait_kafka_api "$t" || die "$t never resumed serving Kafka - stopping rather than rolling the rest"
+    wait_healthy || die "cluster not fully healthy after restarting $t - stopping rather than rolling the rest (a benchmark started now would measure leadership churn)"
+  done
+  echo "wb: rolling restart complete"
+}
+
+cmd_set() {
+  local prop="${1:?usage: wb set <property> <value>}" val="${2:?usage: wb set <property> <value>}"
+  load_env
+  local needs=0
+  echo "$NEEDS_RESTART_PROPS" | tr ' ' '\n' | grep -qx "$prop" && needs=1
+  note "setting $prop=$val"
+  rsh broker0 "rpk cluster config set $prop $val" >/dev/null || die "config set failed"
+  if [ "$needs" -eq 1 ]; then
+    echo "wb: $prop is needs_restart - the running brokers keep their BOOT value until"
+    echo "    restarted, while 'rpk cluster config get' already reports the new one."
+    echo "    Rolling the cluster now so the value is actually in effect."
+    cmd_restart
+  else
+    note "takes effect live; no restart needed"
+  fi
+}
+
+cmd_run() {
+  local phase="${1:?usage: wb run e1|e2 [KEY=VAL ...]}"; shift || true
+  load_env
+  local script
+  case "$phase" in
+    e1) script=run-e1-ceiling.sh ;;
+    e2) script=run-e2-throughput.sh ;;
+    # Round 3 drives BOTH arms of the in-broker-vs-external comparison itself.
+    # It exists so the invariant "both arms identical except CONSUMER_ARM" is
+    # enforced by code rather than by remembering to set five variables the same
+    # way twice. Takes the same KEY=VALUE args as e2.
+    round3) script=run-round3.sh ;;
+    josh236) script=run-josh236.sh ;;
+    # Round 4 drives both arms (consumers spread across all shards vs
+    # pinned to one) and refuses to run with stage metrics off, since
+    # recording the relay stage histograms at saturation is the entire
+    # point. Takes the same KEY=VALUE args as e2.
+    round4) script=run-round4.sh ;;
+    *) die "unknown phase '$phase' (want e1, e2, round3, josh236 or round4)" ;;
+  esac
+  # Everything the runners need, so a caller never has to remember it.
+  # BINARY GATE. A measurement against the wrong binary is worse than no
+  # measurement: it looks exactly like a real result and silently answers a
+  # different question. Refuse rather than warn - a warning is what failed on
+  # 2026-09-02. WB_SKIP_BINARY_GATE=1 overrides, for deliberately measuring a
+  # release build against a local dev tree.
+  if [ "${WB_SKIP_BINARY_GATE:-0}" != "1" ]; then
+    if ! binary_matches_everywhere; then
+      die "REFUSING TO RUN: at least one broker is not running your local build.
+       Run './wb deploy' and re-check with './wb status'. If the mismatch is
+       intentional, set WB_SKIP_BINARY_GATE=1 to proceed."
+    fi
+    echo "wb: binary gate OK - all brokers running the local build"
+  fi
+
+  local base="cd $REMOTE_TOOLS && export BIN=. RPK=./rpk BROKERS=$BROKERS ADMIN_URL=$ADMIN_URL ADMIN_URLS=$ADMIN_URLS RUN_ID=\$(date +%s)"
+  # Values must be single-quoted on the way out. Unquoted, a multi-word value
+  # like PARTITION_LEVELS="1 2 4 8 13" becomes `export PARTITION_LEVELS=1` and
+  # the remaining words are executed as commands - which silently ran a
+  # five-level sweep as a one-level sweep. Reject a value containing a single
+  # quote rather than trying to escape it.
+  local extra=""
+  for kv in "$@"; do
+    case "$kv" in
+      *=*) ;;
+      *) die "run arguments must be KEY=VALUE (got '$kv')" ;;
+    esac
+    case "$kv" in
+      *\'*) die "single quotes are not supported in run arguments: $kv" ;;
+    esac
+    extra="$extra export ${kv%%=*}='${kv#*=}';"
+  done
+  echo "=== wb run $phase $* ==="
+  # A sweep runs for many minutes, so the short default ssh cap does not apply
+  # here - 12h is effectively "no limit" while still bounding a wedged host.
+  # Keepalives stop an idle-looking connection being dropped mid-experiment.
+  local log="/tmp/wb-run-$phase-$(date +%s).log"
+  echo "wb: streaming to $log (tail -f it for live progress)"
+  # tee writes the full log live; the filtered view is streamed rather than
+  # buffered through tail, so progress is visible as it happens instead of only
+  # at the end.
+  RSH_TIMEOUT="${RSH_TIMEOUT:-43200}" rsh client0 "$base; $extra bash $script" 2>&1 \
+    | tee "$log" \
+    | grep --line-buffered -vE '^(Delete successful|TOPIC|OK$|[a-z0-9-]+ +OK$)'
+  local rc=${PIPESTATUS[0]}
+  echo "wb: full output -> $log"
+  if [ "$rc" -ne 0 ]; then
+    echo "wb: WARNING - the remote runner exited $rc. If that is 124 the ssh hit"
+    echo "    RSH_TIMEOUT; results for completed levels are still on the client."
+  fi
+  echo "wb: fetch result JSON with: wb results"
+}
+
+cmd_results() {
+  load_env
+  local dest="${1:-$WASM_ORDERBOOK_SRC/bench/results/cloud-$(date +%Y%m%d-%H%M%S)}"
+  mkdir -p "$dest"
+  local h; h="$(resolve_host client0)"
+  rsync -az -e "ssh -i $BENCH_SSH_KEY ${SSH_OPTS[*]}" \
+    "ubuntu@$h:$REMOTE_TOOLS/results/" "$dest/" 2>/dev/null \
+    || die "rsync failed (no results yet?)"
+  echo "wb: results -> $dest"
+  find "$dest" -name '*.json' | head -20
+}
+
+cmd_ssh() {
+  local t="${1:?usage: wb ssh <broker0..2|client0..1> [command]}"; shift || true
+  if [ $# -eq 0 ]; then
+    local h; h="$(resolve_host "$t")"
+    exec ssh -i "$BENCH_SSH_KEY" "${SSH_OPTS[@]}" "ubuntu@$h"
+  fi
+  rsh "$t" "$@"
+}
+
+cmd_logs() {
+  local t="${1:-broker0}" n="${2:-80}"
+  rsh "$t" "sudo journalctl -u redpanda --no-pager -n $n"
+}
+
+cmd_teardown() {
+  local yes="${1:-}"
+  [ -d "$TF/.terraform" ] || die "no terraform state - nothing to tear down"
+  if [ "$yes" != "--yes" ]; then
+    echo "This destroys the cluster (3 brokers + 2 clients). Re-run with --yes to confirm:"
+    echo "  wb teardown --yes"
+    return 1
+  fi
+  # Terraform's AWS provider could NOT consume the SSO cache even while
+  # `aws sts get-caller-identity` succeeded - it failed with "failed to refresh
+  # cached credentials, the SSO session has expired" against a perfectly valid
+  # session, and left 5 instances billing. Exporting the session as plain env
+  # credentials is what actually works, so do it unconditionally rather than
+  # discovering it during a teardown.
+  export_aws_creds
+  ( cd "$TF" && terraform destroy -auto-approve \
+      -var-file="$TFVARS_SINGLE" -var="public_key_path=$BENCH_PUB_KEY" ) \
+    || die "destroy failed - CHECK THE CONSOLE, instances may still be billing"
+
+  verify_torn_down
+  rm -f "$ENVFILE"
+}
+
+# Verify against the API, not terraform state - an empty state is not proof, and
+# this account has both auto-removed infra on its own AND kept billing after an
+# apparently-successful destroy. Instances are only the most visible cost:
+# detached EBS volumes and unassociated Elastic IPs bill on their own, and a
+# leftover VPC blocks the next apply. All four are checked by the owner tag that
+# terraform puts on every resource, so nothing unrelated in the account is
+# counted.
+verify_torn_down() {
+  local region="${AWS_REGION:-us-east-2}" owner="rp-percore-benchmark" bad=0
+  export_aws_creds
+  echo ""
+  echo "=== teardown verification (owner=$owner, region=$region) ==="
+
+  local inst
+  inst="$(aws ec2 describe-instances --region "$region" \
+    --filters "Name=tag:owner,Values=$owner" \
+              "Name=instance-state-name,Values=running,pending,stopping,stopped" \
+    --query 'Reservations[].Instances[].[InstanceId,InstanceType,State.Name]' \
+    --output text 2>/dev/null)"
+  if [ -n "$inst" ]; then
+    echo "  STILL PRESENT - instances (billing while running):"; echo "$inst" | sed 's/^/    /'; bad=1
+  else echo "  ok: no instances"; fi
+
+  # "available" means detached. A detached gp3 volume bills at full rate.
+  local vols
+  vols="$(aws ec2 describe-volumes --region "$region" \
+    --filters "Name=tag:owner,Values=$owner" "Name=status,Values=available" \
+    --query 'Volumes[].[VolumeId,Size,VolumeType]' --output text 2>/dev/null)"
+  if [ -n "$vols" ]; then
+    echo "  STILL PRESENT - unattached EBS volumes (billing):"; echo "$vols" | sed 's/^/    /'; bad=1
+  else echo "  ok: no unattached volumes"; fi
+
+  # An EIP not associated with a running instance bills hourly.
+  local eips
+  eips="$(aws ec2 describe-addresses --region "$region" \
+    --filters "Name=tag:owner,Values=$owner" \
+    --query 'Addresses[?AssociationId==`null`].[PublicIp,AllocationId]' \
+    --output text 2>/dev/null)"
+  if [ -n "$eips" ]; then
+    echo "  STILL PRESENT - unassociated Elastic IPs (billing):"; echo "$eips" | sed 's/^/    /'; bad=1
+  else echo "  ok: no unassociated EIPs"; fi
+
+  # A VPC is free but blocks the next apply and strands subnets/gateways.
+  local vpcs
+  vpcs="$(aws ec2 describe-vpcs --region "$region" \
+    --filters "Name=tag:owner,Values=$owner" \
+    --query 'Vpcs[].[VpcId,CidrBlock]' --output text 2>/dev/null)"
+  if [ -n "$vpcs" ]; then
+    echo "  STILL PRESENT - VPCs (no direct cost, blocks the next apply):"; echo "$vpcs" | sed 's/^/    /'; bad=1
+  else echo "  ok: no VPCs"; fi
+
+  echo ""
+  if [ "$bad" -eq 0 ]; then
+    echo "wb: VERIFIED CLEAN - nothing tagged $owner remains in $region."
+  else
+    echo "wb: *** NOT CLEAN *** - resources above still exist and some are billing." >&2
+    echo "    Remove them before considering this torn down." >&2
+    return 1
+  fi
+}
+
+# Clear benchmark transforms/topics left behind by a killed run.
+#
+# run-e2-throughput.sh now traps TERM/INT/HUP and cleans up after itself, so
+# this should rarely be needed. It exists because the previous advice printed by
+# assert_no_concurrent_run was "clean up with cleanup_every_test_artifact" - a
+# function inside a library on the remote host, which an operator has no way to
+# call. Unrunnable advice in an error message is not advice.
+#
+# Deliberately refuses while a runner is alive: this deletes topics unscoped,
+# which would corrupt a genuinely concurrent run.
+cmd_cleanup_orphans() {
+  load_env
+  local force=0
+  case "${1:-}" in --force) force=1 ;; esac
+
+  if [ "$force" -eq 0 ] && pgrep -f 'run-e2-throughput.sh|wb run ' >/dev/null 2>&1; then
+    echo "wb: a benchmark runner still looks alive on this host:" >&2
+    pgrep -af 'run-e2-throughput.sh|wb run ' | sed 's/^/    /' >&2
+    die "refusing to clean up while a run is in flight (this deletes topics unscoped).
+     Wait for it, or pass --force if you are certain those processes are stale."
+  fi
+
+  local existing
+  existing="$(rsh client0 "cd $REMOTE_TOOLS && ./rpk transform list -X brokers=$BROKERS 2>/dev/null | tail -n +2 | awk '{print \$1}'" || true)"
+  if [ -z "$existing" ]; then
+    echo "wb: no benchmark transforms present - nothing to clean up"
+    return 0
+  fi
+  echo "wb: removing these transforms and their run-scoped topics:"
+  echo "$existing" | sed 's/^/    /'
+
+  rsh client0 "cd $REMOTE_TOOLS && \
+    ./rpk transform list -X brokers=$BROKERS 2>/dev/null | tail -n +2 | awk '{print \$1}' | \
+      while read -r t; do [ -n \"\$t\" ] && ./rpk transform delete \"\$t\" --no-confirm -X brokers=$BROKERS >/dev/null 2>&1; done; \
+    sleep 4; \
+    ./rpk topic list -X brokers=$BROKERS 2>/dev/null | awk '/^(orders|fills|probe-out|probe-sink)-e[0-9]/{print \$1}' | \
+      while read -r tp; do ./rpk topic delete \"\$tp\" -X brokers=$BROKERS >/dev/null 2>&1; done"
+
+  local left
+  left="$(rsh client0 "cd $REMOTE_TOOLS && ./rpk transform list -X brokers=$BROKERS 2>/dev/null | tail -n +2 | awk '{print \$1}'" || true)"
+  if [ -n "$left" ]; then
+    echo "wb: WARNING - transforms still present after cleanup:" >&2
+    echo "$left" | sed 's/^/    /' >&2
+    return 1
+  fi
+  echo "wb: clean - zero benchmark transforms remain"
+}
+
+case "${1:-}" in
+  doctor)   shift; cmd_doctor "$@" ;;
+  env)      shift; cmd_env "$@" ;;
+  up)       shift; cmd_up "$@" ;;
+  deploy)   shift; cmd_deploy "$@" ;;
+  ready)    shift; cmd_ready "$@" ;;
+  status)   shift; cmd_status "$@" ;;
+  restart)  shift; cmd_restart "$@" ;;
+  set)      shift; cmd_set "$@" ;;
+  run)      shift; cmd_run "$@" ;;
+  results)  shift; cmd_results "$@" ;;
+  ssh)      shift; cmd_ssh "$@" ;;
+  logs)     shift; cmd_logs "$@" ;;
+  teardown) shift; cmd_teardown "$@" ;;
+  verify-clean) shift; verify_torn_down "$@" ;;
+  cleanup-orphans) shift; cmd_cleanup_orphans "$@" ;;
+  reproduce) shift; exec bash "$(dirname "${BASH_SOURCE[0]}")/reproduce.sh" "$@" ;;
+  ""|-h|--help|help)
+    sed -n '/^# Usage:/,/^set -uo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d' ;;
+  *) die "unknown command '$1' - run: wb help" ;;
+esac

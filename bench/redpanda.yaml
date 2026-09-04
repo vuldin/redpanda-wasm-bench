@@ -1,0 +1,53 @@
+redpanda:
+  data_directory: bench/cluster-data
+  node_id: 0
+  developer_mode: true
+  seed_servers: []
+  # Data transforms must be enabled for any wasm guest to deploy. These
+  # mirror bench/bootstrap-cluster.sh's rpk-based settings, but set here so
+  # the node comes up fully configured on first boot (no set-then-restart
+  # dance) for local relay testing.
+  data_transforms_enabled: true
+  # data_transforms_per_function_memory_limit/data_transforms_max_instances_per_core
+  # are cluster config, not node config - despite living under this
+  # `redpanda:` key, redpanda only bootstraps cluster config from these
+  # values on a truly first-ever cluster start (empty data directory);
+  # any later restart on a reused data directory ignores them entirely
+  # ("Unknown property ... for node config store" in the log).
+  # bench/run-relay-wasm-fanout.sh also sets both explicitly via `rpk
+  # cluster config set` every run, but confirmed for real that alone is
+  # NOT sufficient on an already-running broker: the wasm engine's
+  # memory pool is sized once at startup from whatever value was live
+  # at that moment, and a live `cluster config set` updates the config
+  # store without resizing it (crash-loops forever at the old ceiling,
+  # `cluster config status` misleadingly reports NEEDS-RESTART: false).
+  # These yaml values matter because they're what a from-scratch local
+  # sandbox boots with - keep them raised so a fresh `rm -rf
+  # cluster-data` run doesn't need an extra restart cycle to get a
+  # correctly-sized pool. If reusing an existing data directory after
+  # changing these, restart the broker before deploying anything.
+  data_transforms_per_function_memory_limit: 4194304
+  data_transforms_max_instances_per_core: 100
+  data_transforms_runtime_limit_ms: 30000
+  # Push-based consumer delivery (src/v/relay/) - fans transform output out
+  # to push consumers over TCP, bypassing the Kafka fetch path. With --smp 1
+  # the relay listens on relay_port (9093) + shard 0 = 9093.
+  relay_enabled: true
+  relay_port: 9093
+  rpc_server:
+    address: 127.0.0.1
+    port: 33146
+  kafka_api:
+    - address: 127.0.0.1
+      port: 19093
+  admin:
+    - address: 127.0.0.1
+      port: 9645
+rpk:
+  enable_usage_stats: false
+  admin_api:
+    addresses:
+      - 127.0.0.1:9645
+  kafka_api:
+    brokers:
+      - 127.0.0.1:19093
