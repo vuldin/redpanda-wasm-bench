@@ -6,3 +6,4 @@
 /terraform/region.auto.tfvars
 /terraform/clients.auto.tfvars
 /bin/
+/loadgen

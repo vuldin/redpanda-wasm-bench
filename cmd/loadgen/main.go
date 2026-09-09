@@ -152,11 +152,19 @@ type configReport struct {
 	// Acks is fingerprinted because it is the DOMINANT e2e term - a run at
 	// acks=leader is not comparable with one at acks=all, and the difference
 	// is a durability trade rather than a tuning choice.
-	Acks          string `json:"producer_acks"`
-	Producers     int    `json:"producers"`
-	InputTopic    string `json:"input_topic"`
-	ProbeTopic    string `json:"probe_topic"`
-	TransformName string `json:"transform_name"`
+	Acks      string `json:"producer_acks"`
+	Producers int    `json:"producers"`
+	// Fingerprinted because they dominate the tail during a leadership move
+	// and nothing else in the report would reveal which setting was used. At
+	// franz-go's defaults a maintenance drain produced a produce p99 of 4.72s
+	// while the broker's own handling stayed at 0.18ms - so a run at the
+	// defaults and a run tuned for fast leader rediscovery are not comparable,
+	// and the difference is entirely client-side.
+	MetadataMinAge  string `json:"metadata_min_age"`
+	RetryBackoffMax string `json:"retry_backoff_max"`
+	InputTopic      string `json:"input_topic"`
+	ProbeTopic      string `json:"probe_topic"`
+	TransformName   string `json:"transform_name"`
 }
 
 // errorTally counts produce failures by their error string, bounded so a
@@ -897,6 +905,18 @@ func main() {
 				"stamps before the producer's quorum ack returns. 0 means unknown, and the report "+
 				"then says it cannot distinguish them rather than guessing.")
 
+		metadataMinAge = flag.Duration("metadata-min-age", 5*time.Second,
+			"how soon the client may re-fetch metadata after a NOT_LEADER. "+
+				"franz-go's default is 5s, and that default IS the multi-second "+
+				"produce tail during a leadership move - the record waits here, "+
+				"not in the broker. franz-go's floor is 10ms; 100ms recovers "+
+				"quickly without letting a large fleet hammer the cluster for "+
+				"metadata. Left at the default so existing results stay "+
+				"comparable; lower it deliberately and the value is recorded")
+		retryBackoffMax = flag.Duration("retry-backoff-max", 5*time.Second,
+			"cap on the produce retry backoff. franz-go's default escalates "+
+				"250ms->5s, so a couple of failed attempts during a transfer add "+
+				"seconds of their own on top of the metadata wait")
 		rate     = flag.Float64("rate", 1000, "offered rate in ORDERS (crossing pairs, so two records) per second. 0 sends as fast as possible, which measures the client's own ceiling as much as the broker's")
 		duration = flag.Duration("duration", 30*time.Second, "length of the timed window")
 		warmup   = flag.Duration("warmup", 5*time.Second, "length of the warmup window; its records are produced and its receipts discarded, absorbing VM cold start and connection/metadata setup")
@@ -984,6 +1004,20 @@ func main() {
 			// Per client. Total client-side buffering is this times -producers,
 			// which is part of why more clients raises the achievable rate.
 			kgo.MaxBufferedRecords(*maxBuffered),
+			// See the flag help: at the defaults these two are the whole tail
+			// during a leadership move, and none of it is broker-side.
+			kgo.MetadataMinAge(*metadataMinAge),
+			kgo.RetryBackoffFn(func(fails int) time.Duration {
+				base := 250 * time.Millisecond
+				if *retryBackoffMax < base {
+					base = *retryBackoffMax
+				}
+				d := base << min(fails, 5)
+				if d > *retryBackoffMax {
+					return *retryBackoffMax
+				}
+				return d
+			}),
 		)
 		return kgo.NewClient(opts...)
 	}
@@ -1335,6 +1369,7 @@ func main() {
 			OfferedRate: *rate, Duration: duration.String(), Warmup: warmup.String(),
 			Pacing: *pacing, PayloadBytes: *payloadBytes, NumProbes: *numProbes,
 			SampleEvery: *sampleEvery, MaxBuffered: *maxBuffered, KeyByPair: *keyByPair, LingerMs: *lingerMs, Acks: *acksMode, Producers: *numProducers,
+			MetadataMinAge: metadataMinAge.String(), RetryBackoffMax: retryBackoffMax.String(),
 			InputTopic: *inputTopic, ProbeTopic: *probeTopic, TransformName: *transformName,
 		},
 		Clock: clockReport{
