@@ -659,6 +659,9 @@
         - run-traditional-sharded.sh
         - run-inbroker-vs-external.sh
         - run-cloud-fanout-comparison.sh
+        # Optional resilience series. Also sources lib-cluster.sh, so it has
+        # the same same-directory requirement as the other runners.
+        - run-resilience.sh
 
     - name: Own the tool directory
       file: { path: /opt/wasm-bench, state: directory, owner: ubuntu, group: ubuntu, recurse: true }

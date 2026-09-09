@@ -68,7 +68,8 @@ echo "    matcher md5: $(md5sum "$STAGE_DIR/wasm-matcher.wasm" | cut -d' ' -f1)"
 echo "--- benchmark scripts ---"
 for f in check-bottlenecks.sh scrape-metrics.sh lib-cluster.sh \
          run-e2-throughput.sh run-traditional-sharded.sh \
-         run-inbroker-vs-external.sh run-cloud-fanout-comparison.sh; do
+         run-inbroker-vs-external.sh run-cloud-fanout-comparison.sh \
+         run-resilience.sh; do
   cp "$BENCH_SRC/bench/$f" "$STAGE_DIR/" \
     || { echo "FAIL: missing bench/$f" >&2; exit 1; }
 done
