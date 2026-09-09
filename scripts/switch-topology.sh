@@ -51,13 +51,49 @@ case "$TOPOLOGY" in
   *) echo "unknown topology '$TOPOLOGY' - want multi-az, single-az or highcore" >&2; exit 1 ;;
 esac
 
-EXPECT_BROKERS=$(grep -oP '^broker_count\s*=\s*\K[0-9]+' "$TFVARS")
-EXPECT_CLIENTS=$(grep -oP '^client_count\s*=\s*\K[0-9]+' "$TFVARS")
+# The *.auto.tfvars overlays (region.auto.tfvars from select-region.sh,
+# clients.auto.tfvars from size-clients.sh) have to be passed EXPLICITLY, and
+# after $TFVARS, or they do nothing.
+#
+# Terraform's precedence is: *.auto.tfvars first, then any -var-file given on
+# the command line, then -var. So an explicit `-var-file=$TFVARS` OVERRIDES an
+# auto-loaded overlay - the opposite of what those files' own headers used to
+# claim. The effect was silent: both overlays were dead weight, and only looked
+# like they worked because the topology file happened to name the same region,
+# AZ and counts. Observed 2026-09-09, when clients.auto.tfvars asked for 1
+# client and terraform provisioned 8.
+#
+# That mattered most for region fallback, which is select-region.sh's entire
+# purpose: had it fallen back to another region, the overlay would have been
+# ignored, terraform would have provisioned in the ORIGINAL region, and the
+# run would have been labelled with a region it did not use.
+OVERLAY_ARGS=()
+for overlay in region.auto.tfvars clients.auto.tfvars; do
+  [ -f "$overlay" ] && OVERLAY_ARGS+=(-var-file="$overlay")
+done
+
+# The expectation the plan is checked against must come from the SAME merged
+# view terraform will use, or a legitimate overlay looks like a mismatch and
+# the plan is rejected. Last file that defines the variable wins, matching
+# terraform's own ordering.
+merged_var() {
+  local name="$1" val="" f
+  for f in "$TFVARS" region.auto.tfvars clients.auto.tfvars; do
+    [ -f "$f" ] || continue
+    local got
+    got=$(grep -oP "^${name}\s*=\s*\K[0-9]+" "$f" | tail -1)
+    [ -n "$got" ] && val="$got"
+  done
+  echo "$val"
+}
+EXPECT_BROKERS=$(merged_var broker_count)
+EXPECT_CLIENTS=$(merged_var client_count)
 PUBKEY="${BENCH_PUB_KEY:-$HOME/.ssh/id_rsa.pub}"
 PLAN_FILE=/tmp/topology-switch.plan
 
-echo "=== planning $TOPOLOGY ($TFVARS, expecting $EXPECT_BROKERS brokers / $EXPECT_CLIENTS clients) ==="
-terraform plan -var-file="$TFVARS" -var="public_key_path=$PUBKEY" -out="$PLAN_FILE"
+echo "=== planning $TOPOLOGY ($TFVARS${OVERLAY_ARGS[*]:+ + overlays}, expecting $EXPECT_BROKERS brokers / $EXPECT_CLIENTS clients) ==="
+terraform plan -var-file="$TFVARS" "${OVERLAY_ARGS[@]}" \
+  -var="public_key_path=$PUBKEY" -out="$PLAN_FILE"
 
 echo "=== verifying the plan actually results in that many instances before applying ==="
 read -r GOT_BROKERS GOT_CLIENTS < <(terraform show -json "$PLAN_FILE" | python3 -c "
