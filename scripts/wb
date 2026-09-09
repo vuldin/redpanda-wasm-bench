@@ -453,7 +453,7 @@ cmd_set() {
 }
 
 cmd_run() {
-  local phase="${1:?usage: wb run e1|e2 [KEY=VAL ...]}"; shift || true
+  local phase="${1:?usage: wb run e1|e2|round3|round4|resilience [KEY=VAL ...]}"; shift || true
   load_env
   local script
   case "$phase" in
@@ -465,12 +465,20 @@ cmd_run() {
     # way twice. Takes the same KEY=VALUE args as e2.
     round3) script=run-round3.sh ;;
     josh236) script=run-josh236.sh ;;
+    # OPTIONAL resilience series: injects maintenance mode / a leadership
+    # transfer while measuring, and reports what latency did during it plus how
+    # long it took to return to baseline. Deliberately NOT part of `reproduce`
+    # - the published tables are steady-state, and folding a disturbance into
+    # them would make them incomparable. Runs through cmd_run so it inherits
+    # the binary gate; measuring resilience against the wrong binary is the
+    # same trap as measuring latency against it.
+    resilience) script=run-resilience.sh ;;
     # Round 4 drives both arms (consumers spread across all shards vs
     # pinned to one) and refuses to run with stage metrics off, since
     # recording the relay stage histograms at saturation is the entire
     # point. Takes the same KEY=VALUE args as e2.
     round4) script=run-round4.sh ;;
-    *) die "unknown phase '$phase' (want e1, e2, round3, josh236 or round4)" ;;
+    *) die "unknown phase '$phase' (want e1, e2, round3, josh236, round4 or resilience)" ;;
   esac
   # Everything the runners need, so a caller never has to remember it.
   # BINARY GATE. A measurement against the wrong binary is worse than no

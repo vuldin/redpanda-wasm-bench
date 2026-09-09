@@ -258,6 +258,44 @@ node_num_cores() {
     '.[] | select(.node_id==$n) | .num_cores'
 }
 
+# --- maintenance mode -------------------------------------------------------
+#
+# Maintenance is a LEADERSHIP DRAIN, not a data move: it blocks new leadership
+# for the node and transfers away every partition it leads. Replicas stay put.
+# That is why it is the cheapest way to make a transform move - and why the
+# transform follows without anything in the cluster layer knowing transforms
+# exist.
+
+maintenance_enable() {
+  local node="$1"
+  # --wait blocks until the node reports drained, so the caller knows the
+  # leadership move has actually happened rather than merely been requested.
+  rpkc cluster maintenance enable "$node" --wait 2>&1 | tail -2
+}
+
+maintenance_disable() {
+  local node="$1"
+  rpkc cluster maintenance disable "$node" 2>&1 | tail -1
+}
+
+# Leaves no node in maintenance. Safe to call when none is - disable on an
+# inactive node is a no-op - so it works as an unconditional cleanup step.
+maintenance_clear_all() {
+  local ids
+  ids=$(curl -sf "$ADMIN_URL/v1/brokers" 2>/dev/null | jq -r '.[].node_id' 2>/dev/null)
+  local n
+  for n in $ids; do
+    rpkc cluster maintenance disable "$n" >/dev/null 2>&1 || true
+  done
+}
+
+# The node currently leading a partition, for choosing a victim to drain.
+leader_of() {
+  local topic="$1" partition="${2:-0}"
+  curl -sf "$ADMIN_URL/v1/partitions/kafka/$topic/$partition" 2>/dev/null \
+    | jq -r '.leader_id // empty'
+}
+
 wait_for_move() {
   local topic="$1" partition="$2" want_node="$3" want_core="$4"
   local now_node now_core
