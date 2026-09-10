@@ -215,6 +215,46 @@ arms emit duplicates (30 and 42) and the drain arms eliminate them - so "the
 drain costs the produce path nothing" is a statement about a drain that
 demonstrably did work, rather than about one that had nothing to do.
 
+### Second run, with the full field set
+
+Same cluster shape, 200 ms budget (the new default), all four arms:
+
+| arm | produce p99 | total p99 | total max | over 10 ms | dups |
+|---|---|---|---|---|---|
+| maintenance, no drain | 592 -> **596** | 1,307 -> 1,319 | 9,389 -> 6,847 | 0 -> 0 | 0 |
+| maintenance, 200 ms | 524 -> **799** | 1,160 -> 223,811 | 3,777 -> 376,286 | 0 -> 732 | **0** |
+| transfer, no drain | 573 -> **732** | 1,508 -> 1,292 | 202,304 -> 205,692 | 386 -> 198 | 42 |
+| transfer, 200 ms | 592 -> **684** | 1,307 -> 66,874 | 21,532 -> 364,146 | 13 -> 358 | **0** |
+
+Produce p99 stays between 596 and 799 us in every arm, so the produce-path fix
+holds across both actions and both budgets. The e2e cost continues to scale
+with the budget: 224 ms at a 200 ms budget against 875 ms at 1000 ms.
+
+What the counts add: on the 200 ms maintenance arm, 732 of 30,000 sampled
+records (2.4%) exceeded 10 ms and 550 (1.8%) exceeded 100 ms, while p50 and p90
+were untouched at 868 / 945 us. "p99 = 224 ms" on its own reads as a
+fleet-wide stall; it is closer to a 2% tail.
+
+And the timeline shows the disturbance is several discrete events rather than
+one continuous stall - consistent with maintenance moving each partition
+independently, each draining separately:
+
+```
+t=+3000ms   n=500  p50=928us     p99=371,344us  max=376,286us
+t=+3500ms   n=500  p50=898us     p99=194,432us  max=199,412us
+t=+13000ms  n=500  p50=863us     p99=5,587us    max=10,311us
+t=+23000ms  n=500  p50=120,605us p99=363,659us  max=367,795us
+```
+
+The last bucket has a p50 of 120 ms - half the records offered in that 500 ms
+were affected. No window aggregate conveys that.
+
+One caveat on duplicates: `transfer, no drain` reported 42 in both runs, but
+`maintenance, no drain` reported 30 in the first run and 0 in the second. The
+no-drain duplicate count is not reliably reproducible, so treat "the drain
+eliminates duplicates" as established by the arms where the no-drain side
+actually produced some.
+
 ---
 
 ## Recovery
@@ -222,36 +262,51 @@ demonstrably did work, rather than about one that had nothing to do.
 Every arm returned to baseline within ~20 s, on both the drained and undrained
 paths - with one exception that is worth understanding, because it recurs.
 
-### A first-arm "DID NOT RECOVER" is usually the harness, not the cluster
+### A first-arm "DID NOT RECOVER" happened once and did not reproduce
 
-On the 2026-09-09 opt run the first arm reported DID NOT RECOVER within 180 s,
-sitting at 1,066-1,478 us against its own 740 us baseline. That verdict is an
-artifact, and the cause is that all arms in one invocation SHARE one set of
-topics (`orders-res-$RUN_ID`), so the log grows monotonically underneath the
-series and never resets. Arm 1's baseline is measured on an almost empty log;
-its recovery windows run against a much larger one.
+On the first 2026-09-09 opt run the first arm reported DID NOT RECOVER within
+180 s, sitting at 1,066-1,478 us against its own 740 us baseline, and that
+run's per-arm baselines drifted monotonically: 740 -> 1,067 -> 1,114 ->
+1,195 us. The explanation offered at the time was that all arms in one
+invocation share one set of topics (`orders-res-$RUN_ID`), so the log grows
+underneath the series and arm 1's baseline is measured on an almost empty log
+while its recovery windows run against a much larger one.
 
-Four things confirm it rather than one:
+**A second run with the identical harness did not reproduce it.** Baselines
+came in at 1,307 -> 1,160 -> 1,508 -> 1,307 us - no trend - and every arm
+recovered inside 20 s. The shared-topic design was unchanged, so a mechanism
+driven by log growth would have to produce the drift every time. It did not.
+Treat the log-growth account as unconfirmed; the observation was real for that
+run, the explanation was over-claimed.
 
-- baselines drifted monotonically across the four arms, 740 -> 1,067 -> 1,114
-  -> 1,195 us, as the shared topic grew to 1.52 M records
-- arm 1's "unrecovered" range lands INSIDE the later arms' baselines, so its
-  unrecovered state is simply normal steady state at that log size
-- a separate invocation with fresh topics baselined back down at 824 us and
-  recovered in 90 s
-- it is the same drift this doc already reported across runs; it just also
-  operates within a run
+`leader_balancer_mute_timeout` is worth knowing separately: it defaults to
+300 s, longer than the 180 s recovery budget, so a node leaving maintenance
+genuinely cannot be given leadership back within the measurement. That is a
+real effect on post-maintenance balance, but it is not what produced the
+verdict - the arms that recovered were under the same mute.
 
-The plausible alternative was checked and rejected:
-`leader_balancer_mute_timeout` is 300 s, longer than the 180 s recovery budget,
-so a node leaving maintenance genuinely cannot be given leadership back in
-time - but that would have blocked the fresh-topic arm too, and it recovered in
-90 s.
+### What the richer fields DID establish: the baselines are not quiet
 
-The fix is to stop comparing an empty-log baseline against a full-log recovery:
-either prime the log before the first baseline, or redefine "recovered" as
-"p99 has stabilised" rather than "p99 is back under a number measured earlier".
-Until then, read a first-arm non-recovery against the later arms' baselines.
+The second run's `transfer-nodrain` **baseline** carried 386 records over
+10 ms and 206 over 100 ms, with p999 172 ms and max 202 ms - while its
+p50/p90/p99 read a clean 891 / 1,072 / 1,508 us. The timeline shows it as two
+discrete ~200 ms events inside an undisturbed window:
+
+```
+t=+28500ms  p99=196,853us  max=202,304us
+t=+52000ms  p99=196,903us  max=202,252us
+```
+
+Arms run back to back with no settling period, so one arm's residual can land
+in the next arm's baseline, and a baseline containing 200 ms outliers makes any
+"return to baseline" judgement meaningless in both directions. This is a better
+supported account of cross-arm contamination than log growth, and it was
+invisible until max/p999/over-threshold counts were reported - which is the
+argument for reporting them.
+
+The fix that follows is a settling period between arms, and defining
+"recovered" as "p99 has stabilised" rather than "p99 is back under a number
+measured earlier".
 
 Two caveats on how that is judged. The figures above were taken with a 30 s
 baseline window and `RECOVERY_BAND=1.20`, which produced several false "DID NOT
