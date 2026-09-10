@@ -90,11 +90,27 @@ type stageStats struct {
 	P99Micros  float64 `json:"p99_micros"`
 	P999Micros float64 `json:"p999_micros"`
 	MaxMicros  float64 `json:"max_micros"`
+	// How many samples exceeded each threshold, in microseconds.
+	//
+	// A percentile answers "how bad was it for the unlucky few". During a
+	// disturbance the operator's question is usually the other one: HOW MANY
+	// records were affected at all. Those come apart badly - a 30s window
+	// carrying one 900ms record and one carrying three hundred of them have
+	// very similar p99s and completely different meanings, and nothing else in
+	// this report distinguishes them.
+	OverMicros map[string]int `json:"over_micros"`
 }
+
+// Thresholds for OverMicros: 1ms is "noticeably above a healthy baseline"
+// here (steady-state total p99 is ~700us), then decades.
+var overThresholds = []float64{1000, 10000, 100000, 1000000}
 
 func newStageStats(xs []float64) stageStats {
 	sort.Float64s(xs)
-	s := stageStats{Samples: len(xs)}
+	s := stageStats{Samples: len(xs), OverMicros: map[string]int{}}
+	for _, t := range overThresholds {
+		s.OverMicros[strconv.FormatFloat(t, 'f', 0, 64)] = 0
+	}
 	if len(xs) == 0 {
 		return s
 	}
@@ -105,7 +121,67 @@ func newStageStats(xs []float64) stageStats {
 	s.P99Micros = percentile(xs, 0.99)
 	s.P999Micros = percentile(xs, 0.999)
 	s.MaxMicros = xs[len(xs)-1]
+	// xs is sorted, so the first index at or above the threshold gives the
+	// count above it directly.
+	for _, t := range overThresholds {
+		i := sort.SearchFloat64s(xs, t)
+		s.OverMicros[strconv.FormatFloat(t, 'f', 0, 64)] = len(xs) - i
+	}
 	return s
+}
+
+// timelineBucket is one interval of a disturbance, bucketed by when the record
+// was SENT rather than when its receipt arrived - a record delayed by seconds
+// belongs to the moment it was offered, otherwise the stall is reported as
+// having happened after it ended.
+type timelineBucket struct {
+	OffsetMs  int64   `json:"offset_ms"`
+	Samples   int     `json:"samples"`
+	P50Micros float64 `json:"p50_micros"`
+	P99Micros float64 `json:"p99_micros"`
+	MaxMicros float64 `json:"max_micros"`
+}
+
+// buildTimeline groups (sendNanos, latency) pairs into fixed intervals.
+//
+// Why this exists: an aggregate over the whole window cannot say WHEN a stall
+// happened or HOW LONG it lasted, and for a leadership move those are the
+// diagnostic facts. A stall that begins one drain-budget after the injection is
+// a second drain; one that begins at the injection is the transfer itself. Both
+// produce the same window aggregate.
+func buildTimeline(sendNanos []int64, lat []float64, intervalMs int64) []timelineBucket {
+	if intervalMs <= 0 || len(sendNanos) == 0 || len(sendNanos) != len(lat) {
+		return nil
+	}
+	first := sendNanos[0]
+	for _, n := range sendNanos {
+		if n < first {
+			first = n
+		}
+	}
+	byBucket := map[int64][]float64{}
+	for i, n := range sendNanos {
+		b := (n - first) / (intervalMs * 1e6)
+		byBucket[b] = append(byBucket[b], lat[i])
+	}
+	keys := make([]int64, 0, len(byBucket))
+	for k := range byBucket {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(a, b int) bool { return keys[a] < keys[b] })
+	out := make([]timelineBucket, 0, len(keys))
+	for _, k := range keys {
+		xs := byBucket[k]
+		sort.Float64s(xs)
+		out = append(out, timelineBucket{
+			OffsetMs:  k * intervalMs,
+			Samples:   len(xs),
+			P50Micros: percentile(xs, 0.50),
+			P99Micros: percentile(xs, 0.99),
+			MaxMicros: xs[len(xs)-1],
+		})
+	}
+	return out
 }
 
 func mean(xs []float64) float64 {
@@ -369,6 +445,9 @@ type report struct {
 	Match        stageStats `json:"match"`
 	RelayConsume stageStats `json:"relay_consume"`
 	Total        stageStats `json:"total"`
+	// Per-interval slices of the same window, present only when -timeline-ms
+	// is set. Additive: consumers that do not know about it are unaffected.
+	Timeline []timelineBucket `json:"timeline,omitempty"`
 
 	Lag       lagReport       `json:"lag"`
 	Resources resourcesReport `json:"resources"`
@@ -667,6 +746,10 @@ type collector struct {
 
 	mu          sync.Mutex
 	totalLat    []float64
+	// Send instant for each totalLat sample, same index. Kept so a window can
+	// be sliced in time; an aggregate cannot say when a stall began or how
+	// long it lasted, which for a leadership move are the diagnostic facts.
+	totalSend   []int64
 	matchLat    []float64
 	relayLat    []float64
 	skewEst     []float64
@@ -815,6 +898,7 @@ func (c *collector) onFill(value []byte, observedAt time.Time) {
 		sendT := time.Unix(0, pid.sendNanos)
 		c.mu.Lock()
 		c.totalLat = append(c.totalLat, float64(observedAt.Sub(sendT).Nanoseconds())/1000)
+		c.totalSend = append(c.totalSend, sendT.UnixNano())
 		c.sampledSeen[pid.seq]++
 		c.mu.Unlock()
 	}
@@ -865,6 +949,7 @@ func (c *collector) onReceipt(value string, observedAt time.Time) {
 	// the point. match does not vary per probe (same order, same matcher
 	// run), so it is recorded once, on the first receipt seen for the order.
 	c.totalLat = append(c.totalLat, float64(receiptT.Sub(sendT).Nanoseconds())/1000)
+	c.totalSend = append(c.totalSend, sendT.UnixNano())
 	c.relayLat = append(c.relayLat, float64(receiptT.Sub(matchedT).Nanoseconds())/1000)
 
 	if c.sampledSeen[pid.seq] == 0 {
@@ -905,6 +990,15 @@ func main() {
 				"stamps before the producer's quorum ack returns. 0 means unknown, and the report "+
 				"then says it cannot distinguish them rather than guessing.")
 
+		timelineMs = flag.Int("timeline-ms", 0,
+			"emit per-interval p50/p99/max for the total stage, bucketed by SEND "+
+				"time, at this interval in ms. 0 disables it and the report is "+
+				"unchanged. Set it when measuring a DISTURBANCE: a single "+
+				"aggregate over the window cannot say when a stall began or how "+
+				"long it lasted, and for a leadership move those are the "+
+				"diagnostic facts - a stall starting one drain-budget after the "+
+				"injection is a second drain, one starting at the injection is "+
+				"the transfer itself, and both give the same window aggregate")
 		metadataMinAge = flag.Duration("metadata-min-age", 5*time.Second,
 			"how soon the client may re-fetch metadata after a NOT_LEADER. "+
 				"franz-go's default is 5s, and that default IS the multi-second "+
@@ -1328,6 +1422,11 @@ func main() {
 	// ----- assemble -----
 	coll.mu.Lock()
 	totalCopy := append([]float64(nil), coll.totalLat...)
+	// Separate, and deliberately not reused: newStageStats sorts what it is
+	// given, in place, which would break the index-for-index pairing with
+	// totalSend and silently produce a timeline of unrelated numbers.
+	timelineLat := append([]float64(nil), coll.totalLat...)
+	timelineSend := append([]int64(nil), coll.totalSend...)
 	matchCopy := append([]float64(nil), coll.matchLat...)
 	relayCopy := append([]float64(nil), coll.relayLat...)
 	skewEstCopy := append([]float64(nil), coll.skewEst...)
@@ -1395,6 +1494,7 @@ func main() {
 		Match:            newStageStats(matchCopy),
 		RelayConsume:     newStageStats(relayCopy),
 		Total:            newStageStats(totalCopy),
+		Timeline:         buildTimeline(timelineSend, timelineLat, int64(*timelineMs)),
 	}
 	if expected > received {
 		rep.MissingReceipts = expected - received
