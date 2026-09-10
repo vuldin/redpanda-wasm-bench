@@ -123,6 +123,18 @@ RECOVERY_SUSTAIN="${RECOVERY_SUSTAIN:-2}"
 METADATA_MIN_AGE="${METADATA_MIN_AGE:-100ms}"
 RETRY_BACKOFF_MAX="${RETRY_BACKOFF_MAX:-500ms}"
 
+# Per-interval slices of each window. An aggregate cannot say WHEN a stall
+# began or how long it lasted, and those are the facts that identify the
+# mechanism: a stall starting one drain-budget after the injection is a second
+# drain, one starting at the injection is the transfer itself, and both produce
+# the same window aggregate. 500ms resolves a sub-second stall without making
+# the report unreadable.
+TIMELINE_MS="${TIMELINE_MS:-500}"
+
+# One pacing interval in microseconds, from the offered rate. render-tables
+# rejects a level whose send_lateness p99 exceeds this; the series warns.
+PACING_INTERVAL_US=$(awk -v r="$RATE" 'BEGIN{printf "%.0f", (r>0 ? 1000000/r : 0)}')
+
 DRAIN_AB="${DRAIN_AB:-1}"
 # 200ms. This was 5000ms, then 1000ms on a "keep 5x headroom over the measured
 # requirement" argument, and that argument was WRONG - headroom here is not
@@ -182,6 +194,7 @@ window() {
     -metadata-min-age "$METADATA_MIN_AGE" \
     -retry-backoff-max "$RETRY_BACKOFF_MAX" \
     -pacing fixed -duration "${secs}s" -warmup 5s -drain 10s \
+    -timeline-ms "$TIMELINE_MS" \
     -label "$label" -out "$out" > "$OUT_DIR/$label.log" 2>&1
   if [ ! -s "$out" ]; then
     echo "SKIP"
@@ -198,10 +211,29 @@ t = d.get("total", {})
 # report the rest of the repo considers usable, and produce nothing.
 reasons = d.get("unclean_reasons") or []
 clean = d.get("clean") or (bool(reasons) and all("no -admin-url" in r for r in reasons))
-print("%.0f %.0f %.0f %d %d %s %d" % (
+# The same per-stage quantiles the published tables carry, plus the ones a
+# DISTURBANCE needs that a steady-state table does not:
+#   max      - a leadership move's cost can leave p99 entirely and survive only
+#              in max; that already happened once in this doc's own figures, so
+#              reporting p99 alone can show a disturbance as free when it isn't
+#   over_*   - how MANY records were affected, not just how bad for the worst
+#              few. One 900ms record and three hundred of them give nearly the
+#              same p99 and mean completely different things.
+#   lateness - render-tables rejects a level whose send_lateness p99 exceeds a
+#              pacing interval, because a starved generator is indistinguishable
+#              from system latency. A disturbance is exactly when the client is
+#              most likely to fall behind, so the same gate has to apply here.
+pr = d.get("produce", {})
+lat = d.get("send_lateness", {})
+over = t.get("over_micros", {}) or {}
+print("%.0f %.0f %.0f %d %d %s %d %.0f %.0f %.0f %.0f %.0f %d %d %.0f" % (
     t.get("p50_micros", 0), t.get("p90_micros", 0), t.get("p99_micros", 0),
     d.get("missing_receipts", 0), d.get("duplicate_receipts_sampled", 0),
-    "yes" if clean else "no", t.get("samples", 0)))
+    "yes" if clean else "no", t.get("samples", 0),
+    t.get("p999_micros", 0), t.get("max_micros", 0), t.get("mean_micros", 0),
+    pr.get("p50_micros", 0), pr.get("p99_micros", 0),
+    int(over.get("10000", 0)), int(over.get("100000", 0)),
+    lat.get("p99_micros", 0)))
 PY
 }
 
@@ -318,8 +350,10 @@ run_action() {
 
   local base; base=$(window "$tag-baseline" "$BASELINE_SECS")
   if [ "$base" = "SKIP" ]; then say "  SKIP $tag: baseline produced no report"; return; fi
-  read -r b50 b90 b99 bmiss bdup bclean bsamp <<< "$base"
-  say "  baseline   p50=${b50}us p90=${b90}us p99=${b99}us samples=$bsamp missing=$bmiss dup=$bdup clean=$bclean"
+  read -r b50 b90 b99 bmiss bdup bclean bsamp b999 bmax bmean bp50 bp99 bo10 bo100 blate <<< "$base"
+  say "  baseline   total p50=${b50} p90=${b90} p99=${b99} p999=${b999} max=${bmax} mean=${bmean} (us)"
+  say "             produce p50=${bp50} p99=${bp99} | over 10ms=$bo10 over 100ms=$bo100 of $bsamp"
+  say "             missing=$bmiss dup=$bdup clean=$bclean send_lateness_p99=${blate}us"
   if [ "$bclean" != "yes" ]; then
     say "  SKIP $tag: baseline was not clean, so there is nothing to compare against"
     return
@@ -331,8 +365,22 @@ run_action() {
   local dur; dur=$(window "$tag-during" "$DURING_SECS")
   wait "$injector" 2>/dev/null
   if [ "$dur" = "SKIP" ]; then say "  $tag: during-window produced no report"; return; fi
-  read -r d50 d90 d99 dmiss ddup dclean dsamp <<< "$dur"
-  say "  during     p50=${d50}us p90=${d90}us p99=${d99}us samples=$dsamp missing=$dmiss dup=$ddup clean=$dclean"
+  read -r d50 d90 d99 dmiss ddup dclean dsamp d999 dmax dmean dp50 dp99 do10 do100 dlate <<< "$dur"
+  say "  during     total p50=${d50} p90=${d90} p99=${d99} p999=${d999} max=${dmax} mean=${dmean} (us)"
+  # produce vs total is the decomposition that says WHERE the cost landed.
+  # Reporting total alone once made a drain look like a produce regression when
+  # produce was in fact 689us inside an 875ms total - the whole cost was the
+  # transform not consuming, which is a different problem with a different fix.
+  say "             produce p50=${dp50} p99=${dp99} | over 10ms=$do10 over 100ms=$do100 of $dsamp"
+  say "             missing=$dmiss dup=$ddup clean=$dclean send_lateness_p99=${dlate}us"
+  # A generator that fell behind reports its own queueing as system latency.
+  # render-tables rejects a level for this; here it is a warning, because the
+  # disturbance is the thing under test and discarding the window would discard
+  # the measurement.
+  if [ "${dlate%.*}" -gt "$PACING_INTERVAL_US" ] 2>/dev/null; then
+    say "             !! send_lateness p99 ${dlate}us exceeds the ${PACING_INTERVAL_US}us pacing interval -"
+    say "                the generator was late, so part of this latency is client-side queueing"
+  fi
   if [ "$dmiss" -gt 0 ]; then
     say "  *** $dmiss MISSING receipts during $tag - that is data loss, not a slowdown ***"
   fi
@@ -345,7 +393,7 @@ run_action() {
   for i in $(seq 1 "$RECOVERY_MAX_WINDOWS"); do
     local w; w=$(window "$tag-recovery-$i" "$RECOVERY_WINDOW_SECS")
     [ "$w" = "SKIP" ] && { say "    window $i: no report"; continue; }
-    read -r r50 r90 r99 rmiss rdup rclean rsamp <<< "$w"
+    read -r r50 r90 r99 rmiss rdup rclean rsamp r999 rmax rmean rp50 rp99 ro10 ro100 rlate <<< "$w"
     elapsed=$((elapsed + RECOVERY_WINDOW_SECS))
     # A window only counts as in-band if it actually MEASURED something and is
     # clean. Without both conditions a window that delivered nothing reports
@@ -358,7 +406,10 @@ run_action() {
     else
       consec=0
     fi
-    say "    window $i (+${elapsed}s): p99=${r99}us samples=$rsamp dup=$rdup clean=$rclean  in-band-streak=$consec"
+    # max and over10ms alongside p99: a window can sit inside the band on p99
+    # while still carrying multi-hundred-millisecond outliers, which is not
+    # recovered in any sense an operator cares about.
+    say "    window $i (+${elapsed}s): p99=${r99}us max=${rmax}us over10ms=$ro10 samples=$rsamp dup=$rdup clean=$rclean  in-band-streak=$consec"
     if [ "$consec" -ge "$RECOVERY_SUSTAIN" ]; then recovered=yes; break; fi
   done
   if [ "$recovered" = yes ]; then
@@ -367,7 +418,7 @@ run_action() {
     say "  DID NOT RECOVER within $((RECOVERY_MAX_WINDOWS * RECOVERY_WINDOW_SECS))s - reporting no recovery time rather than a floor"
   fi
 
-  say "  RESULT $tag: p99 baseline=${b99} during=${d99} | duplicates during=$ddup | missing=$dmiss | recovery=${recovered}:${elapsed}s"
+  say "  RESULT $tag: total p99 ${b99}->${d99} max ${bmax}->${dmax} | produce p99 ${bp99}->${dp99} | over10ms $bo10->$do10 | duplicates=$ddup missing=$dmiss | recovery=${recovered}:${elapsed}s"
 }
 
 # --- main -----------------------------------------------------------------

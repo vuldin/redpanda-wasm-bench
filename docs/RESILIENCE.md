@@ -288,6 +288,26 @@ a baseline taken on the same cluster minutes earlier, so that offset cancels.
 
 ---
 
+## What each window reports
+
+The series reports the same per-stage quantiles the published tables carry
+(`scripts/render-tables.py`: p50/p90/p99 for `produce`, `relay_consume` and
+`total`), so a disturbance run and a steady-state run are read the same way,
+plus the fields a disturbance needs that a steady-state table does not.
+
+| field | why a disturbance needs it |
+|---|---|
+| `produce` p50/p99 | says WHERE the cost landed. Reporting `total` alone once made a drain look like a produce regression when produce was 689 us inside an 875 ms total - the cost was the transform not consuming, a different problem with a different fix |
+| `max`, `p999` | a leadership move's cost can leave p99 entirely and survive only in max; that already happened in this doc's own client-tuning figures, so p99 alone can show a disturbance as free when it is not |
+| `over 10ms` / `over 100ms` counts | how MANY records were affected, not how bad for the worst few. One 900 ms record and three hundred of them give nearly the same p99 and mean completely different things |
+| `mean` | the aggregate cost. On the 1000 ms arm, p50 815 us and p90 916 us were untouched while mean was 24 ms - i.e. the hit was confined to about the top 1%, which "p99 = 875 ms" overstates as a fleet-wide impact |
+| `send_lateness` p99 | a load generator that fell behind reports its own queueing as system latency. render-tables REJECTS a level for this; a disturbance is exactly when the client is most likely to fall behind, so the series warns when it exceeds one pacing interval |
+| `timeline` | per-interval p50/p99/max bucketed by SEND time (`-timeline-ms`, 500 ms here). An aggregate cannot say when a stall began or how long it lasted, and those identify the mechanism: a stall starting one drain-budget AFTER the injection is a second drain, one starting at the injection is the transfer itself, and both give the same window aggregate |
+
+Bucketing by send time rather than receipt time matters: a record delayed by
+seconds belongs to the moment it was offered, or the stall is reported as
+having happened after it ended.
+
 ## What is not measured
 
 - **Decommission.** Exercises `consensus::transfer_and_stepdown`, the path that
