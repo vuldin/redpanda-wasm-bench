@@ -108,7 +108,14 @@ METADATA_MIN_AGE="${METADATA_MIN_AGE:-100ms}"
 RETRY_BACKOFF_MAX="${RETRY_BACKOFF_MAX:-500ms}"
 
 DRAIN_AB="${DRAIN_AB:-1}"
-DRAIN_TIMEOUT_MS="${DRAIN_TIMEOUT_MS:-5000}"
+# 1000ms, not the 5000ms this started at. The sweep found EVERY budget at or
+# above 200ms eliminated duplicates outright (196 -> 0), because in-flight work
+# is about one batch - so seconds of budget buy nothing, and a budget the drain
+# cannot possibly need is only an opportunity to spend it. 1000ms keeps 5x
+# headroom over the measured requirement so a heavier transform or a burst
+# still finishes inside it, which matters because a budget the drain OVERRUNS
+# makes the set-arm look like a failed feature when it is really a failed knob.
+DRAIN_TIMEOUT_MS="${DRAIN_TIMEOUT_MS:-1000}"
 
 mkdir -p "$OUT_DIR"
 SUMMARY="$OUT_DIR/summary.txt"
