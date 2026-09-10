@@ -120,28 +120,68 @@ between 770 us and 1,498 us across the sweep, cannot support a relationship.
 Whether p99 captures the stall depends on when the drain lands relative to the
 sampled records. The duplicate column is the part that replicated.
 
-### Why the drain cost anything at all
+### Why the drain cost anything at all: TWO causes, not one
 
 The 5,000 ms arm's cost landed in `produce` (2.79 s of the 2.85 s total), which
-is not where a consumer-side quiesce belongs. Cause, verified in source:
+is not where a consumer-side quiesce belongs. The relevant lock chain, verified
+in source:
 
 - `cluster::partition::transfer_leadership` takes the STM prepare lock, *then*
   calls `_raft->do_transfer_leadership()`
 - `rm_stm::prepare_transfer_leadership()` is `_state_lock.hold_write_lock()`
 - `rm_stm::do_replicate()` - the produce path - takes `hold_read_lock()`
 
-The drain was invoked from inside raft, i.e. *after* that write lock was held,
-so every record arriving during it blocked until the drain finished. The drain
-duration was added directly onto produce latency.
+The obvious reading is that the quiesce simply ran too late, and moving it to
+the start of `cluster::partition::transfer_leadership` - before the prepare
+phases - would fix it. That was done, and **it was not sufficient.** raft's
+hook is deliberately kept, because `transfer_and_stepdown` (decommission) never
+goes through `cluster::partition`, so on the transfer path BOTH hooks fire. The
+claim that the second one "finds the work already done and costs nothing" holds
+only when the first drain *succeeded*. When the transform is behind, the first
+drain times out at its budget, and raft's hook then re-runs the whole budget
+from behind the write lock - reproducing the exact pathology the move was meant
+to remove.
 
-The quiesce now runs at the start of `cluster::partition::transfer_leadership`,
-before the prepare phases, so writes keep flowing while it happens. raft's hook
-remains because it is the only path that covers being removed from the voter
-set (decommission), and a drain of an already-drained processor is cheap.
+`processor::drain()` is now single-shot per processor lifetime: it records the
+first attempt's verdict and answers from it, with `start()` clearing it so each
+new owner gets its own bounded chance.
 
-**The figures in the table above predate that change** and therefore describe
-the cost of draining in the wrong place. They are kept because they are what
-located the flaw; re-measure before quoting a tail cost for the drain.
+### Measured, after both fixes
+
+Local 3-broker cluster, one shard per broker so every partition on a node
+shares one reactor thread, a guest burning 1 ms per record at 600 records/sec
+(saturated, so every drain times out - the worst case for this defect), and a
+`ctl-*` control partition led by the same node with no transform on it.
+`in_max` is the transform's own input partition; both are client-observed
+produce max over a 30 s window with the drain injected at 15 s.
+
+| budget | in_max BEFORE the single-shot fix | in_max AFTER | control AFTER |
+|---|---|---|---|
+| none | 135 ms | 125 ms | 37 ms |
+| 1000 ms | 1,140 ms | **158 ms** | 24 ms |
+| 5000 ms | 5,171 ms | **130 ms** | 140 ms |
+
+After the fix no budget appears in produce latency at all: each arm shows a
+single ~125-158 ms spike, which is the leadership transfer itself, and overall
+p99 across the three arms sits within 21-24 ms of itself. The 5,000 ms arm
+improved 40x and is now indistinguishable from not draining.
+
+The control column is what makes this a measurement rather than a story. A
+saturated guest keeps running *during* a drain by design, so reactor starvation
+predicts a stall proportional to the budget just as convincingly as a lock
+does. The control partition, on the same single reactor, stayed flat while the
+transform's partition tracked the budget - so starvation was not the cause. The
+other tell was timing: the stall began one full budget *after* the injection,
+which is the second drain, not the first.
+
+Two caveats. These are a fastbuild broker, so read the arm-to-arm relationship
+and not the absolute values - the ~10-14 ms p50 here would be sub-millisecond
+on an opt build. And the budget still delays the **transfer** when a transform
+is behind (the drain times out); what it no longer delays is **produces**,
+which is the intended design.
+
+A passthrough transform cannot find any of this: it never lags, so its drain
+never times out, so the second drain really is free and the defect is invisible.
 
 ---
 
