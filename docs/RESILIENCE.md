@@ -146,25 +146,19 @@ to remove.
 first attempt's verdict and answers from it, with `start()` clearing it so each
 new owner gets its own bounded chance.
 
-### Measured, after both fixes
+### How the defect was located, locally
 
-Local 3-broker cluster, one shard per broker so every partition on a node
-shares one reactor thread, a guest burning 1 ms per record at 600 records/sec
-(saturated, so every drain times out - the worst case for this defect), and a
-`ctl-*` control partition led by the same node with no transform on it.
-`in_max` is the transform's own input partition; both are client-observed
-produce max over a 30 s window with the drain injected at 15 s.
+A local 3-broker cluster at one shard per broker, so every partition on a node
+shares one reactor thread, with a guest burning 1 ms per record at 600
+records/sec (saturated, so every drain times out - the worst case for this
+defect) and a `ctl-*` control partition led by the same node with no transform
+on it. Client-observed produce max over a 30 s window, drain injected at 15 s:
 
-| budget | in_max BEFORE the single-shot fix | in_max AFTER | control AFTER |
+| budget | input partition BEFORE | AFTER | control AFTER |
 |---|---|---|---|
 | none | 135 ms | 125 ms | 37 ms |
 | 1000 ms | 1,140 ms | **158 ms** | 24 ms |
 | 5000 ms | 5,171 ms | **130 ms** | 140 ms |
-
-After the fix no budget appears in produce latency at all: each arm shows a
-single ~125-158 ms spike, which is the leadership transfer itself, and overall
-p99 across the three arms sits within 21-24 ms of itself. The 5,000 ms arm
-improved 40x and is now indistinguishable from not draining.
 
 The control column is what makes this a measurement rather than a story. A
 saturated guest keeps running *during* a drain by design, so reactor starvation
@@ -174,21 +168,90 @@ transform's partition tracked the budget - so starvation was not the cause. The
 other tell was timing: the stall began one full budget *after* the injection,
 which is the second drain, not the first.
 
-Two caveats. These are a fastbuild broker, so read the arm-to-arm relationship
-and not the absolute values - the ~10-14 ms p50 here would be sub-millisecond
-on an opt build. And the budget still delays the **transfer** when a transform
-is behind (the drain times out); what it no longer delays is **produces**,
-which is the intended design.
-
 A passthrough transform cannot find any of this: it never lags, so its drain
 never times out, so the second drain really is free and the defect is invisible.
+Those figures are a fastbuild broker - read the arm-to-arm relationship, not
+the absolute values.
+
+### Quotable numbers, opt build on AWS
+
+3 x `r8id.8xlarge` + 1 x `c5n.9xlarge`, `us-east-2c`, RF=3, 1,000 orders/sec,
+650 B, `acks=all`, single input partition, opt build carrying both fixes.
+Measured 2026-09-09. Each arm's own 60 s baseline, 30 s during-window.
+
+| arm | produce p99 | e2e p99 | duplicates |
+|---|---|---|---|
+| maintenance, no drain | 646 us | 1,536 us | 30 |
+| maintenance, 200 ms | - | 114,464 us | **0** |
+| maintenance, 1000 ms | **689 us** | 875,620 us | **0** |
+| transfer, no drain | 562 us | 1,466 us | 42 |
+| transfer, 1000 ms | 523 us | 1,134 us | **0** |
+
+**The produce path is fixed.** A maintenance drain with a 1000 ms budget costs
+689 us of produce p99 against 646 us with no drain - about 43 us. The same
+measurement before these fixes was **2.79 s**. Nothing about the budget appears
+in produce latency any more.
+
+**The remaining cost is e2e, it is real, and it scales with the budget.** A
+drain stops the CONSUMER immediately and the transfer then waits out the
+budget, so records arriving in that window are not transformed until the new
+owner starts. That is inherent to draining, not a defect.
+
+**It is paid in full under maintenance, and not at all under a targeted
+transfer** (875 ms vs 1,134 us at the same budget). Maintenance moves the
+OUTPUT topic's leadership too, so the transform's writes cannot land, its
+commits cannot complete, and the drain runs to its deadline every time. A
+targeted transfer leaves the output topic alone and the drain finishes in
+milliseconds. Note the timed-out drain still eliminated duplicates - the
+flush-on-timeout path does useful work.
+
+So the budget should be the smallest value that eliminates duplicates, which
+is why the harness default is now 200 ms and not 1000 ms: identical correctness
+for an eighth of the e2e cost. An earlier "keep 5x headroom" argument for
+1000 ms was wrong, because headroom is not free here.
+
+This run is also the first to show BOTH halves on one cluster - the no-drain
+arms emit duplicates (30 and 42) and the drain arms eliminate them - so "the
+drain costs the produce path nothing" is a statement about a drain that
+demonstrably did work, rather than about one that had nothing to do.
 
 ---
 
 ## Recovery
 
 Every arm returned to baseline within ~20 s, on both the drained and undrained
-paths.
+paths - with one exception that is worth understanding, because it recurs.
+
+### A first-arm "DID NOT RECOVER" is usually the harness, not the cluster
+
+On the 2026-09-09 opt run the first arm reported DID NOT RECOVER within 180 s,
+sitting at 1,066-1,478 us against its own 740 us baseline. That verdict is an
+artifact, and the cause is that all arms in one invocation SHARE one set of
+topics (`orders-res-$RUN_ID`), so the log grows monotonically underneath the
+series and never resets. Arm 1's baseline is measured on an almost empty log;
+its recovery windows run against a much larger one.
+
+Four things confirm it rather than one:
+
+- baselines drifted monotonically across the four arms, 740 -> 1,067 -> 1,114
+  -> 1,195 us, as the shared topic grew to 1.52 M records
+- arm 1's "unrecovered" range lands INSIDE the later arms' baselines, so its
+  unrecovered state is simply normal steady state at that log size
+- a separate invocation with fresh topics baselined back down at 824 us and
+  recovered in 90 s
+- it is the same drift this doc already reported across runs; it just also
+  operates within a run
+
+The plausible alternative was checked and rejected:
+`leader_balancer_mute_timeout` is 300 s, longer than the 180 s recovery budget,
+so a node leaving maintenance genuinely cannot be given leadership back in
+time - but that would have blocked the fresh-topic arm too, and it recovered in
+90 s.
+
+The fix is to stop comparing an empty-log baseline against a full-log recovery:
+either prime the log before the first baseline, or redefine "recovered" as
+"p99 has stabilised" rather than "p99 is back under a number measured earlier".
+Until then, read a first-arm non-recovery against the later arms' baselines.
 
 Two caveats on how that is judged. The figures above were taken with a 30 s
 baseline window and `RECOVERY_BAND=1.20`, which produced several false "DID NOT
