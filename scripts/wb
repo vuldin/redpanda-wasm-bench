@@ -59,6 +59,14 @@ BENCH_PUB_KEY="${BENCH_PUB_KEY:-$HOME/.ssh/jlp-aws-iceberg.pub}"
 BENCH_SSH_KEY="${BENCH_SSH_KEY:-$HOME/.ssh/jlp-aws-iceberg.pem}"
 REDPANDA_SRC="${REDPANDA_SRC:-$HOME/redpanda/redpanda}"
 WASM_ORDERBOOK_SRC="${WASM_ORDERBOOK_SRC:-$HOME/redpanda/projects/wasm-orderbook}"
+# The guests and the external host live in their own repo since the 2026-09-04
+# two-repo split, deliberately, so the artifact under test cannot be quietly
+# rebuilt by the harness measuring it. deploy-wasm-cluster.sh has required
+# WASM_DIR since that split and wb never passed it, so `wb deploy` failed on
+# every invocation with an unset-variable error - after `wb up` had already
+# provisioned a billing cluster.
+WASM_CLIENTS_SRC="${WASM_CLIENTS_SRC:-$HOME/redpanda/projects/redpanda-wasm-clients}"
+WASM_DIR="${WASM_DIR:-$WASM_CLIENTS_SRC/bin}"
 TFVARS_SINGLE="r8id-8xl-wasm-single-az.tfvars"
 TFVARS_MULTI="r8id-8xl-wasm-multi-az.tfvars"
 # Overridable so the binary gate can be self-tested against a deliberately
@@ -285,6 +293,26 @@ cmd_doctor() {
     note "MISS $REDPANDA_BIN - build with: cd $REDPANDA_SRC && bazel build //src/v/redpanda:redpanda -c opt --jobs=6 --local_resources=memory=16384"
     bad=1
   fi
+  echo "=== wasm artifacts ==="
+  # Checked here, not just at deploy time: everything in this section is free
+  # to verify and `wb up` is not, so a missing guest must fail before the
+  # cluster exists rather than after it has been billing for a few minutes.
+  _missing_wasm=""
+  for _w in wasm-matcher.wasm passthrough.wasm relay-probe.wasm relay-sink.wasm \
+            position-tracker.wasm; do
+    [ -f "$WASM_DIR/$_w" ] || _missing_wasm="$_missing_wasm $_w"
+  done
+  [ -x "$WASM_DIR/wasm-client" ] || _missing_wasm="$_missing_wasm wasm-client"
+  if [ -n "$_missing_wasm" ]; then
+    note "MISS$_missing_wasm in $WASM_DIR"
+    note "     build with: cd $WASM_CLIENTS_SRC && make"
+    note "     (build-host runs in ubuntu:22.04 via docker - the host links"
+    note "      against glibc through cgo and a workstation build will not exec"
+    note "      on the benchmark instances)"
+    bad=1
+  else
+    note "OK   guests + host in $WASM_DIR"
+  fi
   echo "=== terraform state ==="
   if cluster_in_state; then
     note "OK   cluster exists"
@@ -343,7 +371,7 @@ cmd_deploy() {
   [ -f "$REDPANDA_BIN" ] || die "no local redpanda binary at $REDPANDA_BIN"
   load_env
   BENCH_SSH_KEY="$BENCH_SSH_KEY" REDPANDA_SRC="$REDPANDA_SRC" \
-  WASM_ORDERBOOK_SRC="$WASM_ORDERBOOK_SRC" \
+  WASM_ORDERBOOK_SRC="$WASM_ORDERBOOK_SRC" WASM_DIR="$WASM_DIR" \
   ANSIBLE_PRIVATE_KEY_FILE="$BENCH_SSH_KEY" \
     bash "$HERE/deploy-wasm-cluster.sh" "$@" || die "deploy failed"
   # Verify the thing deploy exists to do actually happened. deploy-wasm-cluster.sh
