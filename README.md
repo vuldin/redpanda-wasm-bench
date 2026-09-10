@@ -193,7 +193,7 @@ the upstream ducktape suite already covers.
 | knob | default | notes |
 |---|---|---|
 | `ACTIONS` | `maintenance transfer` | `restart` is stubbed, not implemented |
-| `DRAIN_AB` / `DRAIN_TIMEOUT_MS` | `1` / `1000` | the unset-vs-set comparison; 200 ms was enough to eliminate duplicates, so this is 5x headroom rather than a guess |
+| `DRAIN_AB` / `DRAIN_TIMEOUT_MS` | `1` / `200` | the unset-vs-set comparison; the budget is paid 1:1 in e2e latency under maintenance, and 200 ms already eliminates duplicates entirely |
 | `DRAIN_TIMEOUT_SET` | unset | run ONE arm at this budget instead of the A/B, for sweeping it |
 | `BASELINE_SECS` / `DURING_SECS` | `60` / `30` | 60 s because 30 s baselines came in below the cluster's own steady state and produced false "did not recover" verdicts |
 | `INJECT_AT_SECS` | `10` | when the action fires inside the during-window |

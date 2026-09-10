@@ -41,7 +41,7 @@
 #   results [dir]       copy result JSON back from client[0]
 #   ssh <target> [cmd]  broker0..2 / client0..1, correct flags applied
 #   logs <target> [n]   redpanda journal from a broker
-#   teardown            terraform destroy (prompts unless --yes)
+#   teardown|down       terraform destroy (prompts unless --yes)
 #   reproduce           one command: prereqs -> region -> provision -> deploy
 #                       -> both arms -> tables. See REPRODUCE.md
 #   cleanup-orphans     delete benchmark transforms/topics left by a killed
@@ -732,7 +732,11 @@ case "${1:-}" in
   results)  shift; cmd_results "$@" ;;
   ssh)      shift; cmd_ssh "$@" ;;
   logs)     shift; cmd_logs "$@" ;;
-  teardown) shift; cmd_teardown "$@" ;;
+  # `down` and `destroy` alias teardown deliberately. `wb up` has no matching
+  # `wb down`, and an unknown command exits non-zero while the cluster keeps
+  # billing - which is exactly what happened on 2026-09-09: `wb down` printed
+  # "unknown command" and three r8id.8xlarge kept running until someone looked.
+  teardown|down|destroy) shift; cmd_teardown "$@" ;;
   verify-clean) shift; verify_torn_down "$@" ;;
   cleanup-orphans) shift; cmd_cleanup_orphans "$@" ;;
   reproduce) shift; exec bash "$(dirname "${BASH_SOURCE[0]}")/reproduce.sh" "$@" ;;

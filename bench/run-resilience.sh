@@ -15,6 +15,22 @@
 #   recovery  repeated short windows until latency is back inside the baseline
 #             band AND STAYS there - reported as time-to-baseline
 #
+# KNOWN LIMITATION OF THE RECOVERY VERDICT, and it bites the FIRST arm of every
+# invocation. All arms share one set of topics (orders-res-$RUN_ID, created once
+# below), so the log grows monotonically underneath the whole series and never
+# resets. Arm 1's baseline is therefore measured on an almost empty log while
+# its recovery windows run against a much larger one, and p99 is sensitive to
+# that: measured 2026-09-09, baselines drifted 740 -> 1067 -> 1114 -> 1195us
+# across four arms as the shared topic grew to 1.52M records, and arm 1 reported
+# DID NOT RECOVER while sitting at 1066-1478us - i.e. inside the range that
+# every LATER arm measured as its own healthy baseline. A separate invocation
+# with fresh topics baselined 824us and recovered normally.
+# So: a first-arm "DID NOT RECOVER" is probably this, not the cluster. Compare
+# it against the later arms' baselines before believing it. The real fix is to
+# stop comparing an empty-log baseline against a full-log recovery - either
+# prime the log before the first baseline, or make "recovered" mean "p99 has
+# stabilised" rather than "p99 is back under a number measured earlier".
+#
 # CORRECTNESS IS MEASURED ALONGSIDE LATENCY, and matters more. Transforms are
 # at-least-once: a leadership move discards work that was read but not
 # committed, and the next owner reprocesses it. So
@@ -108,14 +124,23 @@ METADATA_MIN_AGE="${METADATA_MIN_AGE:-100ms}"
 RETRY_BACKOFF_MAX="${RETRY_BACKOFF_MAX:-500ms}"
 
 DRAIN_AB="${DRAIN_AB:-1}"
-# 1000ms, not the 5000ms this started at. The sweep found EVERY budget at or
-# above 200ms eliminated duplicates outright (196 -> 0), because in-flight work
-# is about one batch - so seconds of budget buy nothing, and a budget the drain
-# cannot possibly need is only an opportunity to spend it. 1000ms keeps 5x
-# headroom over the measured requirement so a heavier transform or a burst
-# still finishes inside it, which matters because a budget the drain OVERRUNS
-# makes the set-arm look like a failed feature when it is really a failed knob.
-DRAIN_TIMEOUT_MS="${DRAIN_TIMEOUT_MS:-1000}"
+# 200ms. This was 5000ms, then 1000ms on a "keep 5x headroom over the measured
+# requirement" argument, and that argument was WRONG - headroom here is not
+# free, it is paid 1:1 in e2e latency on every maintenance drain.
+#
+# Measured on AWS (opt, 3 brokers, 1000 orders/s), same cluster, same action:
+#   budget    duplicates    e2e p99 during
+#   none      30            1,536us
+#   200ms     0             114,464us
+#   1000ms    0             875,620us
+# Both budgets eliminate duplicates completely; the cost scales with the
+# budget. The mechanism is that a drain stops the CONSUMER immediately and the
+# transfer then waits out the budget, so records arriving in that window are
+# not transformed until the new owner starts. Under maintenance the drain
+# reliably runs to its full budget, because maintenance moves the OUTPUT
+# topic's leadership too and the transform's commits cannot land until it
+# settles - so the full budget is the cost, not a worst case.
+DRAIN_TIMEOUT_MS="${DRAIN_TIMEOUT_MS:-200}"
 
 mkdir -p "$OUT_DIR"
 SUMMARY="$OUT_DIR/summary.txt"
