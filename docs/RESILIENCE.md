@@ -108,7 +108,9 @@ client artifact above and are not usable for this comparison):
 | 5000 ms | **0** | 92,519 us | 2,791,944 us |
 
 **Every budget at or above 200 ms eliminates duplicates.** In-flight work is
-about one batch, so seconds of budget buy nothing.
+about one batch, so seconds of budget buy nothing. The harness default was
+lowered from 5000 ms to 1000 ms on the strength of this - 5x headroom over the
+measured requirement, rather than a budget the drain cannot plausibly need.
 
 **The tail column is not yet characterised, and should not be read as a
 curve.** It looks like p99 tracks the budget at 200/1000/5000 ms, but the
