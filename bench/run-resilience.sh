@@ -131,6 +131,27 @@ RETRY_BACKOFF_MAX="${RETRY_BACKOFF_MAX:-500ms}"
 # the report unreadable.
 TIMELINE_MS="${TIMELINE_MS:-500}"
 
+# --- settling between arms ---------------------------------------------------
+#
+# Arms used to run back to back, so one arm's residual landed in the next arm's
+# BASELINE and the baseline is what every verdict is measured against. Observed
+# 2026-09-09 on an opt cluster: the transfer-nodrain baseline carried 386
+# records over 10ms and 206 over 100ms, with max 202ms, in two discrete ~200ms
+# events - while its p50/p90/p99 read a clean 891/1,072/1,508us. A baseline
+# with 200ms outliers in it makes "did it return to baseline" meaningless in
+# both directions: it can fail a healthy cluster, and it can pass a sick one.
+#
+# This waits for LEADERSHIP TO STOP MOVING rather than sleeping a fixed time,
+# because leadership churn is the specific residual that contaminates. It reads
+# the cluster-wide leader map and requires it to be unchanged for SETTLE_SECS,
+# which costs one cheap admin call per poll and no traffic.
+SETTLE_SECS="${SETTLE_SECS:-30}"
+SETTLE_POLL_SECS="${SETTLE_POLL_SECS:-5}"
+# Bound on total waiting. Exceeding it is reported and the arm proceeds: a
+# cluster that will not go quiet is itself worth measuring, and silently
+# waiting forever on a billing cluster is worse.
+SETTLE_MAX_SECS="${SETTLE_MAX_SECS:-150}"
+
 # One pacing interval in microseconds, from the offered rate. render-tables
 # rejects a level whose send_lateness p99 exceeds this; the series warns.
 PACING_INTERVAL_US=$(awk -v r="$RATE" 'BEGIN{printf "%.0f", (r>0 ? 1000000/r : 0)}')
@@ -158,6 +179,50 @@ mkdir -p "$OUT_DIR"
 SUMMARY="$OUT_DIR/summary.txt"
 : > "$SUMMARY"
 say() { echo "$@" | tee -a "$SUMMARY"; }
+
+# Fingerprint of who leads what, cluster-wide. Any leadership move changes it.
+leader_fingerprint() {
+  curl -sf "$ADMIN_URL/v1/cluster/partitions" 2>/dev/null \
+    | jq -rS '[.[] | {n: "\(.ns)/\(.topic)/\(.partition_id)", l: .leader_id}] | sort_by(.n)' 2>/dev/null \
+    | md5sum | cut -d" " -f1
+}
+
+# Wait until leadership has stopped moving, then return. See the SETTLE_SECS
+# comment above for why a fixed sleep is not enough.
+settle() {
+  local why="$1"
+  if [ "${SETTLE_SECS:-0}" -le 0 ]; then
+    return 0
+  fi
+  local need=$(( SETTLE_SECS / SETTLE_POLL_SECS ))
+  [ "$need" -lt 1 ] && need=1
+  local last=""
+  local stable=0
+  local waited=0
+  while [ "$waited" -lt "$SETTLE_MAX_SECS" ]; do
+    local fp
+    fp=$(leader_fingerprint)
+    if [ -z "$fp" ]; then
+      # An unreachable admin API is not quiescence. Keep waiting rather than
+      # counting a failed scrape as a stable sample.
+      stable=0
+    elif [ "$fp" = "$last" ]; then
+      stable=$(( stable + 1 ))
+    else
+      stable=0
+    fi
+    last="$fp"
+    if [ "$stable" -ge "$need" ]; then
+      say "  settled ($why): leadership unchanged for ${SETTLE_SECS}s after ${waited}s"
+      return 0
+    fi
+    sleep "$SETTLE_POLL_SECS"
+    waited=$(( waited + SETTLE_POLL_SECS ))
+  done
+  say "  !! NOT settled ($why): leadership still moving after ${SETTLE_MAX_SECS}s"
+  say "     proceeding anyway - this arm's baseline may carry the previous arm's residual"
+  return 0
+}
 
 # --- one measurement window ------------------------------------------------
 # Prints "p50 p90 p99 missing duplicates clean samples" or "SKIP" if the window
@@ -338,6 +403,15 @@ run_action() {
   local drain_label="$2"
   local tag="$action-$drain_label"
 
+  say ""
+  # BEFORE the baseline, not after the arm: the baseline is what every verdict
+  # is measured against, so it is the window that has to be clean. Applies to
+  # the first arm too, which follows setup_arm's transform deploy and pre-check
+  # traffic.
+  settle "before $tag"
+
+  # Read the leader AFTER settling. Settling can itself see leadership move, and
+  # draining a node that is no longer the leader measures nothing.
   local victim
   victim=$(leader_of "$ORDERS_TOPIC" 0)
   if [ -z "$victim" ]; then
@@ -345,7 +419,6 @@ run_action() {
     return
   fi
 
-  say ""
   say "--- $tag (input leader = node $victim) ---"
 
   local base; base=$(window "$tag-baseline" "$BASELINE_SECS")
@@ -447,11 +520,13 @@ for action in $ACTIONS; do
     cfg_set data_transforms_graceful_transfer_timeout_ms "$DRAIN_TIMEOUT_MS" >/dev/null 2>&1
     run_action "$action" "drain${DRAIN_TIMEOUT_MS}ms"
   elif [ -n "${DRAIN_TIMEOUT_SET:-}" ]; then
-    # Single arm at one explicit budget, for sweeping the timeout. The drain
-    # stalls produces for as long as it runs (it is invoked after rm_stm's
-    # write lock is taken), so the budget is an upper bound on the produce
-    # stall - the sweep is looking for the smallest budget that still gets
-    # duplicates to zero.
+    # Single arm at one explicit budget, for sweeping the timeout. The budget
+    # no longer bounds a PRODUCE stall - the quiesce runs before rm_stm takes
+    # its write lock, and produce p99 measured 596-799us across every arm and
+    # budget. What it bounds is the E2E cost, because a drain stops the
+    # consumer immediately and the transfer then waits the budget out: 224ms
+    # at a 200ms budget, 875ms at 1000ms. So the sweep is looking for the
+    # smallest budget that still gets duplicates to zero.
     cfg_set data_transforms_graceful_transfer_timeout_ms "$DRAIN_TIMEOUT_SET" >/dev/null 2>&1
     run_action "$action" "drain${DRAIN_TIMEOUT_SET}ms"
   else
