@@ -32,11 +32,18 @@ consumer. This was `rpc_client_sink::write()` recomputing Redpanda's
 internal `header_crc` but not the actual Kafka wire-protocol `crc`,
 after mutating fields both cover. Fixed on the
 [`transform-latency-instrumentation`](https://github.com/vuldin/redpanda/tree/transform-latency-instrumentation)
-branch (commit [`6902be7ca8`](https://github.com/vuldin/redpanda/commit/6902be7ca8)),
-pending upstream review - not a benchmark issue, but recorded here
+branch, folded into the commit that introduced the mutation it corrects
+("transform: give guests control of output timestamps, partitioning and
+idempotence"), pending upstream review - not a benchmark issue, but recorded
+here
 because it's the reason "the benchmark returned 0 records" doesn't
 always mean the benchmark is broken. Check the broker log for `crc`
 mismatches before assuming the harness is at fault.
+
+Cited by commit SUBJECT rather than SHA on purpose. That branch is rewritten
+deliberately - each commit is meant to hold one feature so it can be split up
+later - and the SHA this used to name was orphaned by exactly that, leaving a
+404. Subjects survive a rebase; hashes do not.
 
 ### 3. Topic reuse across runs contaminates the next one
 
