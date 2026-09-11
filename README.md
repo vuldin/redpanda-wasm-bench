@@ -199,6 +199,7 @@ the upstream ducktape suite already covers.
 | `INJECT_AT_SECS` | `10` | when the action fires inside the during-window |
 | `RECOVERY_WINDOW_SECS` | `10` | granularity of time-to-baseline |
 | `RECOVERY_BAND` / `RECOVERY_SUSTAIN` | `1.35` / `2` | what "recovered" means |
+| `SETTLE_SECS` / `SETTLE_MAX_SECS` | `30` / `150` | leadership must be unchanged this long before an arm's baseline; arms used to run back to back and one arm's residual landed in the next one's baseline |
 | `METADATA_MIN_AGE` / `RETRY_BACKOFF_MAX` | `100ms` / `500ms` | tuned by default here, unlike `loadgen`'s own defaults; set both to `5s` to reproduce the untuned tail |
 
 Requires a broker built from a branch carrying
