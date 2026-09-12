@@ -31,7 +31,7 @@ p99: 1,073/1,056/1,105) — trial-to-trial spread ~8% at p50 and under 5% at p99
 
 ```sh
 INBROKER_CONSUMERS=500 RATE=1000 PAYLOAD=650 RF=3 ACKS=all \
-  ./scripts/wb run-inbroker --trials 3
+  ./scripts/wb reproduce
 ```
 
 ## Result 2 — traditional deployment, 1 → 500 external consumers
@@ -51,7 +51,7 @@ Every row had pacing held (`send_lateness` p99 under the 1,000 µs interval).
 
 ```sh
 EXTERNAL_LADDER="1 10 50 500" RATE=1000 PAYLOAD=650 RF=3 ACKS=all \
-  ./scripts/wb run-traditional
+  ./scripts/wb reproduce
 ```
 
 ### Ratios at matched consumer count (500 vs 500)

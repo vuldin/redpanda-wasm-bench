@@ -257,6 +257,114 @@ actually produced some.
 
 ---
 
+## Keeping the module resident: the other half of a leadership move
+
+The drain fixes the departing side. It does nothing for the arriving side: the
+broker that takes the partition over still has to fetch the wasm binary and
+compile it, and it pays for both at the moment it becomes responsible for the
+partition. `data_transforms_max_resident_factories` holds a compiled module in
+memory on every broker that replicates a transform's input topic, so the
+handover lands on a warm broker instead of a cold one.
+
+### How it is measured, and why per broker
+
+Client-observed latency cannot isolate this. From the client a cold start is
+indistinguishable from any other stall, and the arm's total can move for
+reasons that have nothing to do with bring-up. So the series scrapes two
+broker-side histograms, per node, filtered to the transform under test:
+
+    transform_processor_create_latency_seconds   fetch + compile
+    transform_startup_latency_seconds            the whole dark window
+
+Per node is the point, not a detail. With one input partition the broker that
+gains leadership performs exactly ONE create, so its count delta is 1 and its
+sum delta is that single bring-up. A cluster-wide sum would average it with
+the two brokers that did nothing.
+
+The ON arms are gated on `wasm_binary_resident_factories` reaching at least 1
+before anything is measured. The property is `needs_restart::no`, but set is
+not in effect - residency reconciles on a debounce plus a settle - and an arm
+labelled "residency on" that is actually off looks exactly like "residency
+does nothing".
+
+### Quotable numbers, opt build on AWS
+
+3 x `r8id.8xlarge` + 8 x `c5n.9xlarge`, **`us-east-1a`** (not the `us-east-2c`
+of the runs above - `select-region.sh` fell back on capacity, and absolute
+latencies are not comparable across regions), RF=3, 1,000 orders/sec, 650 B,
+`acks=all`, single input partition. Measured 2026-09-12.
+
+Bring-up on the broker that gained leadership:
+
+| arm | residency | create | startup | resident |
+|---|---|---|---|---|
+| maintenance, no drain | off | 94 ms | 95 ms | 0 |
+| maintenance, 200 ms | off | 91 ms | 92 ms | 0 |
+| transfer, no drain | off | 93 ms | 94 ms | 0 |
+| transfer, 200 ms | off | 92 ms | 93 ms | 0 |
+| maintenance, no drain | 8 | **1 ms** | 2 ms | 1 |
+| maintenance, 200 ms | 8 | **1 ms** | 3 ms | 1 |
+| transfer, no drain | 8 | **0 ms** | 2 ms | 1 |
+| transfer, 200 ms | 8 | **0 ms** | 2 ms | 1 |
+
+**Fetch plus compile goes from ~92 ms to ~1 ms, a 91-94x reduction**, and
+`startup` tracks it (92-95 ms to 2-3 ms). That startup is only ~1 ms more than
+create is itself the finding that fetch+compile is ~99% of the dark window -
+measured here rather than assumed.
+
+**An earlier exploration put the cold start at ~269 ms. On this hardware and
+this opt build it is ~92 ms.** Quote the measured figure; the older one came
+off different hardware and was never re-checked, which is why the plan for
+this work said to re-measure rather than trust it.
+
+End to end, the saving shows up where a client feels it - in the worst-case
+record, not at p99:
+
+| arm | e2e max, residency off | residency on | delta |
+|---|---|---|---|
+| maintenance, 200 ms | 367,720 us | 276,171 us | **-91.5 ms** |
+| transfer, no drain | 214,948 us | 115,665 us | **-99.3 ms** |
+| transfer, 200 ms | 367,910 us | 280,145 us | **-87.8 ms** |
+
+Those deltas are the bring-up saving, arriving end to end: 87.8-99.3 ms
+against an independently measured ~92 ms of removed fetch+compile.
+
+### One arm is not comparable, and the instrumentation is why we know
+
+`maintenance, no drain` with residency on read 868,365 us max and 1,002
+duplicates, far worse than its off counterpart. It is not a residency cost.
+That arm recorded **two** creates - one on each of two brokers - where every
+other arm recorded exactly one: `maintenance` enables and then immediately
+disables, and leadership went node2 -> node0 -> node2 inside the window. Two
+moves, two bring-ups, two lots of reprocessing, and 977 of its records over
+100 ms against 1,002 duplicates is one contiguous ~1 s block of reprocessed
+traffic.
+
+Only the per-node create attribution makes that visible. A cluster-wide sum
+would have shown "p99 200x worse with residency on" and invited exactly the
+wrong conclusion. Use the `transfer` action for a single deterministic move
+when the client-side comparison is what matters.
+
+### What it costs, and what it does not do
+
+**363 KiB of executable memory per broker per resident module**, read from
+`wasm_binary_resident_memory_usage`. The bound counts modules rather than
+bytes because a module's size is only known after it is compiled, so a byte
+bound would have to fetch and compile in order to discover it must refuse -
+spending the exact resource the bound protects. Size the count by dividing
+`wasm_binary_resident_memory_usage` by `wasm_binary_resident_factories` for
+your own binaries.
+
+At RF=3 on three brokers every broker replicates the single input partition,
+so one transform is held on all three - `resident=1` on each, three references
+cluster-wide. That is the intended behaviour, not over-pinning: a leader that
+flaps between two brokers stays warm on both.
+
+**Residency does not change duplicates.** The drain arms recorded 0 with
+residency both off and on; the no-drain arms recorded 27-48 off and 42 on.
+Eliminating duplicates is the drain's job and residency neither helps nor
+hurts it.
+
 ## Recovery
 
 Every arm returned to baseline within ~20 s, on both the drained and undrained
@@ -373,5 +481,16 @@ having happened after it ended.
   stopping a process.
 - **Multi-partition transforms.** Everything here is a single input partition,
   which is the worst case for cold starts (only one broker is ever warm) and
-  the simplest case for the drain (one processor to quiesce).
-- **The drain's tail cost after the placement fix**, as noted above.
+  the simplest case for the drain (one processor to quiesce). It is also the
+  best case for residency: at RF=3 every broker replicates that one partition,
+  so every broker is warm. A transform with more partitions than brokers is
+  already warm everywhere without residency, and one whose partitions outrun
+  the resident bound will start refusing pins - neither case is measured here.
+- **Residency under memory pressure.** The bound was never reached: one
+  transform, one module, a bound of 8. Eviction and the refusal path are
+  covered by unit tests, not on a cluster, so
+  `wasm_binary_resident_admission_failures` read 0 throughout.
+- **Whether residency helps an UNPLANNED leadership loss.** Every arm here
+  moves leadership deliberately. A broker that dies takes its resident modules
+  with it; what matters then is whether the SURVIVOR was warm, which these
+  arms do not isolate.

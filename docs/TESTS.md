@@ -1,13 +1,21 @@
 # The sweeps: what each one varies, pins, and cannot isolate
 
-Reference for `run-e2-throughput.sh` and `run-e1-ceiling.sh`. Read this before
-running one, and before quoting a number out of one.
+Read this before running a sweep, and before quoting a number out of one.
+
+> **Which of these live in this repo.** Only `run-e2-throughput.sh` and
+> `run-resilience.sh` are here, plus `run-inbroker-vs-external.sh` and
+> `run-traditional-sharded.sh` behind `wb reproduce`. The `e1`, `round3`,
+> `round4` and `josh236` sweeps documented below are in the separate
+> `wasm-transforms-fanout-bench` tree this repo was extracted from - `wb run`
+> still names them, but the scripts are not here, so those phases fail. Their
+> sections are kept because the reasoning transfers and because the numbers
+> they produced are quoted elsewhere; do not read them as "runnable here".
 
 Every sweep obeys the same contract: **one variable per mode, everything else
 pinned and written into the run's fingerprint header.** A result whose
 fingerprint differs in any other field is not comparable.
 
-Drive them through `wasm-transforms-fanout-bench/wb run e2 MODE=... K=V ...`,
+Drive them through `./scripts/wb run e2 MODE=... K=V ...`,
 which supplies brokers, admin endpoints and a run id.
 
 ---
@@ -258,17 +266,17 @@ the split above on purpose: admission moves, the boot-carved pool does not.
 ## Invocation
 
 ```sh
-cd ~/redpanda/projects/wasm-transforms-fanout-bench
-./wb doctor                       # always first
+cd ~/redpanda/projects/redpanda-wasm-bench
+./scripts/wb doctor               # always first
 
 # rate sweep at production replication settings
-./wb run e2 MODE=rate RF=3 WRITE_CACHING=true FLUSH_MS=100 LINGER_MS=2 \
+./scripts/wb run e2 MODE=rate RF=3 WRITE_CACHING=true FLUSH_MS=100 LINGER_MS=2 \
   RATE_LEVELS="1000 5000 10000 20000" DURATION=30s WARMUP=10s DRAIN=40s
 
 # strict per-level isolation
-./wb run e2 MODE=rate FRESH_TOPICS_PER_LEVEL=1 RATE_LEVELS="1000 10000"
+./scripts/wb run e2 MODE=rate FRESH_TOPICS_PER_LEVEL=1 RATE_LEVELS="1000 10000"
 
-./wb results                      # pull JSON back locally
+./scripts/wb results              # pull JSON back locally
 ```
 
 Multi-word values must be quoted as one argument (`RATE_LEVELS="1000 5000"`);
