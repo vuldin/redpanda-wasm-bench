@@ -508,6 +508,17 @@ cmd_run() {
     round4) script=run-round4.sh ;;
     *) die "unknown phase '$phase' (want e1, e2, round3, josh236, round4 or resilience)" ;;
   esac
+  # e1, round3, round4 and josh236 live in the wasm-transforms-fanout-bench
+  # tree this repo was extracted from; their scripts are not here. Without
+  # this the failure was a bare "No such file or directory" from the remote
+  # shell, several seconds into an ssh, with no hint that the phase simply
+  # does not exist in this repo.
+  if [ ! -f "$ROOT/bench/$script" ]; then
+    die "phase '$phase' needs $script, which is not in this repo.
+       Only e2 and resilience ship here (plus 'wb reproduce'). e1, round3,
+       round4 and josh236 are in the separate wasm-transforms-fanout-bench
+       tree - see docs/TESTS.md."
+  fi
   # Everything the runners need, so a caller never has to remember it.
   # BINARY GATE. A measurement against the wrong binary is worse than no
   # measurement: it looks exactly like a real result and silently answers a
@@ -739,7 +750,16 @@ case "${1:-}" in
   teardown|down|destroy) shift; cmd_teardown "$@" ;;
   verify-clean) shift; verify_torn_down "$@" ;;
   cleanup-orphans) shift; cmd_cleanup_orphans "$@" ;;
-  reproduce) shift; exec bash "$(dirname "${BASH_SOURCE[0]}")/reproduce.sh" "$@" ;;
+  # reproduce.sh runs its own prerequisite check and reads these from the
+  # ENVIRONMENT. wb computes them as plain shell variables, so exec'ing
+  # without exporting them made `wb reproduce` fail its own preflight with
+  # "MISS REDPANDA_BIN / MISS WASM_DIR" on a tree where `wb doctor` passes -
+  # i.e. the one entry point the README tells you to use could not run.
+  reproduce)
+    shift
+    export REDPANDA_BIN WASM_DIR REDPANDA_SRC WASM_ORDERBOOK_SRC \
+           BENCH_SSH_KEY BENCH_PUB_KEY
+    exec bash "$(dirname "${BASH_SOURCE[0]}")/reproduce.sh" "$@" ;;
   ""|-h|--help|help)
     sed -n '/^# Usage:/,/^set -uo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d' ;;
   *) die "unknown command '$1' - run: wb help" ;;
