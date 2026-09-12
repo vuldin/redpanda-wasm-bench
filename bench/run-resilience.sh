@@ -175,6 +175,25 @@ DRAIN_AB="${DRAIN_AB:-1}"
 # settles - so the full budget is the cost, not a worst case.
 DRAIN_TIMEOUT_MS="${DRAIN_TIMEOUT_MS:-200}"
 
+# --- residency A/B ---------------------------------------------------------
+# Levels for data_transforms_max_resident_factories, swept as an OUTER
+# dimension so each level gets its own baseline. Empty (the default) leaves
+# the property alone, so the published series is unchanged; "0 8" is the A/B
+# that measures what keeping a module resident actually buys.
+#
+# Why this series is where it belongs: residency only pays off when a
+# partition moves to a broker that was not already running the transform, and
+# moving a partition is precisely what this series does. With ONE input
+# partition, the two brokers that are not the leader replicate the input and
+# run nothing - so a transfer lands on a broker that has to fetch and compile
+# the module, which is the cold start residency exists to remove.
+#
+# The property is needs_restart::no, so the levels sweep live with no roll.
+# But SET is not IN EFFECT: residency reconciles on a debounce plus a settle,
+# so measuring straight after cfg_set would measure the OFF behaviour under an
+# ON label. residency_ready() is that gate.
+RESIDENCY_LEVELS="${RESIDENCY_LEVELS:-}"
+
 mkdir -p "$OUT_DIR"
 SUMMARY="$OUT_DIR/summary.txt"
 : > "$SUMMARY"
@@ -222,6 +241,95 @@ settle() {
   say "  !! NOT settled ($why): leadership still moving after ${SETTLE_MAX_SECS}s"
   say "     proceeding anyway - this arm's baseline may carry the previous arm's residual"
   return 0
+}
+
+# --- broker-side bring-up cost ---------------------------------------------
+# What the client cannot see. A leadership move's cost is mostly the NEW owner
+# fetching and compiling the module, and from the client that is
+# indistinguishable from any other stall - so window() below can show the
+# total getting worse without saying which broker paid, or for what. These two
+# histograms measure it on the broker that actually paid it:
+#
+#   processor_create_latency  fetch + compile: exactly what residency removes
+#   startup_latency           the whole dark window, create included
+#
+# Reported PER NODE, because attribution is the entire point. With one input
+# partition the broker that gains leadership performs exactly one create, so
+# its count delta is 1 and its sum delta is that single bring-up's cost. A
+# cluster-wide sum would average it with the two brokers that did nothing.
+#
+# Prints one line per node:
+#   <node_id> <create_n> <create_ms> <startup_n> <startup_ms> <resident> <resident_kib> <refused>
+bringup_per_node() {
+  local IFS_SAVE="$IFS"; IFS=','
+  local u
+  for u in $ADMIN_URLS; do
+    IFS="$IFS_SAVE"
+    local nid body
+    nid="$(curl -sf --max-time 5 "${u%/}/v1/node_config" 2>/dev/null | jq -r '.node_id // empty')"
+    [ -n "$nid" ] || nid="?"
+    body="$(curl -sf --max-time 5 "${u%/}/public_metrics" 2>/dev/null)"
+    printf '%s ' "$nid"
+    printf '%s\n' "$body" | awk -v fn="$MATCHER_NAME" '
+      function mine() { return index($0, "function_name=\"" fn "\"") > 0 }
+      /^redpanda_transform_processor_create_latency_seconds_count\{/ { if (mine()) cn += $2 }
+      /^redpanda_transform_processor_create_latency_seconds_sum\{/   { if (mine()) cs += $2 }
+      /^redpanda_transform_startup_latency_seconds_count\{/          { if (mine()) sn += $2 }
+      /^redpanda_transform_startup_latency_seconds_sum\{/            { if (mine()) su += $2 }
+      /^redpanda_wasm_binary_resident_factories/                     { rf += $2 }
+      /^redpanda_wasm_binary_resident_memory_usage/                  { rb += $2 }
+      /^redpanda_wasm_binary_resident_admission_failures/            { af += $2 }
+      END { printf "%d %.1f %d %.1f %d %d %d\n",
+              cn+0, (cs+0)*1000, sn+0, (su+0)*1000, rf+0, (rb+0)/1024, af+0 }'
+    IFS=','
+  done
+  IFS="$IFS_SAVE"
+}
+
+# Reports the per-node delta between two bringup_per_node snapshots, marking
+# the node that ended up leading the input partition - the one whose create
+# cost is the measurement.
+bringup_delta() {
+  local before="$1" after="$2" new_leader="$3"
+  python3 - "$before" "$after" "$new_leader" <<'PY'
+import sys
+def load(p):
+    d = {}
+    for line in open(p):
+        f = line.split()
+        if len(f) == 8:
+            d[f[0]] = [float(x) for x in f[1:]]
+    return d
+b, a, lead = load(sys.argv[1]), load(sys.argv[2]), sys.argv[3]
+for node in sorted(a):
+    if node not in b:
+        continue
+    cn, cms, sn, sms, rf, rkib, af = (a[node][i] - b[node][i] for i in range(7))
+    rf, rkib, af = a[node][4], a[node][5], a[node][6]
+    mark = "  <-- gained leadership" if node == lead else ""
+    per = (cms / cn) if cn else 0.0
+    print("    node %s: creates=%d create_total=%.0fms create_each=%.0fms "
+          "startups=%d startup_total=%.0fms | resident=%d (%dKiB) refused=%d%s"
+          % (node, cn, cms, per, sn, sms, rf, rkib, af, mark))
+PY
+}
+
+# Set is not in effect. Without this gate the ON arm can silently measure the
+# OFF behaviour, which looks exactly like "residency does nothing".
+residency_ready() {
+  local want="$1" budget="${2:-40}" i got
+  [ "${want:-0}" -gt 0 ] || return 0
+  for i in $(seq 1 "$budget"); do
+    got="$(bringup_per_node | awk '{s+=$6} END{print s+0}')"
+    if [ "${got:-0}" -ge 1 ]; then
+      say "  residency in effect: $got module reference(s) held across the cluster"
+      return 0
+    fi
+    sleep 3
+  done
+  say "  !! residency never took effect within $((budget * 3))s (resident_factories stayed 0)"
+  say "     Treating this arm as INVALID rather than reporting it as 'residency on'."
+  return 1
 }
 
 # --- one measurement window ------------------------------------------------
@@ -432,11 +540,21 @@ run_action() {
     return
   fi
 
+  # Broker-side bring-up, captured around the disturbance. Taken here rather
+  # than around the whole arm so the delta contains the move's create and not
+  # the arm's own setup.
+  local bu_before="$OUT_DIR/$tag.bringup.before" bu_after="$OUT_DIR/$tag.bringup.after"
+  bringup_per_node > "$bu_before" 2>/dev/null || true
+
   # The action fires part-way through the during-window.
   ( sleep "$INJECT_AT_SECS"; inject "$action" "$victim" ) &
   local injector=$!
   local dur; dur=$(window "$tag-during" "$DURING_SECS")
   wait "$injector" 2>/dev/null
+  bringup_per_node > "$bu_after" 2>/dev/null || true
+  local new_leader; new_leader=$(leader_of "$ORDERS_TOPIC" 0)
+  say "  bring-up   (broker-side; the node that gained leadership pays the cold start)"
+  bringup_delta "$bu_before" "$bu_after" "${new_leader:-none}" | tee -a "$SUMMARY"
   if [ "$dur" = "SKIP" ]; then say "  $tag: during-window produced no report"; return; fi
   read -r d50 d90 d99 dmiss ddup dclean dsamp d999 dmax dmean dp50 dp99 do10 do100 dlate <<< "$dur"
   say "  during     total p50=${d50} p90=${d90} p99=${d99} p999=${d999} max=${dmax} mean=${dmean} (us)"
@@ -507,11 +625,51 @@ cleanup() {
   say "restoring cluster state"
   maintenance_clear_all
   cfg_set data_transforms_graceful_transfer_timeout_ms null >/dev/null 2>&1 || true
+  # Back to the default. Left set, it would silently warm every later run on
+  # this cluster and make an unrelated measurement look better than it is.
+  cfg_set data_transforms_max_resident_factories 0 >/dev/null 2>&1 || true
   teardown_arm
 }
 trap cleanup EXIT INT TERM
 
 setup_arm || { say "could not build the in-broker arm - nothing measured"; exit 1; }
+
+# One pass of the action x drain matrix, at whatever residency is currently
+# configured. Factored out so the residency sweep below can drive it without
+# duplicating the drain handling.
+run_matrix() {
+  local suffix="$1"
+  for action in $ACTIONS; do
+    if [ "$DRAIN_AB" = 1 ]; then
+      cfg_set data_transforms_graceful_transfer_timeout_ms null >/dev/null 2>&1
+      run_action "$action" "nodrain$suffix"
+      cfg_set data_transforms_graceful_transfer_timeout_ms "$DRAIN_TIMEOUT_MS" >/dev/null 2>&1
+      run_action "$action" "drain${DRAIN_TIMEOUT_MS}ms$suffix"
+    elif [ -n "${DRAIN_TIMEOUT_SET:-}" ]; then
+      cfg_set data_transforms_graceful_transfer_timeout_ms "$DRAIN_TIMEOUT_SET" >/dev/null 2>&1
+      run_action "$action" "drain${DRAIN_TIMEOUT_SET}ms$suffix"
+    else
+      run_action "$action" "asconfigured$suffix"
+    fi
+  done
+}
+
+if [ -n "$RESIDENCY_LEVELS" ]; then
+  say ""
+  say "residency A/B over data_transforms_max_resident_factories: $RESIDENCY_LEVELS"
+  for res in $RESIDENCY_LEVELS; do
+    say ""
+    say "=================== residency=$res ==================="
+    cfg_set data_transforms_max_resident_factories "$res" >/dev/null 2>&1
+    if ! residency_ready "$res"; then
+      say "SKIPPING residency=$res - the property did not take effect, and an arm"
+      say "  labelled 'residency on' that is actually off is worse than a gap."
+      continue
+    fi
+    run_matrix "-res$res"
+  done
+  cfg_set data_transforms_max_resident_factories 0 >/dev/null 2>&1
+else
 
 for action in $ACTIONS; do
   if [ "$DRAIN_AB" = 1 ]; then
@@ -533,6 +691,8 @@ for action in $ACTIONS; do
     run_action "$action" "asconfigured"
   fi
 done
+
+fi
 
 say ""
 say "results in $OUT_DIR"
