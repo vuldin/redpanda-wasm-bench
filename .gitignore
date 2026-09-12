@@ -7,3 +7,4 @@
 /terraform/clients.auto.tfvars
 /bin/
 /loadgen
+/scripts/.wb-env

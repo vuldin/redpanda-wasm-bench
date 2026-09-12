@@ -88,6 +88,26 @@ merged_var() {
 }
 EXPECT_BROKERS=$(merged_var broker_count)
 EXPECT_CLIENTS=$(merged_var client_count)
+
+# Same precedence as merged_var, for values that are not bare integers:
+# quoted strings and lists. The capacity probe below needs the AZ list and the
+# instance types, and reading those from $TFVARS alone is how the probe came
+# to check us-east-2c while this apply was about to build in us-east-1a
+# (observed 2026-09-11, immediately after select-region.sh fell back to
+# us-east-1). That direction merely aborts on a zone the apply would never
+# touch; the other direction is the dangerous one - capacity confirmed in a
+# zone terraform is not going to use, and the multi-minute RunInstances stall
+# this whole check exists to prevent happens anyway.
+merged_var_raw() {
+  local name="$1" val="" f got
+  for f in "$TFVARS" region.auto.tfvars clients.auto.tfvars; do
+    [ -f "$f" ] || continue
+    got=$(grep -oP "^${name}\s*=\s*\K.*" "$f" | tail -1)
+    [ -n "$got" ] && val="$got"
+  done
+  val="${val%%#*}"
+  printf '%s' "$val" | sed 's/[[:space:]]*$//'
+}
 PUBKEY="${BENCH_PUB_KEY:-$HOME/.ssh/id_rsa.pub}"
 PLAN_FILE=/tmp/topology-switch.plan
 
@@ -173,10 +193,13 @@ echo "=== checking real EC2 capacity for every instance this plan would create, 
 # (main.tf's own subnet-assignment formula), not by trusting the plan
 # JSON's availability_zone field, which Terraform may report as unknown
 # until apply for a resource whose subnet_id is itself only known then.
-AZS_RAW=$(grep -oP '^azs\s*=\s*\K\[.*\]' "$TFVARS")
-BROKER_ITYPE=$(grep -oP '^broker_instance_type\s*=\s*"\K[^"]+' "$TFVARS")
-CLIENT_ITYPE=$(grep -oP '^client_instance_type\s*=\s*"\K[^"]+' "$TFVARS")
-TF_REGION=$(grep -oP '^region\s*=\s*"\K[^"]+' "$TFVARS")
+# From the MERGED view, not $TFVARS - see merged_var_raw above for what
+# reading these from the topology file alone did.
+AZS_RAW=$(merged_var_raw azs)
+BROKER_ITYPE=$(merged_var_raw broker_instance_type | tr -d '"')
+CLIENT_ITYPE=$(merged_var_raw client_instance_type | tr -d '"')
+TF_REGION=$(merged_var_raw region | tr -d '"')
+echo "capacity probe will use region=$TF_REGION azs=$AZS_RAW brokers=$BROKER_ITYPE clients=$CLIENT_ITYPE"
 CAPACITY_CHECK=$(terraform show -json "$PLAN_FILE" | AZS_RAW="$AZS_RAW" BROKER_ITYPE="$BROKER_ITYPE" CLIENT_ITYPE="$CLIENT_ITYPE" python3 -c "
 import json, os, re, sys
 plan = json.load(sys.stdin)
