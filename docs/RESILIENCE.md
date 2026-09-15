@@ -1,263 +1,115 @@
 # Latency during leadership movement
 
-What an in-broker wasm deployment costs while its partition changes leader, and
-how long until it is normal again. Produced by `wb run resilience` (see the
-README section for how to run it).
+What an in-broker wasm deployment costs while its partition changes leader,
+and how long until it's normal again. Produced by `wb run resilience`, see the
+README section for how to run it.
 
-Separate from [REPRODUCE.md](../REPRODUCE.md) on purpose: those tables are
-steady state, and folding a disturbance into them would make them
+This is separate from [REPRODUCE.md](../REPRODUCE.md) on purpose. Those tables
+are steady state, and folding a disturbance into them would make them
 incomparable.
 
-All figures below: one AWS cluster, 3 x `r8id.8xlarge` brokers + 1 x
-`c5n.9xlarge` client, `us-east-2c`, RF=3, 1,000 orders/sec, 650 B payload,
-`acks=all`, `write.caching=true`, single input partition, opt build of
-`transform-latency-instrumentation`. Measured 2026-09-09.
+Every figure here comes from one series on one cluster: 3 x `r8id.8xlarge`
+brokers and 8 x `c5n.9xlarge` clients in `us-east-1a`, RF=3, 1,000 orders/sec,
+650 B payload, `acks=all`, `write.caching=true`, a single input partition, and
+an opt build of `transform-latency-instrumentation`. Eight arms, being two
+actions x two drain budgets x residency off/on. Each arm gets its own 60 s
+baseline, a 30 s window with the action injected at +10 s, and recovery
+windows after that. The client is tuned with `metadata-min-age=100ms` and
+`retry-backoff-max=500ms`.
 
-Receipts come from an ordinary Kafka fetch of the fills topic, **not** from an
-in-broker relay consumer - see [Why not the relay path](#why-not-the-relay-path).
+Absolute latencies aren't comparable across regions or cluster
+instantiations, so every arm is read against its own baseline, measured
+minutes earlier on the same cluster.
 
----
-
-## The headline: it was a client default, not Redpanda
-
-The first measurement showed a maintenance drain producing an e2e p99 of
-**4.72 s** against a 648 us baseline. Almost all of it was one client setting.
-
-| stage | baseline | during drain |
-|---|---|---|
-| `produce` (client -> quorum ack) | 636 us | **4,710,398 us** |
-| `match` (ack -> guest stamp) | 23 us | 30,600 us |
-| `relay_consume` (stamp -> receipt) | 70 us | 4,026 us |
-| **`total`** | 648 us | **4,715,693 us** |
-
-`produce` is 99.9% of it. Everything transform-attributable is ~35 ms.
-
-Broker-side produce latency, sampled every 2 s across the same drain from
-`redpanda_kafka_request_latency_seconds{redpanda_request="produce"}`, 46
-windows carrying traffic:
-
-| | value |
-|---|---|
-| mean | 0.179 ms |
-| min | 0.162 ms |
-| **max** | **0.565 ms** |
-
-Flat. The broker's *worst* window is ~0.012% of the client-observed tail. And
-during the transfer the broker received **fewer** produce requests (652 in a
-2 s window against ~2,109 steady) at the **same** per-request latency -
-records were not being processed slowly, they were not arriving.
-
-### Cause
-
-`franz-go@v1.21.5` defaults `metadataMinAge` to **5 s**
-(`pkg/kgo/config.go:649`). That rate-limits how soon a client may re-fetch
-metadata after a `NOT_LEADER`, so a record can wait ~5 s to learn the new
-leader. The untuned max was **5,009,738 us** - the default, near-exactly. The
-default retry backoff compounds it (250 ms escalating to a 5 s cap). franz-go's
-floor for `metadataMinAge` is 10 ms.
-
-Note franz-go retries transparently and succeeds, so loadgen recorded **zero
-produce errors**. The error counters cannot distinguish retry latency from
-broker latency; only the broker-side metric separates them.
-
-### Effect of tuning the client
-
-Same cluster, same drain, `metadata-min-age=100ms retry-backoff-max=500ms`:
-
-| | untuned (5 s default) | tuned |
-|---|---|---|
-| produce p99 during drain | 4,712,698 us (4.71 s) | **610 us** |
-| produce max during drain | 5,011,475 us (5.01 s) | **105,819 us** |
-| total p99 during drain | 4,719,327 us | **1,375 us** |
-| total max during drain | 5,020,085 us | **284,593 us** |
-| duplicates (sampled) | 240-319 | 28 |
-
-The tuned produce p99 during the drain (610 us) is *below* its own baseline
-produce p99 (655 us): the tail left p99 entirely and survives only in `max`.
-With a properly configured client a maintenance drain is close to invisible at
-p99.
-
-Duplicates fell too, as a second-order effect - a shorter leaderless window
-leaves less work in flight when leadership moves.
-
-**This improves a client number, not Redpanda.** The broker was already
-handling produce in 0.18 ms throughout. `redpanda-wasm-clients` now sets these
-options; `loadgen` exposes them as flags defaulting to franz-go's values, and
-records both in every report's config fingerprint so a tuned run cannot be
-mistaken for an untuned one.
-
----
+Receipts come from an ordinary Kafka fetch of the fills topic rather than from
+an in-broker relay consumer. See
+[Why not the relay path](#why-not-the-relay-path).
 
 ## The graceful drain: duplicates versus tail
 
 `data_transforms_graceful_transfer_timeout_ms` lets a transform finish and
-commit in-flight work before leadership moves, instead of discarding it for the
-next owner to reprocess. Reprocessing shows up downstream as duplicate output,
-because a processor takes a fresh `producer_id` on every start and so cannot be
-deduplicated across owners.
+commit in-flight work before leadership moves, instead of discarding it for
+the next owner to reprocess. Reprocessing shows up downstream as duplicate
+output, because a processor takes a fresh `producer_id` on every start and so
+can't be deduplicated across owners.
 
-Measured with the **tuned** client (the untuned numbers were dominated by the
-client artifact above and are not usable for this comparison):
+The four arms with residency off, each against its own baseline:
 
-| budget | duplicates | during p90 | during p99 |
-|---|---|---|---|
-| none | 196 | 1,036 us | 61,508 us |
-| 200 ms | **0** | 973 us | 222,531 us |
-| 500 ms | **0** | 991 us | 1,251 us |
-| 1000 ms | **0** | 897 us | 961,276 us |
-| 5000 ms | **0** | 92,519 us | 2,791,944 us |
+| arm | produce p99 | e2e p99 | e2e max | over 10 ms | dups |
+|---|---|---|---|---|---|
+| maintenance, no drain | 1,060 -> 916 us | 2,916 -> 2,957 us | 5,102 -> 195,748 us | 0 -> 187 | 27 |
+| maintenance, 200 ms | 691 -> 746 us | 1,108 -> 70,124 us | 2,705 -> 367,720 us | 0 -> 361 | 0 |
+| transfer, no drain | 650 -> 744 us | 919 -> 1,273 us | 2,424 -> 214,948 us | 0 -> 207 | 48 |
+| transfer, 200 ms | 669 -> 713 us | 1,098 -> 70,770 us | 3,269 -> 367,910 us | 0 -> 362 | 0 |
 
-**Every budget at or above 200 ms eliminates duplicates.** In-flight work is
-about one batch, so seconds of budget buy nothing. The harness default was
-lowered from 5000 ms to 1000 ms on the strength of this - 5x headroom over the
-measured requirement, rather than a budget the drain cannot plausibly need.
+Zero missing receipts in every arm, and every arm recovered.
 
-**The tail column is not yet characterised, and should not be read as a
-curve.** It looks like p99 tracks the budget at 200/1000/5000 ms, but the
-500 ms point contradicts that outright - 1,251 us against its own 1,498 us
-baseline, no visible spike at all. One run per budget, with baselines drifting
-between 770 us and 1,498 us across the sweep, cannot support a relationship.
-Whether p99 captures the stall depends on when the drain lands relative to the
-sampled records. The duplicate column is the part that replicated.
+A 200 ms budget eliminates duplicates. Without it they're 27 to 48. In-flight
+work is about one batch, so the budget only has to cover a flush, which is why
+the harness default is 200 ms. Both no-drain arms produced duplicates and both
+drain arms produced none, so this is a statement about a drain that
+demonstrably did work rather than one that had nothing to do.
 
-### Why the drain cost anything at all: TWO causes, not one
+The produce path doesn't pay for the drain. Produce p99 stays between 647 and
+1,060 us across all eight arms, baseline and during, drained and undrained.
+Whatever a leadership move costs here, it isn't the write path.
 
-The 5,000 ms arm's cost landed in `produce` (2.79 s of the 2.85 s total), which
-is not where a consumer-side quiesce belongs. The relevant lock chain, verified
-in source:
+The cost is e2e and it's real. A drain stops the consumer immediately and the
+transfer then waits out the budget, so records arriving in that window aren't
+transformed until the new owner starts. That's inherent to draining rather
+than a defect, which is why the budget should be the smallest value that
+eliminates duplicates rather than the largest one that fits.
 
-- `cluster::partition::transfer_leadership` takes the STM prepare lock, *then*
+Both actions pay it about equally. maintenance and transfer at a 200 ms budget
+land within 1% of each other, 70,124 against 70,770 us at p99 and 367,720
+against 367,910 us at max. The two only differ sharply without a drain, where
+maintenance shows up in max and barely moves p99 while transfer moves neither
+much.
+
+Without a drain the cost leaves p99 entirely and survives only in max.
+`transfer, no drain` read 1,273 us at p99 against a 919 us baseline, which p99
+alone would report as nearly free, while its max was 215 ms. That's the
+strongest argument for reporting max and over-threshold counts alongside
+percentiles.
+
+A p99 of 70 ms is a tail rather than a stall. On the 200 ms maintenance arm,
+361 of 30,000 sampled records (1.2%) exceeded 10 ms and 270 (0.9%) exceeded
+100 ms, while p50 and p90 were untouched at 726 and 859 us. A window aggregate
+reads as a fleet-wide freeze. The counts say about 1% of records were
+affected.
+
+### Why a drain costs anything at all, in the code
+
+The cost isn't where a consumer-side quiesce belongs, and working out why took
+two fixes rather than one. The lock chain:
+
+- `cluster::partition::transfer_leadership` takes the STM prepare lock, then
   calls `_raft->do_transfer_leadership()`
 - `rm_stm::prepare_transfer_leadership()` is `_state_lock.hold_write_lock()`
-- `rm_stm::do_replicate()` - the produce path - takes `hold_read_lock()`
+- `rm_stm::do_replicate()`, which is the produce path, takes
+  `hold_read_lock()`
 
-The obvious reading is that the quiesce simply ran too late, and moving it to
-the start of `cluster::partition::transfer_leadership` - before the prepare
-phases - would fix it. That was done, and **it was not sufficient.** raft's
-hook is deliberately kept, because `transfer_and_stepdown` (decommission) never
-goes through `cluster::partition`, so on the transfer path BOTH hooks fire. The
-claim that the second one "finds the work already done and costs nothing" holds
-only when the first drain *succeeded*. When the transform is behind, the first
-drain times out at its budget, and raft's hook then re-runs the whole budget
-from behind the write lock - reproducing the exact pathology the move was meant
-to remove.
+The obvious reading is that the quiesce ran too late and moving it to the
+start of `cluster::partition::transfer_leadership` would fix it. That was
+done, and it wasn't sufficient. raft's hook is deliberately kept, because
+`transfer_and_stepdown` (decommission) never goes through `cluster::partition`,
+so on the transfer path both hooks fire. The claim that the second one finds
+the work already done and costs nothing only holds when the first drain
+succeeded. When the transform is behind, the first drain times out at its
+budget, and raft's hook then re-runs the whole budget from behind the write
+lock, which reproduces the exact pathology the move was meant to remove.
 
-`processor::drain()` is now single-shot per processor lifetime: it records the
-first attempt's verdict and answers from it, with `start()` clearing it so each
-new owner gets its own bounded chance.
+So `processor::drain()` is single-shot per processor lifetime. It records the
+first attempt's verdict and answers from it, with `start()` clearing it so
+each new owner gets its own bounded chance. The produce figures above are what
+that looks like once both fixes are in.
 
-### How the defect was located, locally
+A passthrough transform can't find any of this. It never lags, so its drain
+never times out, so the second drain really is free and the defect is
+invisible. Reproducing it needs a guest slow enough that every drain hits its
+deadline.
 
-A local 3-broker cluster at one shard per broker, so every partition on a node
-shares one reactor thread, with a guest burning 1 ms per record at 600
-records/sec (saturated, so every drain times out - the worst case for this
-defect) and a `ctl-*` control partition led by the same node with no transform
-on it. Client-observed produce max over a 30 s window, drain injected at 15 s:
-
-| budget | input partition BEFORE | AFTER | control AFTER |
-|---|---|---|---|
-| none | 135 ms | 125 ms | 37 ms |
-| 1000 ms | 1,140 ms | **158 ms** | 24 ms |
-| 5000 ms | 5,171 ms | **130 ms** | 140 ms |
-
-The control column is what makes this a measurement rather than a story. A
-saturated guest keeps running *during* a drain by design, so reactor starvation
-predicts a stall proportional to the budget just as convincingly as a lock
-does. The control partition, on the same single reactor, stayed flat while the
-transform's partition tracked the budget - so starvation was not the cause. The
-other tell was timing: the stall began one full budget *after* the injection,
-which is the second drain, not the first.
-
-A passthrough transform cannot find any of this: it never lags, so its drain
-never times out, so the second drain really is free and the defect is invisible.
-Those figures are a fastbuild broker - read the arm-to-arm relationship, not
-the absolute values.
-
-### Quotable numbers, opt build on AWS
-
-3 x `r8id.8xlarge` + 1 x `c5n.9xlarge`, `us-east-2c`, RF=3, 1,000 orders/sec,
-650 B, `acks=all`, single input partition, opt build carrying both fixes.
-Measured 2026-09-09. Each arm's own 60 s baseline, 30 s during-window.
-
-| arm | produce p99 | e2e p99 | duplicates |
-|---|---|---|---|
-| maintenance, no drain | 646 us | 1,536 us | 30 |
-| maintenance, 200 ms | - | 114,464 us | **0** |
-| maintenance, 1000 ms | **689 us** | 875,620 us | **0** |
-| transfer, no drain | 562 us | 1,466 us | 42 |
-| transfer, 1000 ms | 523 us | 1,134 us | **0** |
-
-**The produce path is fixed.** A maintenance drain with a 1000 ms budget costs
-689 us of produce p99 against 646 us with no drain - about 43 us. The same
-measurement before these fixes was **2.79 s**. Nothing about the budget appears
-in produce latency any more.
-
-**The remaining cost is e2e, it is real, and it scales with the budget.** A
-drain stops the CONSUMER immediately and the transfer then waits out the
-budget, so records arriving in that window are not transformed until the new
-owner starts. That is inherent to draining, not a defect.
-
-**It is paid in full under maintenance, and not at all under a targeted
-transfer** (875 ms vs 1,134 us at the same budget). Maintenance moves the
-OUTPUT topic's leadership too, so the transform's writes cannot land, its
-commits cannot complete, and the drain runs to its deadline every time. A
-targeted transfer leaves the output topic alone and the drain finishes in
-milliseconds. Note the timed-out drain still eliminated duplicates - the
-flush-on-timeout path does useful work.
-
-So the budget should be the smallest value that eliminates duplicates, which
-is why the harness default is now 200 ms and not 1000 ms: identical correctness
-for an eighth of the e2e cost. An earlier "keep 5x headroom" argument for
-1000 ms was wrong, because headroom is not free here.
-
-This run is also the first to show BOTH halves on one cluster - the no-drain
-arms emit duplicates (30 and 42) and the drain arms eliminate them - so "the
-drain costs the produce path nothing" is a statement about a drain that
-demonstrably did work, rather than about one that had nothing to do.
-
-### Second run, with the full field set
-
-Same cluster shape, 200 ms budget (the new default), all four arms:
-
-| arm | produce p99 | total p99 | total max | over 10 ms | dups |
-|---|---|---|---|---|---|
-| maintenance, no drain | 592 -> **596** | 1,307 -> 1,319 | 9,389 -> 6,847 | 0 -> 0 | 0 |
-| maintenance, 200 ms | 524 -> **799** | 1,160 -> 223,811 | 3,777 -> 376,286 | 0 -> 732 | **0** |
-| transfer, no drain | 573 -> **732** | 1,508 -> 1,292 | 202,304 -> 205,692 | 386 -> 198 | 42 |
-| transfer, 200 ms | 592 -> **684** | 1,307 -> 66,874 | 21,532 -> 364,146 | 13 -> 358 | **0** |
-
-Produce p99 stays between 596 and 799 us in every arm, so the produce-path fix
-holds across both actions and both budgets. The e2e cost continues to scale
-with the budget: 224 ms at a 200 ms budget against 875 ms at 1000 ms.
-
-What the counts add: on the 200 ms maintenance arm, 732 of 30,000 sampled
-records (2.4%) exceeded 10 ms and 550 (1.8%) exceeded 100 ms, while p50 and p90
-were untouched at 868 / 945 us. "p99 = 224 ms" on its own reads as a
-fleet-wide stall; it is closer to a 2% tail.
-
-And the timeline shows the disturbance is several discrete events rather than
-one continuous stall - consistent with maintenance moving each partition
-independently, each draining separately:
-
-```
-t=+3000ms   n=500  p50=928us     p99=371,344us  max=376,286us
-t=+3500ms   n=500  p50=898us     p99=194,432us  max=199,412us
-t=+13000ms  n=500  p50=863us     p99=5,587us    max=10,311us
-t=+23000ms  n=500  p50=120,605us p99=363,659us  max=367,795us
-```
-
-The last bucket has a p50 of 120 ms - half the records offered in that 500 ms
-were affected. No window aggregate conveys that.
-
-One caveat on duplicates: `transfer, no drain` reported 42 in both runs, but
-`maintenance, no drain` reported 30 in the first run and 0 in the second. The
-no-drain duplicate count is not reliably reproducible, so treat "the drain
-eliminates duplicates" as established by the arms where the no-drain side
-actually produced some.
-
----
-
-## Keeping the module resident: the other half of a leadership move
+## Keeping the module resident
 
 The drain fixes the departing side. It does nothing for the arriving side: the
 broker that takes the partition over still has to fetch the wasm binary and
@@ -266,33 +118,30 @@ partition. `data_transforms_max_resident_factories` holds a compiled module in
 memory on every broker that replicates a transform's input topic, so the
 handover lands on a warm broker instead of a cold one.
 
-### How it is measured, and why per broker
+### How it's measured, and why per broker
 
-Client-observed latency cannot isolate this. From the client a cold start is
+Client-observed latency can't isolate this. From the client a cold start is
 indistinguishable from any other stall, and the arm's total can move for
 reasons that have nothing to do with bring-up. So the series scrapes two
 broker-side histograms, per node, filtered to the transform under test:
 
-    transform_processor_create_latency_seconds   fetch + compile
-    transform_startup_latency_seconds            the whole dark window
+```
+transform_processor_create_latency_seconds   fetch + compile
+transform_startup_latency_seconds            the whole dark window
+```
 
-Per node is the point, not a detail. With one input partition the broker that
-gains leadership performs exactly ONE create, so its count delta is 1 and its
-sum delta is that single bring-up. A cluster-wide sum would average it with
-the two brokers that did nothing.
+Per node matters. With one input partition the broker that gains leadership
+performs exactly one create, so its count delta is 1 and its sum delta is that
+single bring-up. A cluster-wide sum would average it with the two brokers that
+did nothing.
 
 The ON arms are gated on `wasm_binary_resident_factories` reaching at least 1
-before anything is measured. The property is `needs_restart::no`, but set is
-not in effect - residency reconciles on a debounce plus a settle - and an arm
-labelled "residency on" that is actually off looks exactly like "residency
-does nothing".
+before anything is measured. The property is `needs_restart::no`, but set
+isn't the same as in effect, since residency reconciles on a debounce plus a
+settle, and an arm labelled "residency on" that's actually off looks exactly
+like "residency does nothing".
 
-### Quotable numbers, opt build on AWS
-
-3 x `r8id.8xlarge` + 8 x `c5n.9xlarge`, **`us-east-1a`** (not the `us-east-2c`
-of the runs above - `select-region.sh` fell back on capacity, and absolute
-latencies are not comparable across regions), RF=3, 1,000 orders/sec, 650 B,
-`acks=all`, single input partition. Measured 2026-09-12.
+### The result
 
 Bring-up on the broker that gained leadership:
 
@@ -302,195 +151,190 @@ Bring-up on the broker that gained leadership:
 | maintenance, 200 ms | off | 91 ms | 92 ms | 0 |
 | transfer, no drain | off | 93 ms | 94 ms | 0 |
 | transfer, 200 ms | off | 92 ms | 93 ms | 0 |
-| maintenance, no drain | 8 | **1 ms** | 2 ms | 1 |
-| maintenance, 200 ms | 8 | **1 ms** | 3 ms | 1 |
-| transfer, no drain | 8 | **0 ms** | 2 ms | 1 |
-| transfer, 200 ms | 8 | **0 ms** | 2 ms | 1 |
+| maintenance, no drain | 8 | 1 ms | 2 ms | 1 |
+| maintenance, 200 ms | 8 | 1 ms | 3 ms | 1 |
+| transfer, no drain | 8 | 0 ms | 2 ms | 1 |
+| transfer, 200 ms | 8 | 0 ms | 2 ms | 1 |
 
-**Fetch plus compile goes from ~92 ms to ~1 ms, a 91-94x reduction**, and
-`startup` tracks it (92-95 ms to 2-3 ms). That startup is only ~1 ms more than
-create is itself the finding that fetch+compile is ~99% of the dark window -
+Fetch plus compile goes from about 92 ms to about 1 ms, and `startup` tracks
+it, 92-95 ms down to 2-3 ms. Startup being only ~1 ms more than create is
+itself the finding that fetch and compile are ~99% of the dark window,
 measured here rather than assumed.
 
-**An earlier exploration put the cold start at ~269 ms. On this hardware and
-this opt build it is ~92 ms.** Quote the measured figure; the older one came
-off different hardware and was never re-checked, which is why the plan for
-this work said to re-measure rather than trust it.
-
-End to end, the saving shows up where a client feels it - in the worst-case
-record, not at p99:
+End to end, the saving shows up in the worst-case record rather than at p99:
 
 | arm | e2e max, residency off | residency on | delta |
 |---|---|---|---|
-| maintenance, 200 ms | 367,720 us | 276,171 us | **-91.5 ms** |
-| transfer, no drain | 214,948 us | 115,665 us | **-99.3 ms** |
-| transfer, 200 ms | 367,910 us | 280,145 us | **-87.8 ms** |
+| maintenance, 200 ms | 367,720 us | 276,171 us | -91.5 ms |
+| transfer, no drain | 214,948 us | 115,665 us | -99.3 ms |
+| transfer, 200 ms | 367,910 us | 280,145 us | -87.8 ms |
 
-Those deltas are the bring-up saving, arriving end to end: 87.8-99.3 ms
-against an independently measured ~92 ms of removed fetch+compile.
+Those deltas are the bring-up saving arriving end to end: 87.8 to 99.3 ms
+against an independently measured ~92 ms of removed fetch and compile. The
+cleanest of the three is `maintenance, 200 ms`, where both arms gained
+leadership on the same node and recorded exactly one create each.
 
-### One arm is not comparable, and the instrumentation is why we know
+### One arm isn't comparable, and the instrumentation is why we know
 
 `maintenance, no drain` with residency on read 868,365 us max and 1,002
-duplicates, far worse than its off counterpart. It is not a residency cost.
-That arm recorded **two** creates - one on each of two brokers - where every
-other arm recorded exactly one: `maintenance` enables and then immediately
-disables, and leadership went node2 -> node0 -> node2 inside the window. Two
-moves, two bring-ups, two lots of reprocessing, and 977 of its records over
-100 ms against 1,002 duplicates is one contiguous ~1 s block of reprocessed
-traffic.
+duplicates, far worse than its off counterpart. That isn't a residency cost.
+The arm recorded two creates, one on each of two brokers, where every other
+arm recorded exactly one. `maintenance` enables and then immediately disables,
+and leadership went node2 to node0 to node2 inside the window: two moves, two
+bring-ups, two lots of reprocessing. Its 977 records over 100 ms against 1,002
+duplicates is one contiguous ~1 s block of reprocessed traffic.
 
 Only the per-node create attribution makes that visible. A cluster-wide sum
-would have shown "p99 200x worse with residency on" and invited exactly the
-wrong conclusion. Use the `transfer` action for a single deterministic move
-when the client-side comparison is what matters.
+would have shown "p99 200x worse with residency on" and invited the wrong
+conclusion. Use the `transfer` action for a single deterministic move when the
+client-side comparison is what matters.
 
-### What it costs, and what it does not do
+### What it costs, and what it doesn't do
 
-**363 KiB of executable memory per broker per resident module**, read from
+363 KiB of executable memory per broker per resident module, read from
 `wasm_binary_resident_memory_usage`. The bound counts modules rather than
-bytes because a module's size is only known after it is compiled, so a byte
-bound would have to fetch and compile in order to discover it must refuse -
+bytes because a module's size is only known after it's compiled, so a byte
+bound would have to fetch and compile in order to discover it must refuse,
 spending the exact resource the bound protects. Size the count by dividing
 `wasm_binary_resident_memory_usage` by `wasm_binary_resident_factories` for
 your own binaries.
 
 At RF=3 on three brokers every broker replicates the single input partition,
-so one transform is held on all three - `resident=1` on each, three references
-cluster-wide. That is the intended behaviour, not over-pinning: a leader that
-flaps between two brokers stays warm on both.
+so one transform is held on all three: `resident=1` on each, three references
+cluster-wide. That's intended rather than over-pinning. A leader that flaps
+between two brokers stays warm on both.
 
-**Residency does not change duplicates.** The drain arms recorded 0 with
-residency both off and on; the no-drain arms recorded 27-48 off and 42 on.
-Eliminating duplicates is the drain's job and residency neither helps nor
-hurts it.
+Residency doesn't change duplicates. The drain arms recorded 0 with residency
+both off and on, and the no-drain arms recorded 27 to 48 off and 42 on.
+Eliminating duplicates is the drain's job.
 
 ## Recovery
 
-Every arm returned to baseline within ~20 s, on both the drained and undrained
-paths - with one exception that is worth understanding, because it recurs.
+All eight arms returned to baseline within about 20 s, which is the first two
+10 s windows after the disturbance, on both the drained and undrained paths
+and with residency off and on. "Recovered" means p99 back within
+`RECOVERY_BAND` (1.35x) of that arm's own baseline and held there for
+`RECOVERY_SUSTAIN` (2) consecutive windows. Without the second condition one
+lucky window reads as recovered and time-to-baseline is understated exactly
+when it's most interesting.
 
-### A first-arm "DID NOT RECOVER" happened once and did not reproduce
+Recovery-window p99 came in at 987 to 1,205 us across every arm, with zero
+records over 10 ms and zero duplicates in all sixteen windows.
 
-On the first 2026-09-09 opt run the first arm reported DID NOT RECOVER within
-180 s, sitting at 1,066-1,478 us against its own 740 us baseline, and that
-run's per-arm baselines drifted monotonically: 740 -> 1,067 -> 1,114 ->
-1,195 us. The explanation offered at the time was that all arms in one
-invocation share one set of topics (`orders-res-$RUN_ID`), so the log grows
-underneath the series and arm 1's baseline is measured on an almost empty log
-while its recovery windows run against a much larger one.
+Two things to know before reading a recovery verdict:
 
-**A second run with the identical harness did not reproduce it.** Baselines
-came in at 1,307 -> 1,160 -> 1,508 -> 1,307 us - no trend - and every arm
-recovered inside 20 s. The shared-topic design was unchanged, so a mechanism
-driven by log growth would have to produce the drift every time. It did not.
-Treat the log-growth account as unconfirmed; the observation was real for that
-run, the explanation was over-claimed.
+- Compare an arm only against its own baseline. The first arm of a series runs
+  against a nearly empty log and its baseline reflects that. Here it came in
+  at 2,080 us p50 against 705 to 822 us for every later arm. Cross-arm
+  baseline comparison within a session isn't meaningful, which is why each arm
+  measures its own.
+- A baseline isn't automatically quiet. Arms are separated by a settling
+  period (`SETTLE_SECS`, leadership unchanged for 30 s) precisely because
+  without one the previous arm's residual lands in the next arm's baseline,
+  and a baseline containing 200 ms outliers makes "return to baseline"
+  meaningless in both directions. Every baseline in this series reported zero
+  records over 10 ms, which is the evidence that the settle is doing its job.
 
-`leader_balancer_mute_timeout` is worth knowing separately: it defaults to
-300 s, longer than the 180 s recovery budget, so a node leaving maintenance
-genuinely cannot be given leadership back within the measurement. That is a
-real effect on post-maintenance balance, but it is not what produced the
-verdict - the arms that recovered were under the same mute.
+`leader_balancer_mute_timeout` is worth knowing separately. It defaults to
+300 s, longer than the recovery budget, so a node leaving maintenance
+genuinely can't be given leadership back within the measurement. That's a real
+effect on post-maintenance balance rather than on the arms above.
 
-### What the richer fields DID establish: the baselines are not quiet
+## Configure the client, or measure the client
 
-The second run's `transfer-nodrain` **baseline** carried 386 records over
-10 ms and 206 over 100 ms, with p999 172 ms and max 202 ms - while its
-p50/p90/p99 read a clean 891 / 1,072 / 1,508 us. The timeline shows it as two
-discrete ~200 ms events inside an undisturbed window:
+The multi-second tail that gets attributed to a maintenance drain is mostly a
+Kafka client default. Worth knowing before you run this series with a client
+of your own.
 
-```
-t=+28500ms  p99=196,853us  max=202,304us
-t=+52000ms  p99=196,903us  max=202,252us
-```
+`franz-go@v1.21.5` defaults `metadataMinAge` to 5 s
+(`pkg/kgo/config.go:649`). That rate-limits how soon a client may re-fetch
+metadata after a `NOT_LEADER`, so a record can wait ~5 s to learn the new
+leader, and the default retry backoff of 250 ms escalating to a 5 s cap
+compounds it. franz-go's floor for `metadataMinAge` is 10 ms.
 
-Arms run back to back with no settling period, so one arm's residual can land
-in the next arm's baseline, and a baseline containing 200 ms outliers makes any
-"return to baseline" judgement meaningless in both directions. This is a better
-supported account of cross-arm contamination than log growth, and it was
-invisible until max/p999/over-threshold counts were reported - which is the
-argument for reporting them.
+Two things make this hard to catch:
 
-The fix that follows is a settling period between arms, and defining
-"recovered" as "p99 has stabilised" rather than "p99 is back under a number
-measured earlier".
+- franz-go retries transparently and succeeds, so a client records zero
+  produce errors while paying seconds of latency. Error counters can't
+  distinguish retry latency from broker latency.
+- Only a broker-side metric separates them. Sampling
+  `redpanda_kafka_request_latency_seconds{redpanda_request="produce"}` across
+  a drain shows the broker handling produce at a flat sub-millisecond cost
+  throughout, while receiving fewer requests. Records weren't being processed
+  slowly, they weren't arriving.
 
-Two caveats on how that is judged. The figures above were taken with a 30 s
-baseline window and `RECOVERY_BAND=1.20`, which produced several false "DID NOT
-RECOVER" verdicts on arms that were flat and healthy: those short baselines
-came in at 770-890 us while the same cluster's post-disturbance steady state
-sat at 1,025-1,180 us. Both have since been changed - the baseline window to
-60 s, which fixes the cause, and the band to 1.35 to cover the residual drift -
-so a rerun will not reproduce those verdicts. And session baselines drifted
-upward monotonically (839 -> 890 -> 1,019 -> 1,250 -> 1,316 us total p99) across
-both tuned and untuned runs, so cross-run baseline comparisons within a session
-are unreliable - compare each arm against its own baseline only.
-
----
+`redpanda-wasm-clients` and `loadgen` therefore set `metadata-min-age=100ms`
+and `retry-backoff-max=500ms`, and record both in every report's config
+fingerprint so a tuned run can't be mistaken for an untuned one. Set both to
+`5s` to reproduce the untuned tail deliberately. Every figure in this document
+is a tuned-client figure.
 
 ## Why not the relay path
 
 The steady-state runners measure through an in-broker relay consumer
-(`orders -> matcher -> fills -> relay consumer -> probe-out`). That path cannot
+(`orders -> matcher -> fills -> relay consumer -> probe-out`). That path can't
 measure this experiment.
 
-An unpinned relay consumer follows *its own* input partition's leadership, and
+An unpinned relay consumer follows its own input partition's leadership, and
 the relay has no cross-node hop. The first leadership move separated the
-consumer from the matcher writing to fills and receipts stopped **permanently**  -
-the arm survived one drain and then delivered nothing, with loadgen reporting
-`relay drops, or a shard-locality mismatch`. Co-locating at setup does not
+consumer from the matcher writing to fills and receipts stopped permanently.
+The arm survived one drain and then delivered nothing, with loadgen reporting
+`relay drops, or a shard-locality mismatch`. Co-locating at setup doesn't
 help, because the disturbance under test is what destroys the co-location.
 
 So this series measures through an ordinary fills fetch, which is
 leadership-agnostic, and deploys one transform rather than two so the
-measurement does not have a second transform's placement as its own failure
-mode. It costs absolute comparability with the published in-broker figures,
-since it includes an external fetch - but every number here is a delta against
-a baseline taken on the same cluster minutes earlier, so that offset cancels.
-
----
+measurement doesn't have a second transform's placement as its own failure
+mode. It costs absolute comparability with the in-broker figures in
+REPRODUCE.md, since it includes an external fetch, but every number here is a
+delta against a baseline taken on the same cluster minutes earlier, so that
+offset cancels.
 
 ## What each window reports
 
-The series reports the same per-stage quantiles the published tables carry
+The series reports the same per-stage quantiles the steady-state tables carry
 (`scripts/render-tables.py`: p50/p90/p99 for `produce`, `relay_consume` and
 `total`), so a disturbance run and a steady-state run are read the same way,
-plus the fields a disturbance needs that a steady-state table does not.
+plus the fields a disturbance needs that a steady-state table doesn't.
 
 | field | why a disturbance needs it |
 |---|---|
-| `produce` p50/p99 | says WHERE the cost landed. Reporting `total` alone once made a drain look like a produce regression when produce was 689 us inside an 875 ms total - the cost was the transform not consuming, a different problem with a different fix |
-| `max`, `p999` | a leadership move's cost can leave p99 entirely and survive only in max; that already happened in this doc's own client-tuning figures, so p99 alone can show a disturbance as free when it is not |
-| `over 10ms` / `over 100ms` counts | how MANY records were affected, not how bad for the worst few. One 900 ms record and three hundred of them give nearly the same p99 and mean completely different things |
-| `mean` | the aggregate cost. On the 1000 ms arm, p50 815 us and p90 916 us were untouched while mean was 24 ms - i.e. the hit was confined to about the top 1%, which "p99 = 875 ms" overstates as a fleet-wide impact |
-| `send_lateness` p99 | a load generator that fell behind reports its own queueing as system latency. render-tables REJECTS a level for this; a disturbance is exactly when the client is most likely to fall behind, so the series warns when it exceeds one pacing interval |
-| `timeline` | per-interval p50/p99/max bucketed by SEND time (`-timeline-ms`, 500 ms here). An aggregate cannot say when a stall began or how long it lasted, and those identify the mechanism: a stall starting one drain-budget AFTER the injection is a second drain, one starting at the injection is the transfer itself, and both give the same window aggregate |
+| `produce` p50/p99 | says where the cost landed. Reporting `total` alone once made a drain look like a produce regression when the cost was the transform not consuming, a different problem with a different fix |
+| `max`, `p999` | a leadership move's cost can leave p99 entirely and survive only in max, which is what `transfer, no drain` did above, so p99 alone can show a disturbance as nearly free when it isn't |
+| `over 10ms` / `over 100ms` counts | how many records were affected rather than how bad it was for the worst few. One 900 ms record and three hundred of them give nearly the same p99 and mean completely different things |
+| `mean` | the aggregate cost. On the drained arms p50 and p90 were untouched while mean moved to 3 ms, so the hit was confined to about the top 1%, which the p99 figure overstates as fleet-wide |
+| `send_lateness` p99 | a load generator that fell behind reports its own queueing as system latency. render-tables rejects a level for this, and a disturbance is exactly when the client is most likely to fall behind, so the series warns when it exceeds one pacing interval |
+| `timeline` | per-interval p50/p99/max bucketed by send time (`-timeline-ms`, 500 ms here). An aggregate can't say when a stall began or how long it lasted, and those identify the mechanism: a stall starting one drain-budget after the injection is a second drain, one starting at the injection is the transfer itself, and both give the same window aggregate |
 
-Bucketing by send time rather than receipt time matters: a record delayed by
-seconds belongs to the moment it was offered, or the stall is reported as
+Bucketing by send time rather than receipt time matters. A record delayed by
+seconds belongs to the moment it was offered, or the stall gets reported as
 having happened after it ended.
 
-## What is not measured
+## What isn't measured
 
-- **Decommission.** Exercises `consensus::transfer_and_stepdown`, the path that
+- Decommission. It exercises `consensus::transfer_and_stepdown`, the path that
   bypasses `cluster::partition::transfer_leadership`. Covered by unit tests
-  against a real raft group, not on a cluster.
-- **Broker restart.** Stubbed in `run-resilience.sh`; needs the ansible/ssh
-  path. Maintenance and explicit transfer cover leadership movement without
-  stopping a process.
-- **Multi-partition transforms.** Everything here is a single input partition,
-  which is the worst case for cold starts (only one broker is ever warm) and
-  the simplest case for the drain (one processor to quiesce). It is also the
-  best case for residency: at RF=3 every broker replicates that one partition,
-  so every broker is warm. A transform with more partitions than brokers is
-  already warm everywhere without residency, and one whose partitions outrun
-  the resident bound will start refusing pins - neither case is measured here.
-- **Residency under memory pressure.** The bound was never reached: one
-  transform, one module, a bound of 8. Eviction and the refusal path are
-  covered by unit tests, not on a cluster, so
+  against a real raft group rather than on a cluster.
+- Broker restart. Stubbed in `run-resilience.sh`, needs the ansible/ssh path.
+  Maintenance and explicit transfer cover leadership movement without stopping
+  a process.
+- Multi-partition transforms. Everything here is a single input partition,
+  which is the worst case for cold starts since only one broker is ever warm,
+  and the simplest case for the drain since there's one processor to quiesce.
+  It's also the best case for residency: at RF=3 every broker replicates that
+  one partition, so every broker is warm. A transform with more partitions
+  than brokers is already warm everywhere without residency, and one whose
+  partitions outrun the resident bound will start refusing pins. Neither case
+  is measured here.
+- Residency under memory pressure. The bound was never reached, since this is
+  one transform and one module against a bound of 8. Eviction and the refusal
+  path are covered by unit tests rather than on a cluster, so
   `wasm_binary_resident_admission_failures` read 0 throughout.
-- **Whether residency helps an UNPLANNED leadership loss.** Every arm here
-  moves leadership deliberately. A broker that dies takes its resident modules
-  with it; what matters then is whether the SURVIVOR was warm, which these
-  arms do not isolate.
+- Whether residency helps an unplanned leadership loss. Every arm here moves
+  leadership deliberately. A broker that dies takes its resident modules with
+  it, and what matters then is whether the survivor was warm, which these arms
+  don't isolate.
+- Drain budgets other than 200 ms. The A/B is unset against 200 ms. 200 ms is
+  enough to eliminate duplicates and the e2e cost scales with the budget, so
+  larger values weren't worth cluster time. If you need to know what a
+  particular budget costs, sweep it with `DRAIN_TIMEOUT_SET`.
