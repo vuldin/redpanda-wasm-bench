@@ -145,7 +145,13 @@ Results and analysis are in [docs/RESILIENCE.md](docs/RESILIENCE.md). Read
 that before running this.
 
 ```bash
+# the four-arm series: two actions, drain unset vs 200ms
 ./scripts/wb run resilience ACTIONS="maintenance transfer" DRAIN_AB=1
+
+# the eight-arm series the published figures come from, adding the
+# residency A/B on top
+./scripts/wb run resilience ACTIONS="maintenance transfer" DRAIN_AB=1 \
+  RESIDENCY_LEVELS="0 8"
 ```
 
 It answers three questions per action, against a cluster already running the
@@ -184,7 +190,7 @@ ducktape suite already covers.
 | `ACTIONS` | `maintenance transfer` | `restart` is stubbed, not implemented |
 | `DRAIN_AB` / `DRAIN_TIMEOUT_MS` | `1` / `200` | the unset-vs-set comparison. 200 ms eliminates duplicates and the e2e cost scales with the budget, so there's no reason to go higher |
 | `DRAIN_TIMEOUT_SET` | unset | run one arm at this budget instead of the A/B, for sweeping it |
-| `RESIDENCY_LEVELS` | `0 8` | `data_transforms_max_resident_factories` values to A/B |
+| `RESIDENCY_LEVELS` | unset | set to `0 8` to A/B `data_transforms_max_resident_factories`. Unset runs one pass at whatever the cluster already has |
 | `BASELINE_SECS` / `DURING_SECS` | `60` / `30` | 60 s because 30 s baselines came in below the cluster's own steady state and produced false "did not recover" verdicts |
 | `INJECT_AT_SECS` | `10` | when the action fires inside the during-window |
 | `RECOVERY_WINDOW_SECS` | `10` | granularity of time-to-baseline |

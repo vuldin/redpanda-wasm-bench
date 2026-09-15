@@ -25,6 +25,13 @@ Receipts come from an ordinary Kafka fetch of the fills topic rather than from
 an in-broker relay consumer. See
 [Why not the relay path](#why-not-the-relay-path).
 
+The invocation that produced all of it:
+
+```bash
+./scripts/wb run resilience ACTIONS="maintenance transfer" DRAIN_AB=1 \
+  RESIDENCY_LEVELS="0 8"
+```
+
 ## The graceful drain: duplicates versus tail
 
 `data_transforms_graceful_transfer_timeout_ms` lets a transform finish and
