@@ -574,7 +574,11 @@ cmd_run() {
 
 cmd_results() {
   load_env
-  local dest="${1:-$WASM_ORDERBOOK_SRC/bench/results/cloud-$(date +%Y%m%d-%H%M%S)}"
+  # This repo's own results/ - it is gitignored and it is where REPRODUCE.md
+  # says results live. It used to default into $WASM_ORDERBOOK_SRC, the tree
+  # this harness was extracted from, so `wb results` with no argument wrote a
+  # run's output into an unrelated repo.
+  local dest="${1:-$ROOT/results/cloud-$(date +%Y%m%d-%H%M%S)}"
   mkdir -p "$dest"
   local h; h="$(resolve_host client0)"
   rsync -az -e "ssh -i $BENCH_SSH_KEY ${SSH_OPTS[*]}" \
