@@ -331,6 +331,29 @@ cmd_doctor() {
   else
     note "OK   guests + host in $WASM_DIR"
   fi
+  echo "=== monitoring ==="
+  if cluster_in_state; then
+    load_env
+    if [ -z "${MONITOR_PUB// /}" ]; then
+      note "none - provisioned with monitor_count=0"
+    else
+      local gcode
+      gcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 \
+               "$GRAFANA_URL/api/health" 2>/dev/null)" || true
+      if [ "$gcode" = "200" ]; then
+        note "OK   $GRAFANA_URL"
+        local up
+        up="$(curl -sf --max-time 10 "$PROMETHEUS_URL/api/v1/targets?state=active" 2>/dev/null \
+              | jq -r '[.data.activeTargets[] | select(.health=="up")] | length' 2>/dev/null)"
+        note "OK   prometheus, ${up:-?} targets up"
+      else
+        note "DOWN $GRAFANA_URL (HTTP ${gcode:-no connection}) - run: wb monitor deploy"
+        bad=1
+      fi
+    fi
+  else
+    note "no cluster yet; wb up deploys the stack before anything is measured"
+  fi
   echo "=== terraform state ==="
   if cluster_in_state; then
     note "OK   cluster exists"
@@ -699,15 +722,38 @@ cmd_monitor() {
       # out while the VPC, route table and SG all look correct on inspection -
       # so the failure reads as "grafana is broken". Diagnose it here with the
       # fix, rather than leaving someone to find it.
-      local ok=0
-      if curl -sf --max-time 8 "$GRAFANA_URL/api/health" >/dev/null 2>&1; then
-        note "OK   grafana reachable from this machine"
-        ok=1
+      # Separate "cannot open the socket" from "opened it and got a non-200",
+      # and retry briefly before blaming the network. Both matter: a single
+      # curl -sf conflates the two, and a restart in flight looks identical to
+      # a security group problem - which is exactly what this reported after a
+      # deploy whose own handler restarted grafana a second earlier.
+      local ok=0 code="" connected=0 i
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 \
+                "$GRAFANA_URL/api/health" 2>/dev/null)" || true
+        if [ -n "$code" ] && [ "$code" != "000" ]; then
+          connected=1
+          [ "$code" = "200" ] && { ok=1; break; }
+        fi
+        sleep 3
+      done
+      if [ "$ok" -eq 1 ]; then
+        note "OK   grafana reachable from this machine (HTTP 200)"
+      elif [ "$connected" -eq 1 ]; then
+        note "REACHABLE but unhealthy: $GRAFANA_URL answered HTTP $code"
+        note "     The network is fine. Check the service:  wb ssh monitor 'systemctl status grafana'"
+        return 1
       else
-        note "UNREACHABLE from this machine: $GRAFANA_URL"
+        note "UNREACHABLE from this machine: $GRAFANA_URL (no TCP connection in 30s)"
       fi
       if [ "$ok" -eq 0 ]; then
         local myip; myip="$(curl -sf --max-time 8 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\n')"
+        cat <<EOM
+
+  Nothing accepted a TCP connection, so this is the network rather than the
+  service. If 'wb ssh monitor' works from here, it is NOT the source address
+  and you should check the service instead.
+EOM
         cat <<EOM
 
   The security group admits one address: whatever an IP reflector said this

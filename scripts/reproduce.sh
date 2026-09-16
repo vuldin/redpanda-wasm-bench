@@ -142,6 +142,36 @@ else
   echo "  SKIP_PROVISION=true - using the existing cluster as-is"
 fi
 
+# The dashboards, before anything is measured. A URL handed over after the run
+# is most of the value gone - the point of a dashboard is to be watched while
+# the thing happens. Printed here and again at the end, because this scrolls
+# past during a deploy.
+show_monitoring() {
+  local url
+  url="$(bash "$HERE/wb" env 2>/dev/null | sed -n 's/^GRAFANA_URL="\(.*\)"$/\1/p')"
+  if [ -n "$url" ]; then
+    say "dashboards"
+    echo "  Grafana     $url"
+    echo "              anonymous viewer access; admin/wasmbench to edit"
+    echo "              opens on 'wasm bench: overview'"
+    echo ""
+    echo "  Watch these three while this runs:"
+    echo "    overview             emit->guest latency, and the gates that decide"
+    echo "                         whether it is admissible (drops, failures,"
+    echo "                         subscriptions matching the fan-out)"
+    echo "    relay stages         which of the four relay stages the time is in"
+    echo "    measurement health   client CPU and send lateness - whether the"
+    echo "                         load generator held its offered rate"
+    echo ""
+    echo "  Validate every panel query against live data at any point with:"
+    echo "    ./scripts/wb monitor check"
+  else
+    say "dashboards"
+    echo "  no monitoring host in this cluster (monitor_count=0)"
+  fi
+}
+show_monitoring
+
 if [ "$SKIP_DEPLOY" != "true" ]; then
   say "waiting for cluster health before deploying"
   wait_healthy 180
@@ -221,14 +251,19 @@ python3 "$HERE/render-tables.py" "$OUT_LOCAL" \
   --labels "fanout-,trad-" \
   | tee "$OUT_LOCAL/TABLES.md"
 
+show_monitoring
+
 cat <<EOF
 
 === the cluster is STILL RUNNING and still billing (~\$40/hr) ===
-  tear it down:  ./scripts/wb teardown
+  tear it down:  ./scripts/wb teardown --yes
   then VERIFY:   ./scripts/wb verify-clean
 Do not skip verify-clean: this harness was developed in an account that both
 removed infrastructure on its own and kept billing after an apparently
 successful destroy.
+
+If you are not tearing down immediately, start the nag:
+  */30 * * * * $ROOT/scripts/cost-guard.sh --quiet
 
 results: $OUT_LOCAL
 REPRODUCE_DONE

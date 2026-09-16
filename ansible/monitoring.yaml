@@ -265,6 +265,17 @@
         mode: "0644"
         directory_mode: "0755"
 
+    # The tarball is not a package, so it installs no unit - this is the only
+    # thing that makes `systemctl start grafana` mean anything. Its absence is
+    # what made the first deploy fail with "Could not find the requested
+    # service grafana", after every preceding task had reported changed.
+    - name: grafana unit
+      ansible.builtin.template:
+        src: grafana.service.j2
+        dest: /etc/systemd/system/grafana.service
+        mode: "0644"
+      notify: restart grafana
+
     - name: enable grafana
       ansible.builtin.systemd:
         name: grafana
@@ -274,9 +285,19 @@
 
     # --------------------------------------------------------------- verification
     # The playbook is not done when the services are "started". It is done when
-    # Prometheus is actually scraping the cluster and Grafana can answer. Both
-    # are checked here so a broken stack fails the deploy rather than being
-    # discovered by opening a URL to empty panels.
+    # Prometheus is actually scraping and Grafana can answer. Both are checked
+    # here so a broken stack fails the deploy rather than being discovered by
+    # opening a URL to empty panels.
+    #
+    # Handlers FIRST. Ansible runs notified handlers at the end of the play, so
+    # without this the checks below pass against a state the handlers then
+    # change: the first clean run verified Grafana, reported success, and only
+    # then ran `restart grafana` - so `wb monitor` immediately afterwards found
+    # it mid-restart and reported it unreachable. Verifying a state something
+    # later undoes is not verification.
+    - name: apply any pending restarts before verifying
+      ansible.builtin.meta: flush_handlers
+
     - name: grafana answers
       ansible.builtin.uri:
         url: "http://127.0.0.1:{{ grafana_port }}/api/health"
@@ -286,7 +307,18 @@
       delay: 2
       until: graf_health.status == 200 and (graf_health.json.database | default('')) == 'ok'
 
-    - name: prometheus has the redpanda targets up
+    # Gate on what THIS playbook installed, which is node_exporter on every
+    # host. Every one of those must be up, because this playbook just put it
+    # there and a failure is its own.
+    #
+    # Deliberately NOT gating on the redpanda targets. `wb up` runs this
+    # BEFORE `wb deploy` installs the broker binary - the monitoring host
+    # comes up first precisely so a run can be watched from the start - so at
+    # this point nothing is listening on 9644 and requiring those targets up
+    # would fail the deploy for a cluster that is behaving exactly as intended.
+    # They are reported below, and `wb monitor` re-checks them once Redpanda
+    # exists.
+    - name: prometheus has every node_exporter target up
       ansible.builtin.uri:
         url: "http://127.0.0.1:{{ prometheus_port }}/api/v1/targets?state=active"
         return_content: true
@@ -296,15 +328,17 @@
       until: >-
         prom_targets.status == 200 and
         (prom_targets.json.data.activeTargets
-          | selectattr('labels.job', 'equalto', 'redpanda')
-          | selectattr('health', 'equalto', 'up') | list | length) == (groups['broker'] | length)
+          | selectattr('labels.job', 'equalto', 'node')
+          | selectattr('health', 'equalto', 'up') | list | length)
+        == (groups['broker'] | length) + (groups['client'] | length) + (groups['monitor'] | length)
 
     - name: report
       ansible.builtin.debug:
         msg:
           - "grafana    http://{{ inventory_hostname }}:{{ grafana_port }}  (anonymous viewer; admin/{{ grafana_admin_password }})"
           - "prometheus http://{{ inventory_hostname }}:{{ prometheus_port }}"
-          - "redpanda targets up: {{ prom_targets.json.data.activeTargets | selectattr('labels.job', 'equalto', 'redpanda') | selectattr('health', 'equalto', 'up') | list | length }}/{{ groups['broker'] | length }}"
+          - "node_exporter targets up: {{ prom_targets.json.data.activeTargets | selectattr('labels.job', 'equalto', 'node') | selectattr('health', 'equalto', 'up') | list | length }}/{{ (groups['broker'] | length) + (groups['client'] | length) + (groups['monitor'] | length) }}"
+          - "redpanda targets up: {{ prom_targets.json.data.activeTargets | selectattr('labels.job', 'equalto', 'redpanda') | selectattr('health', 'equalto', 'up') | list | length }}/{{ groups['broker'] | length }} (expected 0 until 'wb deploy' installs the broker binary)"
 
   handlers:
     - name: reload prometheus
