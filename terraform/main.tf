@@ -74,6 +74,19 @@ resource "aws_security_group" "bench" {
     cidr_blocks = ["${chomp(data.http.myip.response_body)}/32"]
   }
 
+  # Same ports as the rule above, for operators whose egress IP the reflector
+  # above does not predict. Empty by default, so the SG is unchanged unless
+  # someone opts in. See variables.tf:operator_extra_cidrs for why this exists.
+  dynamic "ingress" {
+    for_each = length(var.operator_extra_cidrs) > 0 ? [1] : []
+    content {
+      from_port   = 0
+      to_port     = 65535
+      protocol    = "tcp"
+      cidr_blocks = var.operator_extra_cidrs
+    }
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -137,14 +150,36 @@ resource "aws_instance" "client" {
   tags = { Name = "rp-client-${count.index}", owner = var.owner }
 }
 
+# Prometheus + Grafana. Deliberately its own instance rather than co-located on
+# a broker or on client[0]: Prometheus at a tight scrape interval is a real CPU
+# and disk consumer, and both of those hosts are things this benchmark is
+# measuring. An observer that competes with the subject changes the result.
+#
+# Pinned to subnet[0], the same AZ as broker[0], so scraping every broker and
+# client stays intra-AZ. Cross-AZ would bill per GB for a scrape running every
+# couple of seconds for the length of a run, and buy nothing.
+resource "aws_instance" "monitor" {
+  count                  = var.monitor_count
+  ami                    = data.aws_ami.ubuntu["amd64"].id
+  instance_type          = var.monitor_instance_type
+  key_name               = aws_key_pair.auth.id
+  subnet_id              = local.subnet_ids[0]
+  vpc_security_group_ids = [aws_security_group.bench.id]
+  monitoring             = true
+  root_block_device { volume_size = var.monitor_volume_size }
+  tags = { Name = "rp-monitor-${count.index}", owner = var.owner }
+}
+
 resource "local_file" "inventory" {
   filename = "${path.module}/hosts.ini"
   content = templatefile("${path.module}/hosts.ini.tpl", {
-    broker_public_ips  = aws_instance.broker[*].public_ip
-    broker_private_ips = aws_instance.broker[*].private_ip
-    client_public_ips  = aws_instance.client[*].public_ip
-    client_private_ips = aws_instance.client[*].private_ip
-    broker_instance    = var.broker_instance_type
-    ssh_user           = var.ssh_user
+    broker_public_ips   = aws_instance.broker[*].public_ip
+    broker_private_ips  = aws_instance.broker[*].private_ip
+    client_public_ips   = aws_instance.client[*].public_ip
+    client_private_ips  = aws_instance.client[*].private_ip
+    monitor_public_ips  = aws_instance.monitor[*].public_ip
+    monitor_private_ips = aws_instance.monitor[*].private_ip
+    broker_instance     = var.broker_instance_type
+    ssh_user            = var.ssh_user
   })
 }

@@ -37,11 +37,19 @@ BROKER_COUNT=$(tfvar "$TFVARS" broker_count)
 CLIENT_COUNT=$(tfvar "$TFVARS" client_count)
 BROKER_ITYPE=$(tfvar "$TFVARS" broker_instance_type)
 CLIENT_ITYPE=$(tfvar "$TFVARS" client_instance_type)
+# Exported, not passed: needed_pairs reads it from the environment. Falls back
+# to variables.tf's default, since the topology files do not set it - and a
+# region chosen without checking the monitoring host's instance type is a
+# region the apply can still stall in.
+MONITOR_ITYPE="${MONITOR_ITYPE:-$(tfvar "$TFVARS" monitor_instance_type)}"
+[ -n "$MONITOR_ITYPE" ] || MONITOR_ITYPE=$(grep -A3 'variable "monitor_instance_type"' "$TF_DIR/variables.tf" 2>/dev/null | grep -oP 'default\s*=\s*"\K[^"]+' | head -1)
+[ -n "$MONITOR_ITYPE" ] || MONITOR_ITYPE="m6i.2xlarge"
+export MONITOR_ITYPE
 NAZS=$(tfvar_list_len "$TFVARS" azs)
 [ "${NAZS:-0}" -ge 1 ] || { echo "could not read azs from $TFVARS" >&2; exit 1; }
 
 echo "topology from $(basename "$TFVARS"):"
-echo "  ${BROKER_COUNT} x ${BROKER_ITYPE} brokers, ${CLIENT_COUNT} x ${CLIENT_ITYPE} clients, ${NAZS} AZ(s)"
+echo "  ${BROKER_COUNT} x ${BROKER_ITYPE} brokers, ${CLIENT_COUNT} x ${CLIENT_ITYPE} clients, 1 x ${MONITOR_ITYPE} monitor, ${NAZS} AZ(s)"
 echo "candidate regions (in order): $REGIONS"
 echo ""
 

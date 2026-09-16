@@ -198,19 +198,31 @@ echo "=== checking real EC2 capacity for every instance this plan would create, 
 AZS_RAW=$(merged_var_raw azs)
 BROKER_ITYPE=$(merged_var_raw broker_instance_type | tr -d '"')
 CLIENT_ITYPE=$(merged_var_raw client_instance_type | tr -d '"')
+# The monitoring host is probed like any other instance. It is a different
+# instance family from the brokers and clients, so its capacity is a separate
+# question - and an unprobed instance type in the plan is exactly the
+# multi-minute InsufficientInstanceCapacity stall this whole check exists to
+# prevent. Defaulted because a topology file predating the monitoring host does
+# not set it.
+MONITOR_ITYPE=$(merged_var_raw monitor_instance_type | tr -d '"')
+[ -n "$MONITOR_ITYPE" ] || MONITOR_ITYPE="m6i.2xlarge"
 TF_REGION=$(merged_var_raw region | tr -d '"')
-echo "capacity probe will use region=$TF_REGION azs=$AZS_RAW brokers=$BROKER_ITYPE clients=$CLIENT_ITYPE"
-CAPACITY_CHECK=$(terraform show -json "$PLAN_FILE" | AZS_RAW="$AZS_RAW" BROKER_ITYPE="$BROKER_ITYPE" CLIENT_ITYPE="$CLIENT_ITYPE" python3 -c "
+echo "capacity probe will use region=$TF_REGION azs=$AZS_RAW brokers=$BROKER_ITYPE clients=$CLIENT_ITYPE monitor=$MONITOR_ITYPE"
+CAPACITY_CHECK=$(terraform show -json "$PLAN_FILE" | AZS_RAW="$AZS_RAW" BROKER_ITYPE="$BROKER_ITYPE" CLIENT_ITYPE="$CLIENT_ITYPE" MONITOR_ITYPE="$MONITOR_ITYPE" python3 -c "
 import json, os, re, sys
 plan = json.load(sys.stdin)
 azs = json.loads(os.environ['AZS_RAW'].replace(chr(39), '\"'))
-itypes = {'broker': os.environ['BROKER_ITYPE'], 'client': os.environ['CLIENT_ITYPE']}
+itypes = {'broker': os.environ['BROKER_ITYPE'], 'client': os.environ['CLIENT_ITYPE'],
+          'monitor': os.environ['MONITOR_ITYPE']}
 needed = set()
 for rc in plan.get('resource_changes', []):
-    m = re.match(r'aws_instance\.(broker|client)\[(\d+)\]\$', rc['address'])
+    m = re.match(r'aws_instance\.(broker|client|monitor)\[(\d+)\]\$', rc['address'])
     if m and 'create' in rc['change']['actions']:
         kind, idx = m.group(1), int(m.group(2))
-        needed.add((azs[idx % len(azs)], itypes[kind]))
+        # main.tf pins the monitor to subnet_ids[0] so its scrapes stay
+        # intra-AZ, rather than round-robinning like brokers and clients.
+        az = azs[0] if kind == 'monitor' else azs[idx % len(azs)]
+        needed.add((az, itypes[kind]))
 for az, itype in sorted(needed):
     print(az, itype)
 ")

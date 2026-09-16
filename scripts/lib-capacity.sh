@@ -51,12 +51,20 @@ region_azs() {
 # main.tf's own count.index % len(azs) subnet-assignment formula. Derived from
 # the formula rather than from plan JSON, which can report availability_zone as
 # unknown until apply for a resource whose subnet_id is itself only known then.
+#
+# The monitoring host comes in through MONITOR_ITYPE rather than a seventh
+# positional argument: there are already six, two callers pass them, and an
+# env var cannot be silently mis-ordered. Empty means no monitoring host, so a
+# caller that predates it is unchanged.
 needed_pairs() {
   local nazs="$1" bcount="$2" bitype="$3" ccount="$4" citype="$5"; shift 5
   local azs=("$@") i
   {
     for ((i=0; i<bcount; i++)); do echo "${azs[$((i % nazs))]} $bitype"; done
     for ((i=0; i<ccount; i++)); do echo "${azs[$((i % nazs))]} $citype"; done
+    # main.tf pins the monitor to subnet_ids[0] - it does not round-robin -
+    # so that its scrape traffic stays inside one AZ.
+    [ -n "${MONITOR_ITYPE:-}" ] && echo "${azs[0]} $MONITOR_ITYPE"
   } | sort -u
 }
 

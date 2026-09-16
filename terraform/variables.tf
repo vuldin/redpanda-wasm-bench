@@ -62,3 +62,40 @@ variable "broker_count" {
   default     = 1
   description = "Number of Redpanda brokers. Must be >= the replication factor under test (RF=6 needs 6 brokers). broker[0] is the seed; the others join it."
 }
+
+# --- Monitoring -------------------------------------------------------------
+
+variable "monitor_count" {
+  type        = number
+  default     = 1
+  description = "Prometheus/Grafana instances. 1 is the whole stack; 0 opts out and every other resource is unchanged, for a run that wants no observer on the network at all."
+}
+
+variable "monitor_instance_type" {
+  type        = string
+  default     = "m6i.2xlarge"
+  description = "EC2 instance type for the monitoring host. 8 vCPU / 32 GB holds the internal /metrics set from 3 brokers at a 15s interval with headroom; the tight /public_metrics scrape is cheap by comparison."
+}
+
+variable "monitor_volume_size" {
+  type        = number
+  default     = 100
+  description = "Root volume GB on the monitoring host. This is the Prometheus TSDB, so it bounds how long a run's history survives."
+}
+
+variable "operator_extra_cidrs" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Additional CIDRs allowed to reach the cluster, on top of the /32 this
+    machine's egress IP resolves to.
+
+    You need this when your egress IP is not stable. A carrier-grade NAT can
+    put a browser on a different address than the one an IP-reflector API
+    reports, and the symptom is not a refusal - every port TIMES OUT while the
+    VPC, route table and security group all look correct. Grafana in a browser
+    is a different flow than the terraform apply that opened the port, so this
+    bites the monitoring host first. `wb monitor` diagnoses it and prints the
+    fix. Widening to the enclosing /20 is usually enough.
+  EOT
+}
