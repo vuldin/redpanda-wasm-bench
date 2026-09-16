@@ -30,6 +30,24 @@
 # comparison again, either move this back to us-east-2a (re-probing capacity
 # first) or move the multi-AZ file's first AZ to match - do not just run the
 # comparison across a moved broker[0] and attribute the difference to AZ count.
+# 2026-09-16, and this one reverses the move above: the binding constraint is
+# now the CLIENT type, not the broker type. c5n.9xlarge could not be placed
+# 8-at-a-time in ANY us-east-2 AZ (2a, 2b and 2c all refused a reservation for
+# 8, including AZs holding nothing of ours, so it is a real regional shortage
+# rather than self-inflicted), while every us-east-1 AZ accepted 8. us-east-1a
+# accepted the whole topology: 3x r8id.8xlarge, 8x c5n.9xlarge, 1x m6i.2xlarge.
+#
+# That is also the AZ the published numbers came from, which REPRODUCE.md and
+# docs/RESILIENCE.md both state. select-region.sh now tries us-east-1 first for
+# that reason and writes region.auto.tfvars, which overrides the region and azs
+# below - so these two lines are the fallback for a hand-run terraform, not
+# what a scripted run uses.
+#
+# How this was found is worth keeping: the capacity probe passed for us-east-2c
+# and the apply then created 3 of 8 clients and stalled for 11 minutes on the
+# rest. The probe had been asking for --instance-count 1 regardless of how many
+# the plan wanted. It now asks for the real count, which rejects us-east-2 in
+# seconds.
 region               = "us-east-2"
 broker_instance_type = "r8id.8xlarge"
 broker_arch          = "x86_64"
