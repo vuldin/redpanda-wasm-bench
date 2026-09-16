@@ -884,6 +884,39 @@ on it. A saturated load generator produces numbers that look like results, and
 every consistency check that counts totals rather than timings will agree with
 them.
 
+### 30. A quantile off a dashboard is not the quantile in the report
+
+The monitoring stack (docs/MONITORING.md) graphs the same histograms loadgen
+scrapes, so it is tempting to read a p99 off a panel. Don't quote it.
+
+Grafana's `histogram_quantile(0.99, sum by (le) (rate(..._bucket[...])))` is a
+quantile of a RATE over a sliding window. It interpolates within whichever
+bucket the quantile falls in, and `$__rate_interval` widens that window to
+several scrape intervals, which averages across the window rather than over
+it. loadgen's p99 is the 99th percentile of the actual samples it collected
+during the timed window, on its own clock. Those are different estimators of
+different populations, and they disagree most exactly where it matters: in the
+tail, and at the start and end of a short window where the rate window spans
+time outside it.
+
+The bucket boundaries make this concrete. Redpanda's public histograms are
+log-scale, so a panel showing a p99 of "1.2ms" may be interpolating inside a
+bucket several hundred microseconds wide. That is fine for watching a shape
+and useless as a published figure.
+
+So: the dashboards are for watching a run and for deciding whether a result is
+admissible. Every number in REPRODUCE.md comes from the run's own JSON. The
+panels are deliberately labelled with what they are for, and MONITORING.md
+says the same thing in its first paragraphs, because the failure here is not a
+wrong graph - the graph is right - it is quoting it as though it were the
+measurement.
+
+Corollary worth keeping in mind: the scrape is also load. It is aimed at
+`/public_metrics`, which is curated and small, at 2s; the full internal
+`/metrics` set goes at 15s precisely because it is the expensive one and
+nothing on these dashboards needs it. If you want a run with no observer on
+the network at all, `monitor_count = 0` removes it and changes nothing else.
+
 ## `write.caching`: read this before you set it
 
 `write.caching=true` defers fsync, batching multiple produces into one flush
@@ -904,10 +937,11 @@ did.
 
 ```bash
 ./scripts/wb doctor       # resolves bazel-bin, checks the binary, see #18
-./scripts/wb up
+./scripts/wb up           # provisions, then brings up prometheus/grafana
+./scripts/wb monitor      # the Grafana URL, for watching what follows
 ./scripts/wb deploy
 ./scripts/wb reproduce    # both arms, then render-tables
-./scripts/wb teardown && ./scripts/wb verify-clean
+./scripts/wb teardown --yes && ./scripts/wb verify-clean
 ```
 
 Results land under `results/<phase>-<run_id>/`, each report carrying its own
