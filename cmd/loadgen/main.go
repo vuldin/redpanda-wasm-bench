@@ -360,8 +360,19 @@ type resourcesReport struct {
 
 	TransformReadBytesDelta  float64 `json:"transform_read_bytes_delta"`
 	TransformWriteBytesDelta float64 `json:"transform_write_bytes_delta"`
-	TransformFailuresDelta   float64 `json:"transform_failures_delta"`
-	TransformGivenUpDelta    float64 `json:"transform_batches_given_up_delta"`
+	// Scoped to the transform under measurement (TransformName). This is what
+	// gates the run - see deltaForLabel for why the unscoped sum could not.
+	TransformFailuresDelta float64 `json:"transform_failures_delta"`
+	// Every OTHER transform's failures, which for this benchmark means the
+	// relay consumers. Reported so consumer-side trouble stays visible, but
+	// deliberately not a cleanliness gate: it says nothing about the producer
+	// path being timed, and missing receipts already catch a consumer that
+	// actually lost data.
+	OtherTransformFailuresDelta float64 `json:"other_transform_failures_delta"`
+	// NOT scoped, on purpose. A given-up batch is a batch that was skipped or
+	// dead-lettered after exhausting its retries, so it is real data loss
+	// wherever it happens - including in a consumer.
+	TransformGivenUpDelta float64 `json:"transform_batches_given_up_delta"`
 
 	// RelayPushesDelta counts SHARD-LOCAL DELIVERY PASSES, not producer
 	// pushes: redpanda_relay_pushes_total is incremented inside
@@ -703,6 +714,38 @@ func deltaSum(before, after *snapshot, name string) float64 {
 		return 0
 	}
 	return after.sum(name) - before.sum(name)
+}
+
+// deltaForLabel is deltaSum restricted to one label value, and deltaExcluding
+// is its complement. Both exist because summing a per-function family across
+// every function answers a different question than the one being asked.
+//
+// Concretely: this benchmark deploys ONE matcher and up to 500 relay
+// consumers, all of them carrying redpanda_transform_failures. Gating the
+// run's cleanliness on the unscoped sum means any consumer-side failure
+// invalidates a measurement of the PRODUCER path. Measured 2026-09-16: a
+// trial delivered 30,000 of 30,000 expected receipts with zero missing, zero
+// relay drops, zero batches given up, and send_lateness p99 of 4.8us against
+// a 1,000us pacing interval - and was still discarded, because 167 of the 500
+// consumers had logged 18 failures each while the matcher had logged none.
+// render-tables.py shows an unclean level as UNCLEAN and never as a number,
+// so that trial was thrown away entirely.
+func deltaForLabel(before, after *snapshot, name, label, value string) float64 {
+	if before == nil || after == nil || value == "" {
+		return 0
+	}
+	return after.byLabel(name, label)[value] - before.byLabel(name, label)[value]
+}
+
+func deltaExcluding(before, after *snapshot, name, label, value string) float64 {
+	if before == nil || after == nil {
+		return 0
+	}
+	total := after.sum(name) - before.sum(name)
+	if value == "" {
+		return total
+	}
+	return total - deltaForLabel(before, after, name, label, value)
 }
 
 // ---------------------------------------------------------------------------
@@ -1584,7 +1627,7 @@ func main() {
 			rep.Lag.FinalLag > threshold
 		rep.Lag.PeakedAboveThreshold = rep.Lag.MaxLag > threshold
 	}
-	rep.Resources = buildResources(before, after, sent)
+	rep.Resources = buildResources(before, after, sent, *transformName)
 	rep.Clean, rep.UncleanReasons = judge(&rep)
 
 	enc, err := json.MarshalIndent(rep, "", "  ")
@@ -1619,7 +1662,7 @@ func main() {
 // redpanda_transform_execution_latency_sec_count rather than derived from
 // anything the client counted. Both figures are reported: per invocation (the
 // real per-record cost) and per order (what a claim in orders/sec needs).
-func buildResources(before, after *snapshot, orders int64) resourcesReport {
+func buildResources(before, after *snapshot, orders int64, transformName string) resourcesReport {
 	r := resourcesReport{PerFunction: map[string]funcResource{}}
 	if before == nil || after == nil {
 		return r
@@ -1655,7 +1698,16 @@ func buildResources(before, after *snapshot, orders int64) resourcesReport {
 
 	r.TransformReadBytesDelta = deltaSum(before, after, "redpanda_transform_read_bytes")
 	r.TransformWriteBytesDelta = deltaSum(before, after, "redpanda_transform_write_bytes")
-	r.TransformFailuresDelta = deltaSum(before, after, "redpanda_transform_failures")
+	r.TransformFailuresDelta = deltaForLabel(
+		before, after, "redpanda_transform_failures", "function_name", transformName)
+	r.OtherTransformFailuresDelta = deltaExcluding(
+		before, after, "redpanda_transform_failures", "function_name", transformName)
+	// With no -transform-name there is nothing to scope to, so fall back to the
+	// old unscoped behaviour rather than silently gating on zero.
+	if transformName == "" {
+		r.TransformFailuresDelta = deltaSum(before, after, "redpanda_transform_failures")
+		r.OtherTransformFailuresDelta = 0
+	}
 	r.TransformGivenUpDelta = deltaSum(before, after, "redpanda_transform_batches_given_up")
 
 	r.RelayPushesDelta = deltaSum(before, after, "redpanda_relay_pushes_total")
@@ -1819,8 +1871,13 @@ func judge(rep *report) (bool, []string) {
 			rep.Rates.ProduceErrors, strings.Join(kinds, "; ")))
 	}
 	if rep.Resources.TransformFailuresDelta > 0 {
-		reasons = append(reasons, fmt.Sprintf("transform failures moved by %.0f during the window",
-			rep.Resources.TransformFailuresDelta))
+		who := rep.Config.TransformName
+		if who == "" {
+			who = "some transform"
+		}
+		reasons = append(reasons, fmt.Sprintf(
+			"%s logged %.0f transform failures during the window",
+			who, rep.Resources.TransformFailuresDelta))
 	}
 	if rep.Clock.CrossClockUnusable {
 		// Not-clean rather than a mere note, deliberately. The headline this

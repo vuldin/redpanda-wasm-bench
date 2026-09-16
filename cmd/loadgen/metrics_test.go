@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -105,5 +106,58 @@ func TestListenAddrAcceptsBarePort(t *testing.T) {
 		if got := listenAddr(in); got != want {
 			t.Errorf("listenAddr(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// The failures gate must be scoped to the transform under measurement.
+//
+// Reproduces the real 2026-09-16 trial that was discarded: the matcher logged
+// zero failures while the relay consumers logged thousands, every expected
+// receipt arrived, and the unscoped sum still marked the run unclean - which
+// render-tables.py turns into UNCLEAN and drops from the table.
+func TestFailuresGateIsScopedToTheMeasuredTransform(t *testing.T) {
+	body := func(matcher, probeEach int) string {
+		var b strings.Builder
+		b.WriteString("# TYPE redpanda_transform_failures counter\n")
+		fmt.Fprintf(&b, "redpanda_transform_failures{function_name=\"wasm-matcher-e2-1\"} %d\n", matcher)
+		for i := 0; i < 167; i++ {
+			fmt.Fprintf(&b,
+				"redpanda_transform_failures{function_name=\"probe-e2-1-%d\"} %d\n", i, probeEach)
+		}
+		return b.String()
+	}
+	before := parseMetricsBody(strings.NewReader(body(0, 0)))
+	after := parseMetricsBody(strings.NewReader(body(0, 18)))
+
+	const name = "wasm-matcher-e2-1"
+	if got := deltaForLabel(before, after, "redpanda_transform_failures", "function_name", name); got != 0 {
+		t.Errorf("matcher failure delta = %v, want 0 - the measured transform logged none", got)
+	}
+	want := float64(167 * 18)
+	if got := deltaExcluding(before, after, "redpanda_transform_failures", "function_name", name); got != want {
+		t.Errorf("other-transform failure delta = %v, want %v", got, want)
+	}
+	// The unscoped sum is what used to gate, and it is exactly the number that
+	// discarded a flawless trial.
+	if got := deltaSum(before, after, "redpanda_transform_failures"); got != want {
+		t.Errorf("unscoped delta = %v, want %v", got, want)
+	}
+
+	// And a matcher that really does fail must still be caught.
+	after2 := parseMetricsBody(strings.NewReader(body(7, 18)))
+	if got := deltaForLabel(before, after2, "redpanda_transform_failures", "function_name", name); got != 7 {
+		t.Errorf("matcher failure delta = %v, want 7 - a genuinely failing matcher must gate", got)
+	}
+}
+
+// byLabel must not confuse a label whose name ends in the one being asked for.
+func TestDeltaForLabelDoesNotMatchLabelSuffix(t *testing.T) {
+	body := `redpanda_transform_failures{output_function_name="x",function_name="real"} 5` + "\n"
+	snap := parseMetricsBody(strings.NewReader(body))
+	if got := snap.byLabel("redpanda_transform_failures", "function_name")["real"]; got != 5 {
+		t.Errorf("function_name=real = %v, want 5", got)
+	}
+	if got := snap.byLabel("redpanda_transform_failures", "function_name")["x"]; got != 0 {
+		t.Errorf("output_function_name leaked into function_name: got %v, want 0", got)
 	}
 }
