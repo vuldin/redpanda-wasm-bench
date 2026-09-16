@@ -88,13 +88,12 @@ for region in $REGIONS; do
     echo "    -> $region has only $n_have usable AZ(s), trying next"
     continue
   fi
+  # capacity_probe_azs, not a local copy of its loop - see lib-capacity.sh for
+  # what the local copy cost.
   fail=0
-  while read -r az itype; do
-    [ -z "$az" ] && continue
-    if capacity_available "$region" "$az" "$itype"; then echo "    OK   $itype in $az"
-    else echo "    FAIL $itype in $az"; fail=1; fi
-  done < <(needed_pairs "$NAZS" "$BROKER_COUNT" "$BROKER_ITYPE" \
-             "$CLIENT_COUNT" "$CLIENT_ITYPE" $azs)
+  # shellcheck disable=SC2086  # $azs is a deliberate word-split list
+  capacity_probe_azs "$region" "$BROKER_COUNT" "$BROKER_ITYPE" \
+    "$CLIENT_COUNT" "$CLIENT_ITYPE" "$NAZS" $azs || fail=1
   if [ "$fail" = 0 ]; then
     CHOSEN="$region"; CHOSEN_AZS="$azs"
     echo "    -> $region has capacity for the whole topology"
@@ -132,6 +131,11 @@ echo ""
 echo "wrote $OVERLAY:"
 sed 's/^/    /' "$OVERLAY"
 
+# Both sides are built by `tr '\n' ' '` so they can carry a trailing space,
+# which makes an identical AZ list compare unequal and prints a warning about
+# a change that did not happen. Normalise before comparing and before printing.
+TFVARS_AZS="$(echo $TFVARS_AZS)"
+CHOSEN_AZS="$(echo $CHOSEN_AZS)"
 if [ -n "$TFVARS_AZS" ] && [ "$CHOSEN_AZS" != "$TFVARS_AZS" ]; then
   echo ""
   echo "WARNING: availability zone(s) changed from '$TFVARS_AZS' to" >&2

@@ -86,15 +86,21 @@ needed_pairs() {
   } | sort | uniq -c | awk '{print $2, $3, $1}'
 }
 
-# capacity_probe_region <region> <broker_count> <broker_itype> <client_count> <client_itype> <az-count>
-# 0 only if EVERY needed pair has capacity. Prints per-pair results.
-capacity_probe_region() {
+# capacity_probe_azs <region> <bcount> <bitype> <ccount> <citype> <nazs> <az...>
+# 0 only if EVERY needed (az, itype, count) triple has capacity. Prints
+# per-triple results.
+#
+# THE loop. select-region.sh used to carry its own copy because it needs to
+# probe a specific AZ list rather than whatever region_azs returns, and that
+# third copy is what made a change to needed_pairs' output format fail
+# silently: the copy still read two fields from a three-field line, so the
+# count landed inside the instance type and every reservation was refused for
+# a type that does not exist. Reported as "no capacity" in a region that had
+# plenty. One loop, both callers.
+capacity_probe_azs() {
   local region="$1" bcount="$2" bitype="$3" ccount="$4" citype="$5" nazs="$6"
-  local azs; mapfile -t azs < <(region_azs "$region" "$nazs") 2>/dev/null || true
-  if [ "${#azs[@]}" -lt "$nazs" ]; then
-    echo "    $region: only ${#azs[@]} usable AZ(s), need $nazs" >&2
-    return 1
-  fi
+  shift 6
+  local azs=("$@")
   local fail=0 az itype n
   while read -r az itype n; do
     [ -z "$az" ] && continue
@@ -106,6 +112,20 @@ capacity_probe_region() {
     fi
   done < <(needed_pairs "$nazs" "$bcount" "$bitype" "$ccount" "$citype" "${azs[@]}")
   return "$fail"
+}
+
+# capacity_probe_region <region> <broker_count> <broker_itype> <client_count> <client_itype> <az-count>
+# 0 only if EVERY needed pair has capacity. Picks the AZs itself; use
+# capacity_probe_azs when the caller already knows which AZs it wants.
+capacity_probe_region() {
+  local region="$1" bcount="$2" bitype="$3" ccount="$4" citype="$5" nazs="$6"
+  local azs; mapfile -t azs < <(region_azs "$region" "$nazs") 2>/dev/null || true
+  if [ "${#azs[@]}" -lt "$nazs" ]; then
+    echo "    $region: only ${#azs[@]} usable AZ(s), need $nazs" >&2
+    return 1
+  fi
+  capacity_probe_azs "$region" "$bcount" "$bitype" "$ccount" "$citype" \
+                     "$nazs" "${azs[@]}"
 }
 
 # tfvar <file> <name> - read a scalar from a tfvars file
