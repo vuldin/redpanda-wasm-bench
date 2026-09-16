@@ -204,10 +204,14 @@ def overview():
     p.append(stat(
         21, "active subscriptions", 6, y, 6, 5,
         [("sum(redpanda_relay_active_subscriptions)", "subscriptions")],
-        desc=("Check this against the fan-out level you asked for "
-              "(INBROKER_CONSUMERS, 500 by default). If it is lower, some "
-              "consumers never subscribed and the fan-out under measurement "
-              "is not the one in the run's label."),
+        desc=("Subscriptions, NOT consumers. Each consumer transform gets a "
+              "processor per input partition it leads, so the cluster-wide sum "
+              "is (consumers x partitions led) - measured at 1,500 for 500 "
+              "consumers over 3 partitions, which is correct and not a 3x "
+              "overshoot. What matters is that it is STABLE during a window "
+              "and that it did not collapse partway through; a figure that "
+              "moves mid-run means processors were restarting, and the "
+              "latency spans a changing fan-out."),
     ))
     p.append(panel(
         22, "relay throughput", 12, y, 12, 5,

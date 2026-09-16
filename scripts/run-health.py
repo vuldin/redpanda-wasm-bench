@@ -85,7 +85,7 @@ CHECKS = [
      lambda v: f"{v:,.2f}", None),
     ("busiest shard utilisation",
      f"max(rate(redpanda_cpu_busy_seconds_total{W}))",
-     lambda v: f"{v*100:,.0f}%", None),
+     lambda v: f"{v*100:,.1f}%", None),
     # The client side. METHODOLOGY 29: a starved generator reports latency that
     # includes its own queueing and looks exactly like an architecture result.
     ("loadgen send lateness p99",
@@ -93,9 +93,11 @@ CHECKS = [
      lambda v: f"{v*1e6:,.0f} us", None),
     ("loadgen pacing interval",
      "max(loadgen_pacing_interval_seconds)", lambda v: f"{v*1e6:,.0f} us", None),
+    # One decimal, because during the in-broker arm the clients are genuinely
+    # near-idle and "0%" reads like a broken query rather than a real answer.
     ("busiest client CPU",
      f'max(1 - avg by (host) (rate(node_cpu_seconds_total{{mode="idle",role="client"}}{W})))',
-     lambda v: f"{v*100:,.0f}%", None),
+     lambda v: f"{v*100:,.1f}%", None),
 ]
 
 

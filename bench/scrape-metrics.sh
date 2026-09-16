@@ -64,6 +64,16 @@ die() { echo "scrape-metrics.sh: $*" >&2; exit 1; }
 # blocked submitting cross-shard work should show up as stalls and as a gap
 # between awake time and useful task time.
 #
+# reactor_stalls is a HISTOGRAM, so it must be asked for by its suffixed series
+# (_count / _sum) and not by the family name. This list is exact-match, so
+# `vectorized_reactor_stalls` matched nothing and warned about it on every
+# single run since it was added - which means the fallback signal the paragraph
+# above promises had never actually been collected. Confirmed against a live
+# broker 2026-09-16: the internal endpoint carries
+# vectorized_reactor_stalls_bucket/_count/_sum and no bare name. Same
+# convention loadgen already uses for
+# redpanda_transform_execution_latency_sec_count.
+#
 # NOTE: this list is whitespace-split into exact-match keys, and it is a
 # SINGLE-QUOTED string - no comments and no apostrophes inside it.
 # Exact-match metric family names, one per line.
@@ -134,7 +144,9 @@ vectorized_smp_complete_batch_queue_length
 vectorized_smp_total_sent_messages
 vectorized_smp_total_received_messages
 vectorized_smp_total_completed_messages
-vectorized_reactor_stalls
+vectorized_reactor_stalls_count
+vectorized_reactor_stalls_sum
+vectorized_reactor_utilization
 vectorized_reactor_awake_time_ms_total
 vectorized_reactor_cpu_busy_ms
 '
