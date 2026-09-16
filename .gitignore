@@ -8,3 +8,4 @@
 /bin/
 /loadgen
 /scripts/.wb-env
+/scripts/__pycache__/
