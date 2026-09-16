@@ -215,6 +215,21 @@ for t in $(seq 1 "$TRIALS"); do
     || echo "  trial $t did not complete cleanly" >&2
 done
 
+# Validate the dashboards against data that now exists. Arm 1 has run, so the
+# relay and transform metric families are populated and a query that returns
+# nothing is a real defect rather than a feature being off.
+#
+# Deliberately non-fatal: a broken panel is not a reason to abandon a
+# measurement that is already half done on a cluster that is already billing.
+# It prints, and the run continues.
+say "validating the dashboards against live metrics"
+if [ -n "$(bash "$HERE/wb" env 2>/dev/null | sed -n 's/^PROMETHEUS_URL="\(.*\)"$/\1/p')" ]; then
+  bash "$HERE/wb" monitor check 2>&1 | tail -25 \
+    || echo "  NOTE: some dashboard queries failed - see above. The measurement is unaffected." >&2
+else
+  echo "  no monitoring host; skipping"
+fi
+
 # ---------------------------------------------------------------------------
 # 4. arm 2: traditional, one level at a time
 # ---------------------------------------------------------------------------
