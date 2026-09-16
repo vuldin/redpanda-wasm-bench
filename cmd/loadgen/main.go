@@ -744,8 +744,8 @@ type collector struct {
 	timedReceipts  atomic.Int64
 	warmupReceipts atomic.Int64
 
-	mu          sync.Mutex
-	totalLat    []float64
+	mu       sync.Mutex
+	totalLat []float64
 	// Send instant for each totalLat sample, same index. Kept so a window can
 	// be sliced in time; an aggregate cannot say when a stall began or how
 	// long it lasted, which for a leadership move are the diagnostic facts.
@@ -1016,10 +1016,11 @@ func main() {
 		warmup   = flag.Duration("warmup", 5*time.Second, "length of the warmup window; its records are produced and its receipts discarded, absorbing VM cold start and connection/metadata setup")
 		pacing   = flag.String("pacing", "fixed", "inter-arrival pacing: fixed (constant interval) or poisson (exponential, bursty - closer to a real arrival process and harder on queues)")
 
-		payloadBytes = flag.Int("payload-bytes", 0, "pad each order's value to at least this many bytes with filler. Both wire decoders stop at the fixed layout and ignore trailing bytes, so this changes record size without changing semantics. 0 leaves orders at their natural size")
-		sampleEvery  = flag.Int("sample-every", 1, "compute per-record latency for 1 in N orders. Receipt counts and rates always cover every order; this only bounds the memory the latency distributions take at high rates")
-		maxBuffered  = flag.Int("max-buffered", 200000, "franz-go producer buffer ceiling. Hitting it makes Produce block, which surfaces as send_lateness instead of being silently absorbed")
-		acksMode     = flag.String("acks", "all",
+		payloadBytes  = flag.Int("payload-bytes", 0, "pad each order's value to at least this many bytes with filler. Both wire decoders stop at the fixed layout and ignore trailing bytes, so this changes record size without changing semantics. 0 leaves orders at their natural size")
+		sampleEvery   = flag.Int("sample-every", 1, "compute per-record latency for 1 in N orders. Receipt counts and rates always cover every order; this only bounds the memory the latency distributions take at high rates")
+		maxBuffered   = flag.Int("max-buffered", 200000, "franz-go producer buffer ceiling. Hitting it makes Produce block, which surfaces as send_lateness instead of being silently absorbed")
+		metricsListen = flag.String("metrics-listen", "", "serve live Prometheus metrics on this address (\":9110\" or just \"9110\"). Off when empty, which is the default - the published numbers come from this report, not from a scrape, so the endpoint is purely for watching a run in flight. Costs one bool check per sample when off")
+		acksMode      = flag.String("acks", "all",
 			"produce acknowledgement level: all (quorum, the default and the only durable choice), "+
 				"leader (leader append only), or none. THIS IS THE DOMINANT e2e TERM: at RF=3 with "+
 				"linger=0 every produce awaits a quorum round trip, measured at 641-1010us against "+
@@ -1231,6 +1232,22 @@ func main() {
 		latenessMu    sync.Mutex
 	)
 
+	// Live metrics share latenessMu rather than taking a lock of their own -
+	// the send loop is already inside that critical section when it has a
+	// lateness sample, so the histogram update is free of extra locking.
+	live := newLiveMetrics()
+	live.enabled = *metricsListen != ""
+	live.offeredRate = *rate
+	if *rate > 0 {
+		live.pacingInterval = 1 / *rate
+	}
+	// Which arm this window is measuring. -receipt-source is what actually
+	// distinguishes them: "probe" reads relay-probe receipts (in-broker),
+	// "fills" consumes the output topic as an ordinary Kafka consumer
+	// (external).
+	live.arm = *receiptSrc
+	live.serve(*metricsListen, &latenessMu)
+
 	sendOne := func(pc *kgo.Client, phase byte, seq int64, sampled bool) {
 		// Both legs share one key so franz-go's hash partitioner routes them to
 		// the same partition, and therefore to the same processor and the same
@@ -1265,14 +1282,17 @@ func main() {
 		pc.Produce(context.Background(), &kgo.Record{Topic: *inputTopic, Key: pairKey, Value: buy}, func(_ *kgo.Record, err error) {
 			if err != nil {
 				produceErrors.Add(1)
+				live.produceErrors.Add(1)
 				errTally.add(err)
 				return
 			}
+			live.ordersAcked.Add(1)
 			if timedSample {
 				coll.recordAck(seq, time.Now())
 			}
 		})
 		recordsSent.Add(2)
+		live.ordersSent.Add(1)
 	}
 
 	// pace runs the send loop against an absolute schedule anchored at the
@@ -1342,6 +1362,7 @@ func main() {
 					}
 					latenessMu.Lock()
 					lateness = append(lateness, late)
+					live.recordLateness(late)
 					latenessMu.Unlock()
 				}
 			}

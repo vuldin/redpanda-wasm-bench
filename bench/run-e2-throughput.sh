@@ -120,6 +120,12 @@ PACING="${PACING:-fixed}"
 # 0 = latency mode (METHODOLOGY #5). Set 1-5 for throughput runs at RF>1, where
 # linger=0 makes the CLIENT the bottleneck rather than the broker.
 LINGER_MS="${LINGER_MS:-0}"
+# Live Prometheus metrics from loadgen, for watching a window while it runs.
+# Empty (off) by default: the published numbers come from loadgen's report, not
+# from a scrape, so nothing here depends on it. `wb run` sets it when a
+# monitoring host exists. See ansible/monitoring.yaml.
+LOADGEN_METRICS_LISTEN="${LOADGEN_METRICS_LISTEN:-}"
+
 # Produce acknowledgement level, passed straight to loadgen -acks.
 # "all" (quorum) is the default and the only durable choice. "leader" is a
 # DURABILITY TRADE that is only defensible for in-broker relay consumers,
@@ -743,6 +749,7 @@ for level in $SWEEP; do
   echo "--- loadgen: arm=$CONSUMER_ARM -input-topic $orders ${recv_args[*]} -rate $this_rate -producers $PRODUCERS -linger-ms $LINGER_MS -acks $ACKS ---"
   "$BIN/loadgen" \
     -clock-rms-micros "${CLOCK_RMS_MICROS:-0}" \
+    -metrics-listen "${LOADGEN_METRICS_LISTEN:-}" \
     -brokers "$BROKERS" -input-topic "$orders" "${recv_args[@]}" \
     -num-probes 1 -rate "$this_rate" -duration "$DURATION" -warmup "$WARMUP" \
     -pacing "$PACING" -payload-bytes "$this_payload" -sample-every "$SAMPLE_EVERY" \

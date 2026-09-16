@@ -28,6 +28,11 @@ CLIENTS="${CLIENTS:?space-separated client public IPs (>=3): loadgen matcher fan
 BROKERS="${BROKERS:?comma-separated private_ip:9092}"
 BIN="${BIN:-/opt/wasm-bench}"
 FANOUT_N="${FANOUT_N:-500}"        # total consumers incl. loadgen
+# Live Prometheus metrics from loadgen, off by default. Set by `wb run` when a
+# monitoring host exists. This arm is the one where client saturation actually
+# bit (METHODOLOGY 29), so it is the arm where watching send_lateness live is
+# worth the most.
+LOADGEN_METRICS_LISTEN="${LOADGEN_METRICS_LISTEN:-}"
 RATE="${RATE:-1000}"
 DURATION="${DURATION:-30s}"; WARMUP="${WARMUP:-10s}"; DRAIN="${DRAIN:-30s}"
 PAYLOAD="${PAYLOAD:-650}"; SAMPLE_EVERY="${SAMPLE_EVERY:-10}"
@@ -134,6 +139,7 @@ sh_on "$LG" "cd $BIN && ./loadgen -brokers $BROKERS -input-topic $ORDERS \
   -rate $RATE -duration $DURATION -warmup $WARMUP -drain $DRAIN \
   -pacing fixed -payload-bytes $PAYLOAD -sample-every $SAMPLE_EVERY \
   -linger-ms $LINGER_MS -acks $ACKS -producers 1 -clock-rms-micros $RMS \
+  -metrics-listen '$LOADGEN_METRICS_LISTEN' \
   -label trad-sharded-$FANOUT_N -out $OUT/trad-$FANOUT_N.json" 2>&1 | grep -E 'wrote report|NOT CLEAN' || true
 
 sh_on "$LG" "cd $OUT && jq -r '\"clean=\(.clean)  recv=\(.received_receipts)/\(.expected_receipts)  miss=\(.missing_receipts)  e2e_p50=\(.total.p50_micros|floor)us  p90=\(.total.p90_micros|floor)us  p99=\(.total.p99_micros|floor)us  lateness_p99=\(.send_lateness.p99_micros|floor)us\"' trad-$FANOUT_N.json"
