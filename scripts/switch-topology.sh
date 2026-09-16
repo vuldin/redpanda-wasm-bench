@@ -214,7 +214,11 @@ plan = json.load(sys.stdin)
 azs = json.loads(os.environ['AZS_RAW'].replace(chr(39), '\"'))
 itypes = {'broker': os.environ['BROKER_ITYPE'], 'client': os.environ['CLIENT_ITYPE'],
           'monitor': os.environ['MONITOR_ITYPE']}
-needed = set()
+# Counted, not a set. A set of distinct (az, itype) pairs throws away how many
+# of each the plan creates, and capacity for one instance says nothing about
+# capacity for eight - which is how an 8-client plan passed this check and then
+# stalled in RunInstances for 11 minutes on 2026-09-16.
+needed = {}
 for rc in plan.get('resource_changes', []):
     m = re.match(r'aws_instance\.(broker|client|monitor)\[(\d+)\]\$', rc['address'])
     if m and 'create' in rc['change']['actions']:
@@ -222,9 +226,9 @@ for rc in plan.get('resource_changes', []):
         # main.tf pins the monitor to subnet_ids[0] so its scrapes stay
         # intra-AZ, rather than round-robinning like brokers and clients.
         az = azs[0] if kind == 'monitor' else azs[idx % len(azs)]
-        needed.add((az, itypes[kind]))
-for az, itype in sorted(needed):
-    print(az, itype)
+        needed[(az, itypes[kind])] = needed.get((az, itypes[kind]), 0) + 1
+for (az, itype), n in sorted(needed.items()):
+    print(az, itype, n)
 ")
 if [ -z "$CAPACITY_CHECK" ]; then
   echo "OK: this plan creates no new instances - nothing to capacity-check"
@@ -233,13 +237,13 @@ else
   # and select-region.sh ask EC2 the same question the same way. It used to be
   # duplicated here; two probes that can disagree are worse than one.
   CAPACITY_FAIL=0
-  while read -r az itype; do
+  while read -r az itype n; do
     [ -z "$az" ] && continue
-    echo "--- checking $itype in $az ---"
-    if capacity_available "$TF_REGION" "$az" "$itype"; then
-      echo "    OK: capacity confirmed"
+    echo "--- checking ${n}x $itype in $az ---"
+    if capacity_available "$TF_REGION" "$az" "$itype" "$n"; then
+      echo "    OK: capacity confirmed for all $n"
     else
-      echo "    FAIL: no capacity for $itype in $az right now" >&2
+      echo "    FAIL: no capacity for ${n}x $itype in $az right now" >&2
       CAPACITY_FAIL=1
     fi
   done <<< "$CAPACITY_CHECK"
