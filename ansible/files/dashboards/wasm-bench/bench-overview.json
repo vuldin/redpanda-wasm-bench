@@ -414,7 +414,7 @@
           "range": true
         }
       ],
-      "description": "delivered/s divided by pushes/s is the effective fan-out. At 500 subscribers and a clean run it should sit at 500x pushes, and a ratio below the configured fan-out is the same finding as a non-zero drop rate.",
+      "description": "delivered/s divided by pushes/s is NOT the fan-out factor, and reading it that way is a mistake this panel used to invite. pushes_total is incremented inside deliver_locally(), which push() calls once for the producer's own shard plus once per other shard holding a subscriber - so it counts shard-delivery passes and grows with how widely subscribers are spread, not with the offered rate. Measured at 500 consumers over 13 shards: 780,000 pushes for 30,000,000 deliveries, a ratio of 38.5, while the actual fan-out was exactly 500. The run's own report computes both and names them apart (relay_delivered_per_shard_pass vs relay_delivered_per_logical_push); the logical figure needs the order count, which Prometheus does not have. What to read here is that delivered tracks pushes smoothly and dropped stays flat at zero.",
       "options": {
         "legend": {
           "displayMode": "table",
