@@ -1,0 +1,23 @@
+[Unit]
+Description=Prometheus
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=prometheus
+Group=prometheus
+Type=simple
+ExecStart=/usr/local/bin/prometheus \
+  --config.file=/etc/prometheus/prometheus.yml \
+  --storage.tsdb.path=/var/lib/prometheus \
+  --storage.tsdb.retention.time={{ prom_retention }} \
+  --web.listen-address=:{{ prometheus_port }} \
+  --web.enable-lifecycle
+Restart=always
+RestartSec=2
+# The TSDB is the reason this host has a 100GB root volume. A scrape this
+# tight fills memory faster than the default cgroup accounting expects.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

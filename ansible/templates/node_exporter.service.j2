@@ -1,0 +1,20 @@
+[Unit]
+Description=Prometheus node_exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=node_exporter
+Group=node_exporter
+Type=simple
+# --collector.disable-defaults is NOT used: the defaults are what the host
+# panels need, and the brokers have 32 vCPU against redpanda's 13, so the
+# collector's cost is not competing with the workload for a reserved core.
+ExecStart=/usr/local/bin/node_exporter \
+  --web.listen-address=:{{ node_exporter_port }} \
+  --collector.processes
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

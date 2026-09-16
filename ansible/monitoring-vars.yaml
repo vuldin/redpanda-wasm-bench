@@ -1,0 +1,34 @@
+# Versions are pinned, and every URL built from them was checked to resolve
+# before being committed. An unpinned "latest" here would mean a deploy that
+# worked last week failing against already-billing hardware.
+node_exporter_version: "1.9.1"
+prometheus_version: "3.5.0"
+grafana_version: "11.6.1"
+
+node_exporter_port: 9100
+prometheus_port: 9090
+grafana_port: 3000
+# loadgen's optional live-metrics endpoint. Nothing listens here unless loadgen
+# was started with -metrics-listen, which is why that scrape job is expected to
+# be down between runs.
+loadgen_metrics_port: 9110
+
+# Scrape intervals. The reasoning for the spread is in prometheus.yml.j2.
+# 2s against a 30s measurement window gives ~15 points, which is enough to see
+# shape. Going tighter starts to be visible on the thing being measured.
+prom_interval_public: "2s"
+prom_interval_internal: "15s"
+prom_interval_node: "5s"
+prom_interval_loadgen: "1s"
+
+# A run is hours, not weeks, and the TSDB is on the instance root volume that
+# terraform destroys with everything else. Long enough to cover a full
+# reproduce plus the resilience series.
+prom_retention: "15d"
+
+redpanda_id: "wasm-bench"
+
+# Not a secret worth protecting: anonymous viewer access is on, the security
+# group admits one /32, and the host lives for the length of a run. It exists
+# so the admin account is not blank.
+grafana_admin_password: "wasmbench"

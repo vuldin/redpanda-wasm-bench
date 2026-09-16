@@ -39,6 +39,10 @@
 #   set <prop> <val>    cluster config set, auto-rolling when needs_restart
 #   run e1|e2 [K=V...]  run a phase runner on client[0] with correct env
 #   results [dir]       copy result JSON back from client[0]
+#   monitor [sub]       prometheus/grafana host: status (default, prints the
+#                       Grafana URL and checks it is reachable), deploy,
+#                       dashboards (regenerate and push), check (validate every
+#                       dashboard query against the live Prometheus)
 #   ssh <target> [cmd]  broker0..2 / client0..1, correct flags applied
 #   logs <target> [n]   redpanda journal from a broker
 #   teardown|down       terraform destroy (prompts unless --yes)
@@ -116,11 +120,13 @@ cluster_in_state() {
 load_env() {
   if [ ! -s "$ENVFILE" ] || [ "${1:-}" = "refresh" ]; then
     [ -d "$TF/.terraform" ] || die "terraform not initialized - run: cd terraform && terraform init"
-    local bp bpv cp cpv
+    local bp bpv cp cpv mp mpv
     bp=$(cd "$TF" && terraform output -json broker_public_ips 2>/dev/null | jq -r 'join(" ")') || true
     bpv=$(cd "$TF" && terraform output -json broker_private_ips 2>/dev/null | jq -r 'join(" ")') || true
     cp=$(cd "$TF" && terraform output -json client_public_ips 2>/dev/null | jq -r 'join(" ")') || true
     cpv=$(cd "$TF" && terraform output -json client_private_ips 2>/dev/null | jq -r 'join(" ")') || true
+    mp=$(cd "$TF" && terraform output -json monitor_public_ips 2>/dev/null | jq -r 'join(" ")') || true
+    mpv=$(cd "$TF" && terraform output -json monitor_private_ips 2>/dev/null | jq -r 'join(" ")') || true
     [ -n "${bp// /}" ] || die "no terraform outputs - no cluster is provisioned. Run: wb up single-az"
     {
       echo "BROKER_PUB=\"$bp\""
@@ -136,6 +142,12 @@ load_env() {
       # should pass ADMIN_URLS for metrics and ADMIN_URL only where a single
       # control-plane endpoint is wanted.
       echo "ADMIN_URLS=\"$(echo "$bpv" | tr ' ' '\n' | sed 's|^|http://|; s|$|:9644|' | paste -sd, -)\""
+      # Empty when monitor_count = 0. Every consumer checks for that rather
+      # than assuming the monitoring host exists.
+      echo "MONITOR_PUB=\"$mp\""
+      echo "MONITOR_PRIV=\"$mpv\""
+      echo "GRAFANA_URL=\"$([ -n "${mp// /}" ] && echo "http://$(echo "$mp" | awk '{print $1}'):3000")\""
+      echo "PROMETHEUS_URL=\"$([ -n "${mp// /}" ] && echo "http://$(echo "$mp" | awk '{print $1}'):9090")\""
     } > "$ENVFILE"
   fi
   # shellcheck disable=SC1090
@@ -158,7 +170,10 @@ resolve_host() {
       local n; n=$(echo "$CLIENT_PUB" | wc -w)
       [ "$idx" -lt "$n" ] || die "no such target '$t' - only $n client(s) exist"
       echo "$CLIENT_PUB" | awk -v i=$((idx+1)) '{print $i}' ;;
-    *) die "unknown target '$t' (want broker0..2 or client<N>)" ;;
+    monitor|monitor0)
+      [ -n "${MONITOR_PUB// /}" ] || die "no monitoring host - provisioned with monitor_count=0?"
+      echo "$MONITOR_PUB" | awk '{print $1}' ;;
+    *) die "unknown target '$t' (want broker0..2, client<N> or monitor)" ;;
   esac
 }
 
@@ -173,6 +188,9 @@ node_priv() { # private IP for a target, for on-instance addressing
       local n; n=$(echo "$CLIENT_PRIV" | wc -w)
       [ "$idx" -lt "$n" ] || die "no such target '$t' - only $n client(s) exist"
       echo "$CLIENT_PRIV" | awk -v i=$((idx+1)) '{print $i}' ;;
+    monitor|monitor0)
+      [ -n "${MONITOR_PRIV// /}" ] || die "no monitoring host - provisioned with monitor_count=0?"
+      echo "$MONITOR_PRIV" | awk '{print $1}' ;;
     *) die "unknown target '$t'" ;;
   esac
 }
@@ -364,6 +382,25 @@ cmd_up() {
   ( cd "$TF" && BENCH_PUB_KEY="$BENCH_PUB_KEY" BENCH_SSH_KEY="$BENCH_SSH_KEY" \
       bash "$HERE/switch-topology.sh" "$topo" ) || die "provisioning failed (capacity? see output above)"
   load_env refresh
+
+  # Monitoring goes up FIRST, before the broker binary and before any
+  # measurement. The point of a dashboard is to be watchable while the thing
+  # happens, and a URL handed over after the run is most of the value gone.
+  # A failure here is reported and does not abort: losing the observer must not
+  # cost a provisioned cluster.
+  if [ -n "${MONITOR_PUB// /}" ]; then
+    echo ""
+    echo "=== monitoring stack (before anything is measured, so it can be watched) ==="
+    if cmd_monitor deploy; then
+      :
+    else
+      echo "wb: WARNING - monitoring deploy failed. The cluster is fine and the"
+      echo "    benchmark will run; you just have no dashboards. Retry with:"
+      echo "      wb monitor deploy"
+    fi
+  fi
+
+  echo ""
   echo "wb: provisioned. next: wb deploy"
 }
 
@@ -534,7 +571,12 @@ cmd_run() {
     echo "wb: binary gate OK - all brokers running the local build"
   fi
 
-  local base="cd $REMOTE_TOOLS && export BIN=. RPK=./rpk BROKERS=$BROKERS ADMIN_URL=$ADMIN_URL ADMIN_URLS=$ADMIN_URLS RUN_ID=\$(date +%s)"
+  # LOADGEN_METRICS_LISTEN is set only when a monitoring host exists, so a
+  # cluster provisioned with monitor_count=0 runs loadgen exactly as it did
+  # before this existed - no endpoint, no goroutine, no scrape.
+  local lg_metrics=""
+  [ -n "${MONITOR_PUB// /}" ] && lg_metrics=":9110"
+  local base="cd $REMOTE_TOOLS && export BIN=. RPK=./rpk BROKERS=$BROKERS ADMIN_URL=$ADMIN_URL ADMIN_URLS=$ADMIN_URLS LOADGEN_METRICS_LISTEN='$lg_metrics' RUN_ID=\$(date +%s)"
   # Values must be single-quoted on the way out. Unquoted, a multi-word value
   # like PARTITION_LEVELS="1 2 4 8 13" becomes `export PARTITION_LEVELS=1` and
   # the remaining words are executed as commands - which silently ran a
@@ -600,6 +642,113 @@ cmd_ssh() {
 cmd_logs() {
   local t="${1:-broker0}" n="${2:-80}"
   rsh "$t" "sudo journalctl -u redpanda --no-pager -n $n"
+}
+
+# --- monitoring ------------------------------------------------------------
+#
+# Prometheus + Grafana on their own instance, plus node_exporter everywhere.
+# Separate from `deploy` on purpose: this ships an observer, not the artifact
+# under test, so it can be redeployed mid-run or skipped entirely without
+# touching the broker binary.
+cmd_monitor() {
+  local sub="${1:-status}"; shift || true
+  load_env
+  case "$sub" in
+    deploy)
+      [ -n "${MONITOR_PUB// /}" ] || die "no monitoring host in this cluster.
+       It is provisioned by terraform (monitor_count, default 1). If you applied
+       with monitor_count=0, re-run 'wb up' to add it."
+      note "deploying prometheus + grafana to $MONITOR_PUB and node_exporter to every instance"
+      ( cd "$ROOT/ansible" && ANSIBLE_PRIVATE_KEY_FILE="$BENCH_SSH_KEY" \
+          ansible-playbook monitoring.yaml --private-key "$BENCH_SSH_KEY" "$@" ) \
+        || die "monitoring deploy failed"
+      cmd_monitor status
+      ;;
+    dashboards)
+      # Regenerate from scripts/make-dashboards.py and push only those, so a
+      # panel fix lands in seconds while a run is in flight. Grafana rescans
+      # every 10s, so no restart.
+      python3 "$HERE/make-dashboards.py" "$ROOT/ansible/files/dashboards/wasm-bench" \
+        || die "dashboard generation failed"
+      local h; h="$(resolve_host monitor)"
+      rsync -az -e "ssh -i $BENCH_SSH_KEY ${SSH_OPTS[*]}" \
+        "$ROOT/ansible/files/dashboards/" "ubuntu@$h:/tmp/dashboards/" \
+        || die "could not copy dashboards"
+      rsh monitor "sudo cp -r /tmp/dashboards/. /var/lib/grafana/dashboards/ && \
+                   sudo chown -R grafana:grafana /var/lib/grafana/dashboards"
+      echo "wb: dashboards pushed; grafana picks them up within 10s"
+      ;;
+    check)
+      # Ask the live Prometheus whether every dashboard query actually returns
+      # something. A dashboard that renders empty panels looks finished.
+      [ -n "${PROMETHEUS_URL:-}" ] || die "no monitoring host"
+      python3 "$HERE/check-dashboards.py" "$PROMETHEUS_URL" \
+        "$ROOT/ansible/files/dashboards"
+      ;;
+    status|urls)
+      if [ -z "${MONITOR_PUB// /}" ]; then
+        echo "wb: no monitoring host (monitor_count=0)"
+        return 0
+      fi
+      echo "  Grafana     $GRAFANA_URL"
+      echo "              anonymous viewer access; admin/wasmbench to edit"
+      echo "  Prometheus  $PROMETHEUS_URL"
+      echo ""
+      # Reachability, checked rather than asserted. A security group scoped to
+      # the wrong /32 does not refuse the connection, it makes every port time
+      # out while the VPC, route table and SG all look correct on inspection -
+      # so the failure reads as "grafana is broken". Diagnose it here with the
+      # fix, rather than leaving someone to find it.
+      local ok=0
+      if curl -sf --max-time 8 "$GRAFANA_URL/api/health" >/dev/null 2>&1; then
+        note "OK   grafana reachable from this machine"
+        ok=1
+      else
+        note "UNREACHABLE from this machine: $GRAFANA_URL"
+      fi
+      if [ "$ok" -eq 0 ]; then
+        local myip; myip="$(curl -sf --max-time 8 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\n')"
+        cat <<EOM
+
+  The security group admits one address: whatever an IP reflector said this
+  machine's egress was at apply time. Two things break that, and both time out
+  rather than refusing, which is why this looks like a broken Grafana:
+
+    1. Your egress IP changed since 'wb up'.
+    2. Your egress IP is not stable per-flow. Behind a carrier-grade NAT a
+       browser can leave from a different address than the reflector reported,
+       in a different /24.
+
+  This machine currently reports: ${myip:-<reflector unreachable>}
+
+  Fix by widening the allowed range and re-applying - terraform changes only
+  the security group rule, it does not touch the instances:
+
+    cd terraform
+    terraform apply -var-file=$TFVARS_SINGLE -var-file=region.auto.tfvars \\
+      -var="public_key_path=$BENCH_PUB_KEY" \\
+      -var='operator_extra_cidrs=["${myip%.*}.0/24"]'
+
+  If a /24 is not enough, widen to the enclosing /20: these pools have been
+  observed to span more than one /24.
+EOM
+        return 1
+      fi
+      # Target health, because "grafana is up" and "prometheus is collecting"
+      # are different claims and only the second one matters for the charts.
+      echo ""
+      echo "  scrape targets:"
+      curl -sf --max-time 10 "$PROMETHEUS_URL/api/v1/targets?state=active" 2>/dev/null \
+        | jq -r '.data.activeTargets
+                 | group_by(.labels.job)[]
+                 | "    \(.[0].labels.job): \([.[] | select(.health=="up")] | length)/\(length) up"' \
+        2>/dev/null || echo "    (could not read target health)"
+      echo ""
+      echo "  loadgen is expected to be 0/N between runs - it is a batch"
+      echo "  process, not a service."
+      ;;
+    *) die "usage: wb monitor [status|deploy|dashboards|check]" ;;
+  esac
 }
 
 cmd_teardown() {
@@ -797,6 +946,7 @@ case "${1:-}" in
   set)      shift; cmd_set "$@" ;;
   run)      shift; cmd_run "$@" ;;
   results)  shift; cmd_results "$@" ;;
+  monitor)  shift; cmd_monitor "$@" ;;
   ssh)      shift; cmd_ssh "$@" ;;
   logs)     shift; cmd_logs "$@" ;;
   # `down` and `destroy` alias teardown deliberately. `wb up` has no matching

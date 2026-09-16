@@ -1,0 +1,326 @@
+# Prometheus + Grafana on the monitoring instance, node_exporter everywhere.
+#
+# Separate from deploy-wasm.yaml on purpose. That playbook ships the artifacts
+# under test and a mistake in it invalidates a run; this one ships an observer
+# and a mistake in it costs you charts. Keeping them apart means the monitoring
+# stack can be redeployed mid-run, or skipped entirely, without touching the
+# broker binary.
+#
+# Run it with: wb monitor deploy
+---
+- name: node_exporter on every instance
+  hosts: metrics_hosts
+  become: true
+  gather_facts: true
+  vars_files: [monitoring-vars.yaml]
+  tasks:
+    - name: node_exporter user
+      ansible.builtin.user:
+        name: node_exporter
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+
+    # Checked before downloading rather than relying on the unarchive module's
+    # creates: - this runs against 12 hosts and the tarball is fetched from
+    # GitHub, which is the one step here that depends on something outside AWS.
+    - name: is node_exporter already at the pinned version
+      ansible.builtin.command: /usr/local/bin/node_exporter --version
+      register: ne_version
+      changed_when: false
+      failed_when: false
+
+    - name: fetch and install node_exporter
+      when: node_exporter_version not in (ne_version.stderr | default('')) + (ne_version.stdout | default(''))
+      block:
+        - name: download node_exporter
+          ansible.builtin.unarchive:
+            src: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+            dest: /tmp
+            remote_src: true
+            owner: root
+            group: root
+          retries: 3
+          delay: 5
+
+        - name: place the binary
+          ansible.builtin.copy:
+            src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+            dest: /usr/local/bin/node_exporter
+            mode: "0755"
+            remote_src: true
+
+    - name: node_exporter unit
+      ansible.builtin.template:
+        src: node_exporter.service.j2
+        dest: /etc/systemd/system/node_exporter.service
+        mode: "0644"
+      notify: restart node_exporter
+
+    - name: enable node_exporter
+      ansible.builtin.systemd:
+        name: node_exporter
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    # Proves the exporter answers on the port Prometheus will ask on, from the
+    # host itself, before Prometheus is configured to expect it. A target that
+    # is down after the fact is ambiguous between "exporter broken" and
+    # "security group", and this separates the two.
+    - name: node_exporter answers
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ node_exporter_port }}/metrics"
+        return_content: false
+      retries: 5
+      delay: 2
+      register: ne_check
+      until: ne_check.status == 200
+
+  handlers:
+    - name: restart node_exporter
+      ansible.builtin.systemd:
+        name: node_exporter
+        state: restarted
+        daemon_reload: true
+
+- name: Prometheus and Grafana on the monitoring host
+  hosts: monitor
+  become: true
+  gather_facts: true
+  vars_files: [monitoring-vars.yaml]
+  vars:
+    monitor_public_ip: "{{ inventory_hostname }}"
+  tasks:
+    # ----------------------------------------------------------------- Prometheus
+    - name: prometheus user
+      ansible.builtin.user:
+        name: prometheus
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+
+    - name: prometheus directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: "0755"
+      loop:
+        - /etc/prometheus
+        - /var/lib/prometheus
+
+    - name: is prometheus already at the pinned version
+      ansible.builtin.command: /usr/local/bin/prometheus --version
+      register: prom_version
+      changed_when: false
+      failed_when: false
+
+    - name: fetch and install prometheus
+      when: prometheus_version not in (prom_version.stderr | default('')) + (prom_version.stdout | default(''))
+      block:
+        - name: download prometheus
+          ansible.builtin.unarchive:
+            src: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+            dest: /tmp
+            remote_src: true
+          retries: 3
+          delay: 5
+
+        - name: place prometheus binaries
+          ansible.builtin.copy:
+            src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+            dest: "/usr/local/bin/{{ item }}"
+            mode: "0755"
+            remote_src: true
+          loop: [prometheus, promtool]
+
+    - name: prometheus scrape config
+      ansible.builtin.template:
+        src: prometheus.yml.j2
+        dest: /etc/prometheus/prometheus.yml
+        owner: prometheus
+        group: prometheus
+        mode: "0644"
+        # promtool refuses to install a config Prometheus would reject, so a
+        # templating mistake fails here instead of leaving the service in a
+        # restart loop with the reason only in journalctl.
+        validate: /usr/local/bin/promtool check config %s
+      notify: reload prometheus
+
+    - name: prometheus unit
+      ansible.builtin.template:
+        src: prometheus.service.j2
+        dest: /etc/systemd/system/prometheus.service
+        mode: "0644"
+      notify: restart prometheus
+
+    - name: enable prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    # ------------------------------------------------------------------- Grafana
+    - name: grafana user
+      ansible.builtin.user:
+        name: grafana
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+
+    - name: grafana directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: grafana
+        group: grafana
+        mode: "0755"
+      loop:
+        - /opt/grafana
+        - /etc/grafana
+        - /etc/grafana/provisioning/datasources
+        - /etc/grafana/provisioning/dashboards
+        - /var/lib/grafana
+        - /var/lib/grafana/dashboards
+        - /var/log/grafana
+
+    - name: is grafana already at the pinned version
+      ansible.builtin.command: /opt/grafana/bin/grafana --version
+      register: graf_version
+      changed_when: false
+      failed_when: false
+
+    - name: fetch and install grafana
+      when: grafana_version not in (graf_version.stdout | default('')) + (graf_version.stderr | default(''))
+      block:
+        - name: download grafana
+          ansible.builtin.unarchive:
+            src: "https://dl.grafana.com/oss/release/grafana-{{ grafana_version }}.linux-amd64.tar.gz"
+            dest: /opt
+            remote_src: true
+            owner: grafana
+            group: grafana
+          retries: 3
+          delay: 5
+
+        # The tarball unpacks to grafana-v<version>/ or grafana-<version>/
+        # depending on the release, so resolve it rather than assuming.
+        - name: find the unpacked grafana directory
+          ansible.builtin.find:
+            paths: /opt
+            patterns: "grafana-*{{ grafana_version }}"
+            file_type: directory
+          register: graf_dir
+
+        - name: fail clearly if the tarball layout was not what we expect
+          ansible.builtin.assert:
+            that: graf_dir.files | length == 1
+            fail_msg: >-
+              expected exactly one /opt/grafana-*{{ grafana_version }} directory,
+              found {{ graf_dir.files | map(attribute='path') | list }}
+
+        - name: move grafana into place
+          ansible.builtin.command:
+            cmd: "cp -a {{ graf_dir.files[0].path }}/. /opt/grafana/"
+          changed_when: true
+
+        - name: grafana owns its tree
+          ansible.builtin.file:
+            path: /opt/grafana
+            state: directory
+            owner: grafana
+            group: grafana
+            recurse: true
+
+    - name: grafana config
+      ansible.builtin.template:
+        src: grafana.ini.j2
+        dest: /etc/grafana/grafana.ini
+        owner: grafana
+        group: grafana
+        mode: "0640"
+      notify: restart grafana
+
+    - name: grafana provisioning
+      ansible.builtin.template:
+        src: "provisioning/{{ item.src }}"
+        dest: "/etc/grafana/provisioning/{{ item.dest }}"
+        owner: grafana
+        group: grafana
+        mode: "0644"
+      loop:
+        - {src: datasources.yaml.j2, dest: datasources/datasources.yaml}
+        - {src: dashboards.yaml.j2, dest: dashboards/dashboards.yaml}
+      notify: restart grafana
+
+    - name: dashboards
+      ansible.builtin.copy:
+        src: files/dashboards/
+        dest: /var/lib/grafana/dashboards/
+        owner: grafana
+        group: grafana
+        mode: "0644"
+        directory_mode: "0755"
+
+    - name: enable grafana
+      ansible.builtin.systemd:
+        name: grafana
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    # --------------------------------------------------------------- verification
+    # The playbook is not done when the services are "started". It is done when
+    # Prometheus is actually scraping the cluster and Grafana can answer. Both
+    # are checked here so a broken stack fails the deploy rather than being
+    # discovered by opening a URL to empty panels.
+    - name: grafana answers
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ grafana_port }}/api/health"
+        return_content: true
+      register: graf_health
+      retries: 30
+      delay: 2
+      until: graf_health.status == 200 and (graf_health.json.database | default('')) == 'ok'
+
+    - name: prometheus has the redpanda targets up
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ prometheus_port }}/api/v1/targets?state=active"
+        return_content: true
+      register: prom_targets
+      retries: 30
+      delay: 2
+      until: >-
+        prom_targets.status == 200 and
+        (prom_targets.json.data.activeTargets
+          | selectattr('labels.job', 'equalto', 'redpanda')
+          | selectattr('health', 'equalto', 'up') | list | length) == (groups['broker'] | length)
+
+    - name: report
+      ansible.builtin.debug:
+        msg:
+          - "grafana    http://{{ inventory_hostname }}:{{ grafana_port }}  (anonymous viewer; admin/{{ grafana_admin_password }})"
+          - "prometheus http://{{ inventory_hostname }}:{{ prometheus_port }}"
+          - "redpanda targets up: {{ prom_targets.json.data.activeTargets | selectattr('labels.job', 'equalto', 'redpanda') | selectattr('health', 'equalto', 'up') | list | length }}/{{ groups['broker'] | length }}"
+
+  handlers:
+    - name: reload prometheus
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ prometheus_port }}/-/reload"
+        method: POST
+        status_code: [200, 204]
+
+    - name: restart prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        state: restarted
+        daemon_reload: true
+
+    - name: restart grafana
+      ansible.builtin.systemd:
+        name: grafana
+        state: restarted
+        daemon_reload: true
