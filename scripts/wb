@@ -39,6 +39,9 @@
 #   set <prop> <val>    cluster config set, auto-rolling when needs_restart
 #   run e1|e2 [K=V...]  run a phase runner on client[0] with correct env
 #   results [dir]       copy result JSON back from client[0]
+#   cleanup-results <glob> [--yes]
+#                       remove result dirs on client[0] so a re-run of one arm
+#                       is not medianed together with the run it replaces
 #   monitor [sub]       prometheus/grafana host: status (default, prints the
 #                       Grafana URL and checks it is reachable), deploy,
 #                       dashboards (regenerate and push), check (validate every
@@ -667,6 +670,56 @@ cmd_logs() {
   rsh "$t" "sudo journalctl -u redpanda --no-pager -n $n"
 }
 
+# Remove result directories on the client, so a re-run's tables are not
+# medianed together with the run it was meant to replace.
+#
+# WHY THIS IS NEEDED AT ALL: render-tables.py groups reports by LABEL, and every
+# in-broker trial of a given fan-out carries the same label (fanout-500). The
+# results directory on the client accumulates every run, and `wb results`
+# rsyncs all of it. So re-running one arm after a fix silently produces a
+# median spanning both sides of that fix - the exact failure render-tables.py's
+# own header warns about ("reported 24 clean trials from a rate sweep it had
+# not been asked to run").
+#
+# Takes a glob against the result directory NAMES, never a path, and prints
+# what it will remove before doing it.
+cmd_cleanup_results() {
+  local pat="${1:-}"
+  [ -n "$pat" ] || die "usage: wb cleanup-results <dir-glob>
+       e.g. wb cleanup-results 'e2-throughput-fanout-*'   (the in-broker arm)
+            wb cleanup-results 'traditional-sharded-*'    (the external arm)
+       Matches result DIRECTORY names under $REMOTE_TOOLS/results, not paths."
+  case "$pat" in
+    /*|*..*) die "pattern must be a directory-name glob, not a path: $pat" ;;
+    '*'|'**') die "refusing to match everything - name the arm you mean" ;;
+  esac
+  load_env
+
+  local found
+  found="$(rsh client0 "cd $REMOTE_TOOLS/results 2>/dev/null && ls -d $pat 2>/dev/null" || true)"
+  if [ -z "${found//[[:space:]]/}" ]; then
+    echo "wb: nothing under $REMOTE_TOOLS/results matches '$pat'"
+    return 0
+  fi
+  echo "wb: these result directories on client0 will be REMOVED:"
+  echo "$found" | sed 's/^/    /'
+  if [ "${2:-}" != "--yes" ]; then
+    echo ""
+    echo "Copy anything you still want first (wb results), then re-run with --yes:"
+    echo "  wb cleanup-results '$pat' --yes"
+    return 1
+  fi
+  rsh client0 "cd $REMOTE_TOOLS/results && rm -rf -- $pat"
+  local left
+  left="$(rsh client0 "cd $REMOTE_TOOLS/results 2>/dev/null && ls -d $pat 2>/dev/null" || true)"
+  if [ -n "${left//[[:space:]]/}" ]; then
+    echo "wb: WARNING - still present after removal:" >&2
+    echo "$left" | sed 's/^/    /' >&2
+    return 1
+  fi
+  echo "wb: removed. A re-run's tables will now cover only the new reports."
+}
+
 # --- monitoring ------------------------------------------------------------
 #
 # Prometheus + Grafana on their own instance, plus node_exporter everywhere.
@@ -992,6 +1045,7 @@ case "${1:-}" in
   set)      shift; cmd_set "$@" ;;
   run)      shift; cmd_run "$@" ;;
   results)  shift; cmd_results "$@" ;;
+  cleanup-results) shift; cmd_cleanup_results "$@" ;;
   monitor)  shift; cmd_monitor "$@" ;;
   ssh)      shift; cmd_ssh "$@" ;;
   logs)     shift; cmd_logs "$@" ;;

@@ -24,6 +24,20 @@ TRIALS="${TRIALS:-3}"
 DURATION="${DURATION:-30s}"; WARMUP="${WARMUP:-10s}"; DRAIN="${DRAIN:-30s}"
 # Published region first - see select-region.sh for why.
 REGIONS="${REGIONS:-us-east-1 us-east-2 us-west-2 eu-west-1}"
+# Which arms to run. Both by default.
+#
+# Exists because re-running ONE arm is a real operation: a fix to the in-broker
+# measurement path does not invalidate the external ladder, and the external
+# ladder at 500 consumer groups is the expensive half of a reproduction. Doing
+# it by hand means remembering five variables that have to match the other
+# arm's, which is exactly what this script exists to prevent.
+#
+# NOTE when re-running one arm against a cluster that already holds results:
+# render-tables.py groups by LABEL, and every in-broker trial carries the same
+# label (fanout-500), so old and new trials of the same arm are medianed
+# together. Clear the old arm's result directories on the client first -
+# `wb cleanup-results <pattern>` - or the median silently spans a fix.
+ARMS="${ARMS:-inbroker external}"
 SKIP_PROVISION="${SKIP_PROVISION:-false}"
 SKIP_DEPLOY="${SKIP_DEPLOY:-$SKIP_PROVISION}"
 RUN_ID="${RUN_ID:-$(date +%s)}"
@@ -200,6 +214,7 @@ wait_healthy 180
 # ---------------------------------------------------------------------------
 # 3. arm 1: in-broker wasm
 # ---------------------------------------------------------------------------
+if [[ " $ARMS " == *" inbroker "* ]]; then
 say "arm 1: in-broker wasm, $INBROKER_CONSUMERS consumers, $TRIALS trials"
 # `wb run` forwards KEY=VALUE ARGUMENTS to the remote runner as exports. It does
 # NOT forward its own environment - passing these as env silently ran the
@@ -214,6 +229,10 @@ for t in $(seq 1 "$TRIALS"); do
     RELAY_STAGE_METRICS=true WRITE_CACHING=true LINGER_MS=0 \
     || echo "  trial $t did not complete cleanly" >&2
 done
+else
+  echo ""
+  echo "=== arm 1 (in-broker) SKIPPED - ARMS=$ARMS ==="
+fi
 
 # Validate the dashboards against data that now exists. Arm 1 has run, so the
 # relay and transform metric families are populated and a query that returns
@@ -233,6 +252,7 @@ fi
 # ---------------------------------------------------------------------------
 # 4. arm 2: traditional, one level at a time
 # ---------------------------------------------------------------------------
+if [[ " $ARMS " == *" external "* ]]; then
 say "arm 2: traditional deployment, ladder: $EXTERNAL_LADDER"
 # run-traditional-sharded.sh drives the hosts itself over ssh, so it needs the
 # actual addresses. They come from terraform via `wb env`; without them it
@@ -252,6 +272,10 @@ for level in $EXTERNAL_LADDER; do
     bash "$ROOT/bench/run-traditional-sharded.sh" \
     || echo "  level $level did not complete cleanly" >&2
 done
+else
+  echo ""
+  echo "=== arm 2 (external) SKIPPED - ARMS=$ARMS ==="
+fi
 
 # ---------------------------------------------------------------------------
 # 5. collect and render
