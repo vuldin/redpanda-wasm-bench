@@ -8,10 +8,16 @@ overstates the case.
 Prerequisites and cost are in [README.md](README.md). Budget ~$40/hr for 1-2
 hours.
 
-The cluster: 3 x `r8id.8xlarge` brokers and 8 x `c5n.9xlarge` clients in
-`us-east-1a`, RF=3, `acks=all`, `write.caching=true`, producer linger 0, one
-input partition, an opt build of `transform-latency-instrumentation`, and
-matcher module `94c3d0177a754b9f0c1df80c10dea298`.
+The cluster: 3 x `r8id.8xlarge` brokers, 8 x `c5n.9xlarge` clients and one
+`m6i.2xlarge` monitoring host in `us-east-1a`, RF=3, `acks=all`,
+`write.caching=true`, producer linger 0, one input partition, an opt build of
+`transform-latency-instrumentation`, and matcher module
+`94c3d0177a754b9f0c1df80c10dea298`. Measured 2026-09-16. `num_cores` is 13 per
+broker, not 32, since SMT is off and a core is reserved for the OS.
+
+Host clocks were synced to Amazon Time Sync with a measured RMS offset of
+13.6 us, which is the error bar on `total` and is recorded in each run's own
+`clock-sync.json`. No trial reported `cross_clock_unusable`.
 
 ## Result 1: in-broker wasm, 500 consumers
 
@@ -22,17 +28,25 @@ duplicate, binary gate OK on all three.
 
 | stage | p50 | p90 | p99 |
 |---|---|---|---|
-| `produce` (client to quorum ack) | 831 us | 900 us | 1,007 us |
-| `relay_consume` (matcher stamp to receipt) | 355 us | 380 us | 413 us |
-| `total`, which is e2e | 958 us | 1,013 us | 1,103 us |
+| `produce` (client to quorum ack) | 666 us | 797 us | 1,000 us |
+| `relay_consume` (matcher stamp to receipt) | 339 us | 425 us | 1,026 us |
+| `total`, which is e2e | 751 us | 920 us | 1,483 us |
 
-Figures are medians across the three trials. The three came in at 981 / 704 /
-958 us at p50, so trial-to-trial spread on this arm is wide, around 39%
+Figures are medians across the three trials. The three came in at 739 / 986 /
+751 us at p50, so trial-to-trial spread on this arm is wide, around 34%
 between the fastest and slowest trial. Run at least three and report the
 median.
 
-Broker-side `emit_to_guest`, which is the fan-out cost itself, averaged 79 us
-over 40,000,000 samples per trial.
+The fan-out was complete rather than merely fast. Each trial delivered
+30,000,000 records to 500 consumers, `relay_delivered_per_logical_push` came
+out at exactly 500, and `relay_dropped_delta` was zero. A fast in-broker
+number with drops is the latency of an incomplete stream, so check that field
+before quoting anything here.
+
+Live `emit_to_guest`, the in-broker fan-out path itself, read 83 us at p50 and
+223 us at p99 during a window. That is the span to quote for the relay, and it
+is not the same thing as `relay_consume` above, which is measured over a wider
+span on the broker-guest clock.
 
 ```bash
 INBROKER_CONSUMERS=500 RATE=1000 PAYLOAD=650 RF=3 ACKS=all \
@@ -46,14 +60,17 @@ in-broker wasm and no relay on either side of the measurement.
 
 | deployment | consumers | e2e p50 | e2e p90 | e2e p99 | produce p50 |
 |---|---|---|---|---|---|
-| internal wasm (in-broker + relay) | 500 in-broker | 958 us | 1,013 us | 1,103 us | 831 us |
-| traditional | 1 external | 1,615 us | 1,963 us | 2,385 us | 500 us |
-| traditional | 10 external | 1,742 us | 2,071 us | 2,441 us | 496 us |
-| traditional | 50 external | 2,109 us | 2,553 us | 3,027 us | 509 us |
-| traditional | 500 external | 13,057 us | 16,530 us | 18,109 us | 835 us |
+| internal wasm (in-broker + relay) | 500 in-broker | 751 us | 920 us | 1,483 us | 666 us |
+| traditional | 1 external | 1,387 us | 1,704 us | 2,040 us | 578 us |
+| traditional | 10 external | 1,722 us | 2,164 us | 2,629 us | 750 us |
+| traditional | 50 external | 2,049 us | 2,461 us | 2,859 us | 606 us |
+| traditional | 500 external | 13,414 us | 17,060 us | 18,830 us | 963 us |
 
-Every row held pacing, with `send_lateness` p99 well inside the 1,000 us
-interval, and delivered 30,000 of 30,000 receipts with none missing.
+Every row held pacing and delivered 30,000 of 30,000 receipts with none
+missing. `send_lateness` p99 by level: 5, 21, 7 and 410 us against a 1,000 us
+interval. The 500-consumer row is the closest to its budget, at 41% of one
+pacing slot, which is the level that once starved a single-client rig and is
+why the fleet is eight instances.
 
 ```bash
 EXTERNAL_LADDER="1 10 50 500" RATE=1000 PAYLOAD=650 RF=3 ACKS=all \
@@ -64,9 +81,9 @@ EXTERNAL_LADDER="1 10 50 500" RATE=1000 PAYLOAD=650 RF=3 ACKS=all \
 
 | | ratio |
 |---|---|
-| p50 | 13.6x |
-| p90 | 16.3x |
-| p99 | 16.4x |
+| p50 | 17.9x |
+| p90 | 18.6x |
+| p99 | 12.7x |
 
 Quote the conclusion rather than the constant. "In-broker is roughly an order
 of magnitude better at 500 consumers" holds up. The specific multiple doesn't,
@@ -79,29 +96,43 @@ figure, say roughly 10x and note that the traditional point varies.
 
 ## What the data shows
 
-The advantage widens at the tail. 13.6x at the median against 16.3x and 16.4x
-at p90 and p99. The in-broker distribution stays tight, 958 to 1,103 us being
-a 1.15x p50-to-p99 spread, while the traditional deployment at 500 consumers
-spreads 13,057 to 18,109 us, a 1.39x spread.
+In-broker at 500 consumers has a better p99 (1,483 us) than the traditional
+deployment's p99 at ONE consumer (2,040 us). That is the strongest single line
+in the dataset, it holds at the tail rather than only at the median, and it has
+survived every instantiation this has been measured on.
 
-In-broker at 500 consumers has a better p99 (1,103 us) than the traditional
-deployment's p99 at one consumer (2,385 us). That's the strongest single line
-in the dataset, and it holds at the tail rather than only at the median.
+The fan-out is complete, not just fast. 30,000,000 deliveries per trial to 500
+consumers, `relay_delivered_per_logical_push` exactly 500, zero dropped. The
+comparison is between two arms that both delivered everything.
 
-The traditional tail is elevated before its median catches up. From 1 to 500
-consumers p50 grows 8.1x while p99 grows 7.6x, and between 10 and 50 consumers
-p99 moves 24% while p50 climbs 21%. The big jump is entirely between 50 and
-500. That shape is consistent with fetch-path scheduling rather than a smooth
+Do not read a trend into the ratio across quantiles. This run came out 17.9x at
+p50, 18.6x at p90 and 12.7x at p99, so the advantage narrows at the tail. The
+2026-09-12 run on the same topology came out the other way round, 13.6x at p50
+against 16.3x and 16.4x at p90 and p99, widening at the tail. Same instance
+types, same module, same AZ, opposite shape. Whatever governs the tail ratio is
+not stable between cluster instantiations, so "the advantage widens at the
+tail" is not a finding this data supports in either direction.
+
+The in-broker tail is not reliably tight either. Here p50 to p99 spans 751 to
+1,483 us, a 1.98x spread; on the previous run the same span was 1.15x. The
+traditional 500-consumer spread is the more stable of the two, 1.40x here
+against 1.39x before.
+
+The big jump is between 50 and 500 external consumers, 2,049 to 13,414 us at
+p50, a 6.6x step against a 10x step in consumer count. From 1 to 500 the growth
+is 9.7x at p50 and 9.2x at p99, while from 10 to 50 p50 moves 19% and p99 only
+9%. That shape is consistent with fetch-path scheduling rather than a smooth
 per-consumer cost.
 
-`produce` is the same leg in both arms, and it's the one number here that
-isn't clean. It reads 496-509 us on the low traditional levels but 831 us
-in-broker and 835 us at 500 external, and the in-broker arm's own three trials
-put it at 581, 831 and 886 us. Both arms are a client producing to a quorum,
-so this leg should be identical and stable. Treat the elevated produce figures
-as cluster noise on this instantiation rather than as a property of either
-deployment. It inflates the in-broker total, which means the 13.6x ratio is
-conservative.
+`produce` is the same leg in both arms and it is the one number here that is
+not clean. It reads 578, 750, 606 and 963 us across the traditional ladder,
+and the in-broker arm's own three trials put it at 666, 899 and 625 us. Both
+arms are a client producing to a quorum, so this leg should be identical and
+stable across all of them, and it varies by 1.7x instead. Treat it as cluster
+noise on this instantiation rather than a property of either deployment. The
+trial that produced the slowest in-broker total (986 us) is also the one with
+the slowest produce (899 us) and the highest send lateness (151 us), which is
+what noise in this leg looks like.
 
 The divergence that matters is downstream of produce. Fan-out is nearly free
 in-broker and roughly linear in cost traditionally, because every additional
@@ -114,7 +145,7 @@ rather than a measurement artifact. The in-broker figure ends when an
 in-broker consumer receives the record. The traditional figure ends when an
 external client receives it over the network. In the in-broker deployment
 there is no network hop, because the consumer lives in the broker, and that's
-what's being sold. But the 958 us doesn't include a fetch out to an external
+what's being sold. But the 751 us doesn't include a fetch out to an external
 client, and any comparison that doesn't say so is overstating the case.
 
 In-broker relay consumers read pre-commit. A relay consumer sees the record

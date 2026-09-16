@@ -10,8 +10,8 @@ on its own instance as an ordinary Kafka client. Keeping the module identical
 makes the result a statement about execution location rather than about two
 different implementations.
 
-At 500 consumers and 1,000 orders/sec, in-broker end-to-end p50 was 958 us
-against 13,057 us for the same work done externally, so roughly an order of
+At 500 consumers and 1,000 orders/sec, in-broker end-to-end p50 was 751 us
+against 13,414 us for the same work done externally, so roughly an order of
 magnitude. Full tables and the commands that produced them are in
 [REPRODUCE.md](REPRODUCE.md).
 

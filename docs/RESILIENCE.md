@@ -8,7 +8,15 @@ This is separate from [REPRODUCE.md](../REPRODUCE.md) on purpose. Those tables
 are steady state, and folding a disturbance into them would make them
 incomparable.
 
-Every figure here comes from one series on one cluster: 3 x `r8id.8xlarge`
+Every figure here comes from one series on one cluster, measured 2026-09-12.
+That is a DIFFERENT cluster instantiation from the steady-state tables in
+[REPRODUCE.md](../REPRODUCE.md), which were re-measured 2026-09-16. The two
+docs share a topology, a module and an AZ, but not a cluster, so do not
+subtract a number here from a number there. Each arm below is read against its
+own baseline taken minutes earlier on its own cluster, which is what makes the
+series internally valid regardless.
+
+The cluster: 3 x `r8id.8xlarge`
 brokers and 8 x `c5n.9xlarge` clients in `us-east-1a`, RF=3, 1,000 orders/sec,
 650 B payload, `acks=all`, `write.caching=true`, a single input partition, and
 an opt build of `transform-latency-instrumentation`. Eight arms, being two
