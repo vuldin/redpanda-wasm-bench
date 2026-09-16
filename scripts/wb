@@ -621,6 +621,28 @@ cmd_teardown() {
   rm -f "$ENVFILE"
 }
 
+# The region the cluster was actually applied in.
+#
+# This used to default to us-east-2 when AWS_REGION was unset, which is a money
+# bug rather than a cosmetic one: select-region.sh picks a region at run time
+# and writes it to region.auto.tfvars, and the last run before this was fixed
+# chose us-east-1. `wb verify-clean` then queried us-east-2, found nothing, and
+# printed "VERIFIED CLEAN" while 11 instances billed in us-east-1. Resolve it
+# from the file that decided it, and refuse to guess.
+bench_region() {
+  local r=""
+  # region.auto.tfvars wins because switch-topology.sh passes it to terraform
+  # LAST, which is what makes it beat the topology file's own region.
+  if [ -f "$TF/region.auto.tfvars" ]; then
+    r=$(awk -F'"' '/^[[:space:]]*region[[:space:]]*=/{print $2; exit}' "$TF/region.auto.tfvars")
+  fi
+  if [ -z "$r" ] && [ -f "$TF/$TFVARS_SINGLE" ]; then
+    r=$(awk -F'"' '/^[[:space:]]*region[[:space:]]*=/{print $2; exit}' "$TF/$TFVARS_SINGLE")
+  fi
+  [ -n "$r" ] || r="${AWS_REGION:-}"
+  echo "$r"
+}
+
 # Verify against the API, not terraform state - an empty state is not proof, and
 # this account has both auto-removed infra on its own AND kept billing after an
 # apparently-successful destroy. Instances are only the most visible cost:
@@ -629,7 +651,12 @@ cmd_teardown() {
 # terraform puts on every resource, so nothing unrelated in the account is
 # counted.
 verify_torn_down() {
-  local region="${AWS_REGION:-us-east-2}" owner="rp-percore-benchmark" bad=0
+  local region owner="rp-percore-benchmark" bad=0
+  region="$(bench_region)"
+  [ -n "$region" ] || die "cannot tell which region this cluster was applied in
+       (no terraform/region.auto.tfvars, no region in $TFVARS_SINGLE, no
+       AWS_REGION). Refusing to report a teardown clean against a guess - set
+       AWS_REGION to the region you applied in and re-run."
   export_aws_creds
   echo ""
   echo "=== teardown verification (owner=$owner, region=$region) ==="
@@ -671,6 +698,31 @@ verify_torn_down() {
   if [ -n "$vpcs" ]; then
     echo "  STILL PRESENT - VPCs (no direct cost, blocks the next apply):"; echo "$vpcs" | sed 's/^/    /'; bad=1
   else echo "  ok: no VPCs"; fi
+
+  # The region above is the one this checkout last applied in. It is not proof
+  # that nothing is running ELSEWHERE: select-region.sh falls back between
+  # regions on capacity, so a cluster from an earlier session can sit in a
+  # region this one never looks at. Sweeping the candidate list is a handful of
+  # cheap API calls against the same owner tag.
+  local others
+  others="$(echo "${REGIONS:-us-east-2 us-east-1 us-west-2 eu-west-1}" | tr ' ' '\n' | grep -v "^$region$" | grep -v '^$')"
+  if [ -n "$others" ]; then
+    echo ""
+    echo "  also sweeping the other candidate regions for anything tagged $owner:"
+    local r other_inst
+    for r in $others; do
+      other_inst="$(aws ec2 describe-instances --region "$r" \
+        --filters "Name=tag:owner,Values=$owner" \
+                  "Name=instance-state-name,Values=running,pending,stopping,stopped" \
+        --query 'Reservations[].Instances[].[InstanceId,InstanceType,State.Name]' \
+        --output text 2>/dev/null)"
+      if [ -n "$other_inst" ]; then
+        echo "    STILL PRESENT in $r (billing):"; echo "$other_inst" | sed 's/^/      /'; bad=1
+      else
+        echo "    ok: $r"
+      fi
+    done
+  fi
 
   echo ""
   if [ "$bad" -eq 0 ]; then
