@@ -26,9 +26,18 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TF_DIR="${TF_DIR:-$HERE/../terraform}"
 TFVARS="${TFVARS:-$TF_DIR/r8id-8xl-wasm-single-az.tfvars}"
 # Ordered preference. First region with capacity for every needed pair wins.
-REGIONS="${REGIONS:-us-east-2 us-east-1 us-west-2 eu-west-1}"
-# The region the published measurements were taken in.
-PUBLISHED_REGION="${PUBLISHED_REGION:-us-east-2}"
+# Published region first. Region is part of a result's fingerprint (see the
+# warning below and REPRODUCE.md), so the default order should prefer the one
+# the published numbers came from rather than treat it as a fallback. The
+# capacity probe fails in seconds, so trying it first costs nothing when it is
+# short.
+REGIONS="${REGIONS:-us-east-1 us-east-2 us-west-2 eu-west-1}"
+# The region the published measurements were taken in. REPRODUCE.md and
+# docs/RESILIENCE.md both state us-east-1a; this said us-east-2, which
+# inverted the warning below - choosing the ACTUAL published region announced
+# that results might not be comparable, while choosing a different one passed
+# silently.
+PUBLISHED_REGION="${PUBLISHED_REGION:-us-east-1}"
 OVERLAY="${OVERLAY:-$TF_DIR/region.auto.tfvars}"
 
 [ -f "$TFVARS" ] || { echo "no tfvars at $TFVARS" >&2; exit 1; }

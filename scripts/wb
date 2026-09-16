@@ -858,7 +858,7 @@ verify_torn_down() {
   # region this one never looks at. Sweeping the candidate list is a handful of
   # cheap API calls against the same owner tag.
   local others
-  others="$(echo "${REGIONS:-us-east-2 us-east-1 us-west-2 eu-west-1}" | tr ' ' '\n' | grep -v "^$region$" | grep -v '^$')"
+  others="$(echo "${REGIONS:-us-east-1 us-east-2 us-west-2 eu-west-1}" | tr ' ' '\n' | grep -v "^$region$" | grep -v '^$')"
   if [ -n "$others" ]; then
     echo ""
     echo "  also sweeping the other candidate regions for anything tagged $owner:"
