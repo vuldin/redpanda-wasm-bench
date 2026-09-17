@@ -59,7 +59,7 @@ azs                  = ["us-east-2c"]
 # exactly the mistake that shrank a live 3-broker cluster to 1 broker
 # on 2026-07-29 - switch-topology.sh also verifies the plan's actual
 # instance counts against these before applying, as a second layer.
-broker_count         = 3
+broker_count = 3
 # 8, not 2, as of 2026-09-03. The traditional-deployment leg needs 500 EXTERNAL
 # consumers, and 499 consumer groups plus loadgen on a single c5n.9xlarge
 # starved the load generator: send_lateness p99 hit 2,486us against a 1,000us
@@ -74,4 +74,4 @@ broker_count         = 3
 #                  marginal point even before removing loadgen's share
 # Instance TYPE deliberately unchanged: the fanout 1/10/50 points were measured
 # on c5n.9xlarge and changing it would make the 500 point incomparable.
-client_count         = 8
+client_count = 8

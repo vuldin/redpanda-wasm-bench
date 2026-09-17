@@ -516,6 +516,60 @@ wait_for_relay_subscriptions() {
 # two hosts. Ordinary NTP is hundreds of microseconds to milliseconds off, which
 # is larger than the quantity being measured. Record the residual so a
 # cross-clock number is never quoted without its error bar.
+# Record the network path to every broker, as the produce leg's error bar.
+#
+# Same role as record_clock_sync: a per-run measurement of a condition the
+# result depends on but does not control. `produce` (client to quorum ack) is
+# the noisiest stage in this benchmark and it moves MORE between cluster
+# instantiations than the thing being measured - 666 us and 1,126 us p50 on two
+# identical single-AZ topologies on 2026-09-16/17, a 460 us spread, while
+# relay_consume moved 58 us. Rack distance inside the AZ is one candidate
+# explanation and this is what makes it checkable: with an RTT per run, produce
+# can be correlated against it across runs instead of argued about.
+#
+# Measured from the loadgen host, so it is the client-to-leader hop
+# specifically. Broker-to-broker raft replication is the other half of produce
+# and is measured at deploy time by ansible, which is the only place with
+# access to all three brokers.
+record_network_baseline() {
+  local out="$1" brokers="${2:-$BROKERS}"
+  if ! command -v ping >/dev/null 2>&1; then
+    echo '{"available": false, "note": "no ping on this host"}' > "$out"
+    echo "  WARNING: no ping; the produce leg has no network error bar" >&2
+    return 0
+  fi
+  local first=1
+  { printf '{"available": true, "from": "loadgen", "targets": ['
+    local hostport host line
+    for hostport in $(echo "$brokers" | tr ',' ' '); do
+      host="${hostport%%:*}"
+      # 20 packets at 0.2s: enough for a usable mdev without adding a
+      # measurable delay to level setup.
+      line="$(ping -n -q -c 20 -i 0.2 -w 15 "$host" 2>/dev/null | tail -1)"
+      # rtt min/avg/max/mdev = 0.123/0.234/0.456/0.078 ms
+      local stats; stats="$(echo "$line" | sed -n 's|.*= \([0-9.]*\)/\([0-9.]*\)/\([0-9.]*\)/\([0-9.]*\) ms.*|\1 \2 \3 \4|p')"
+      [ -z "$stats" ] && stats="0 0 0 0"
+      set -- $stats
+      [ "$first" -eq 0 ] && printf ','
+      first=0
+      printf '{"host":"%s","min_us":%s,"avg_us":%s,"max_us":%s,"mdev_us":%s}' \
+        "$host" \
+        "$(awk -v v="$1" 'BEGIN{printf "%.1f", v*1000}')" \
+        "$(awk -v v="$2" 'BEGIN{printf "%.1f", v*1000}')" \
+        "$(awk -v v="$3" 'BEGIN{printf "%.1f", v*1000}')" \
+        "$(awk -v v="$4" 'BEGIN{printf "%.1f", v*1000}')"
+    done
+    printf ']}\n'
+  } > "$out"
+  local worst
+  worst="$(python3 -c "
+import json,sys
+d=json.load(open('$out'))
+t=d.get('targets') or []
+print(f\"{max((x['avg_us'] for x in t), default=0):.0f}\")" 2>/dev/null || echo 0)"
+  echo "  client-to-broker RTT: worst avg ${worst}us (the produce leg's network floor)"
+}
+
 record_clock_sync() {
   local out="$1"
   local rms="" src=""

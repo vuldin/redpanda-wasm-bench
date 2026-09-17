@@ -99,3 +99,37 @@ variable "operator_extra_cidrs" {
     fix. Widening to the enclosing /20 is usually enough.
   EOT
 }
+
+# --- Placement --------------------------------------------------------------
+
+variable "broker_placement_group" {
+  type        = bool
+  default     = true
+  description = <<-EOT
+    Put the brokers in a CLUSTER placement group, so AWS packs them onto
+    closely-coupled hardware instead of wherever it likes inside the AZ.
+
+    Why: `produce` (client to quorum ack) is the noisiest leg in this
+    benchmark and it varies more between cluster instantiations than the
+    thing being measured. Measured 2026-09-16/17 on two identical
+    single-AZ topologies: produce p50 666 us and 1,126 us, a 460 us spread,
+    while relay_consume moved only 58 us. A cluster placement group removes
+    rack distance as one candidate explanation for that.
+
+    It does NOT remove the others - noisy neighbours, a different hardware
+    generation behind the same instance name, or instance-store variance are
+    all untouched. Treat it as eliminating one variable, not as a fix.
+
+    COST: capacity gets harder to find, because AWS now has to place the
+    brokers adjacently. This harness has already failed to place 8 x
+    c5n.9xlarge in a region on a normal apply, so expect more
+    InsufficientInstanceCapacity. The capacity probe creates a throwaway
+    placement group and asks against it, so a refusal still arrives in
+    seconds rather than as a stalled apply.
+
+    Brokers only, deliberately. AWS recommends one instance type per cluster
+    placement group, and the clients and monitoring host are different types.
+    Cluster groups are also single-AZ, so this is refused when azs has more
+    than one entry rather than silently ignored.
+  EOT
+}

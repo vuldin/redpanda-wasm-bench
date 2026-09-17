@@ -24,6 +24,6 @@ client_instance_type = "c5n.9xlarge"
 # switch-topology.sh now runs this same probe automatically before
 # every apply, so a future capacity shift here gets caught in seconds,
 # not by repeating this investigation.
-azs                  = ["us-east-2a", "us-east-2b", "us-east-2c"]
-broker_count         = 3
-client_count         = 2
+azs          = ["us-east-2a", "us-east-2b", "us-east-2c"]
+broker_count = 3
+client_count = 2

@@ -213,6 +213,7 @@ and doesn't touch the instances.
 | `INBROKER_CONSUMERS` | `500` | in-broker relay consumers for the wasm arm |
 | `EXTERNAL_LADDER` | `1 10 50 500` | external consumer counts for the traditional arm |
 | `DURATION` / `WARMUP` / `DRAIN` | `30s` / `10s` / `30s` | |
+| `broker_placement_group` | `true` | brokers in a cluster placement group, so rack distance stops being a variable in the produce leg. Single-AZ only, and capacity is harder to find - the probe asks inside a throwaway group so a refusal is still fast |
 | `REGIONS` | `us-east-1 us-east-2 us-west-2 eu-west-1` | tried in order. `us-east-1` first because that's where the published numbers came from, and region is part of a result's fingerprint |
 | `GROUPS_PER_INSTANCE` | `84` | measured safe, see `scripts/size-clients.sh` for why not 99 |
 

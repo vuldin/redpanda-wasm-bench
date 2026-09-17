@@ -124,8 +124,36 @@ is 9.7x at p50 and 9.2x at p99, while from 10 to 50 p50 moves 19% and p99 only
 9%. That shape is consistent with fetch-path scheduling rather than a smooth
 per-consumer cost.
 
-`produce` is the same leg in both arms and it is the one number here that is
-not clean. It reads 578, 750, 606 and 963 us across the traditional ladder,
+`produce` varies more between clusters than the architecture does, and that is
+the most important caveat on this page. Two runs of this identical single-AZ
+topology, same module, same AZ, a day apart:
+
+| | 2026-09-16 | 2026-09-17 |
+|---|---|---|
+| `produce` p50 | 666 us | 1,126 us |
+| `relay_consume` p50 | 339 us | 397 us |
+| `total` p50 | 751 us | 1,246 us |
+
+The total moved 495 us and 460 us of that is `produce`, a leg that is identical
+in both arms and has nothing to do with the relay. The relay path moved 58 us.
+That is not a clock artifact: `produce` is client-side ack minus client-side
+send, single-clock, and the residuals were smaller on the slower run. Both runs
+sent 60,000 records with zero produce errors and held the offered rate.
+
+So `relay_consume` is the reproducible number here and `total` is not, because
+`total` is dominated by a leg that varies with whatever hardware the AZ gave
+you. Quote the ratio as roughly an order of magnitude, and if you need one
+stage to compare across runs, use `relay_consume`.
+
+Each run now records what it cannot control: `clock-sync.json` for the
+cross-clock error bar, `network-baseline.json` for the client-to-broker RTT,
+and `broker-network-baseline.json` for the broker-to-broker RTT that carries
+raft replication. The brokers also sit in a cluster placement group by default
+(`broker_placement_group`), which removes rack distance as one candidate
+explanation - though not noisy neighbours, hardware generation, or
+instance-store variance.
+
+The older framing of this paragraph follows, and still holds within a run. It reads 578, 750, 606 and 963 us across the traditional ladder,
 and the in-broker arm's own three trials put it at 666, 899 and 625 us. Both
 arms are a client producing to a quorum, so this leg should be identical and
 stable across all of them, and it varies by 1.7x instead. Treat it as cluster

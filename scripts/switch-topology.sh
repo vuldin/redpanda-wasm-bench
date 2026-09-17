@@ -204,6 +204,12 @@ CLIENT_ITYPE=$(merged_var_raw client_instance_type | tr -d '"')
 # multi-minute InsufficientInstanceCapacity stall this whole check exists to
 # prevent. Defaulted because a topology file predating the monitoring host does
 # not set it.
+# See select-region.sh: the probe must ask about placed capacity when the
+# apply will place the brokers.
+BROKER_PLACEMENT_GROUP=$(merged_var_raw broker_placement_group | tr -d '"')
+[ -n "$BROKER_PLACEMENT_GROUP" ] || BROKER_PLACEMENT_GROUP=$(grep -A6 'variable "broker_placement_group"' variables.tf 2>/dev/null | grep -oP 'default\s*=\s*\K(true|false)' | head -1)
+[ -n "$BROKER_PLACEMENT_GROUP" ] || BROKER_PLACEMENT_GROUP=false
+export BROKER_PLACEMENT_GROUP
 MONITOR_ITYPE=$(merged_var_raw monitor_instance_type | tr -d '"')
 [ -n "$MONITOR_ITYPE" ] || MONITOR_ITYPE="m6i.2xlarge"
 TF_REGION=$(merged_var_raw region | tr -d '"')

@@ -126,6 +126,20 @@ locals {
 
 # --- Instances --------------------------------------------------------------
 
+# Cluster strategy: pack the brokers onto closely-coupled hardware so rack
+# distance stops being a variable in the produce leg. See
+# variables.tf:broker_placement_group for what this does and does not buy, and
+# for the capacity cost.
+#
+# Single-AZ only, which is a property of cluster placement groups rather than a
+# choice here - hence the count guard and the precondition below.
+resource "aws_placement_group" "brokers" {
+  count    = var.broker_placement_group && length(var.azs) == 1 ? 1 : 0
+  name     = "rp-bench-brokers-${random_id.hash.hex}"
+  strategy = "cluster"
+  tags     = { Name = "rp-bench-brokers-${random_id.hash.hex}", owner = var.owner }
+}
+
 resource "aws_instance" "broker" {
   count                  = var.broker_count
   ami                    = local.broker_ami
@@ -134,8 +148,20 @@ resource "aws_instance" "broker" {
   subnet_id              = local.subnet_ids[count.index % length(var.azs)]
   vpc_security_group_ids = [aws_security_group.bench.id]
   monitoring             = true
+  placement_group        = length(aws_placement_group.brokers) > 0 ? aws_placement_group.brokers[0].name : null
   root_block_device { volume_size = 50 }
   tags = { Name = "rp-broker-${count.index}", owner = var.owner }
+
+  lifecycle {
+    # Refuse rather than silently drop the placement group. A cluster group
+    # cannot span AZs, so a multi-AZ apply with this left on would quietly
+    # produce an unplaced cluster and the run would be comparing against a
+    # different topology than the one its fingerprint claims.
+    precondition {
+      condition     = !(var.broker_placement_group && length(var.azs) > 1)
+      error_message = "broker_placement_group requires a single AZ (cluster placement groups cannot span AZs). Either set broker_placement_group = false, or use a single-AZ topology."
+    }
+  }
 }
 
 resource "aws_instance" "client" {

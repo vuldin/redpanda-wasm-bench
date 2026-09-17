@@ -50,6 +50,12 @@ CLIENT_ITYPE=$(tfvar "$TFVARS" client_instance_type)
 # to variables.tf's default, since the topology files do not set it - and a
 # region chosen without checking the monitoring host's instance type is a
 # region the apply can still stall in.
+# Exported for capacity_probe_azs: a cluster placement group makes the brokers
+# harder to place, so the probe has to ask the same question the apply will.
+BROKER_PLACEMENT_GROUP="${BROKER_PLACEMENT_GROUP:-$(tfvar "$TFVARS" broker_placement_group)}"
+[ -n "$BROKER_PLACEMENT_GROUP" ] || BROKER_PLACEMENT_GROUP=$(grep -A6 'variable "broker_placement_group"' "$TF_DIR/variables.tf" 2>/dev/null | grep -oP 'default\s*=\s*\K(true|false)' | head -1)
+[ -n "$BROKER_PLACEMENT_GROUP" ] || BROKER_PLACEMENT_GROUP=false
+export BROKER_PLACEMENT_GROUP
 MONITOR_ITYPE="${MONITOR_ITYPE:-$(tfvar "$TFVARS" monitor_instance_type)}"
 [ -n "$MONITOR_ITYPE" ] || MONITOR_ITYPE=$(grep -A3 'variable "monitor_instance_type"' "$TF_DIR/variables.tf" 2>/dev/null | grep -oP 'default\s*=\s*"\K[^"]+' | head -1)
 [ -n "$MONITOR_ITYPE" ] || MONITOR_ITYPE="m6i.2xlarge"
@@ -59,6 +65,7 @@ NAZS=$(tfvar_list_len "$TFVARS" azs)
 
 echo "topology from $(basename "$TFVARS"):"
 echo "  ${BROKER_COUNT} x ${BROKER_ITYPE} brokers, ${CLIENT_COUNT} x ${CLIENT_ITYPE} clients, 1 x ${MONITOR_ITYPE} monitor, ${NAZS} AZ(s)"
+[ "$BROKER_PLACEMENT_GROUP" = "true" ] && echo "  brokers in a CLUSTER placement group - harder to place, probed as such"
 echo "candidate regions (in order): $REGIONS"
 echo ""
 

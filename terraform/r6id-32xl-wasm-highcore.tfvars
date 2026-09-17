@@ -38,5 +38,5 @@ client_instance_type = "c5n.9xlarge"
 azs                  = ["us-east-2c"]
 # Baked in, never left to variables.tf's defaults - see switch-topology.sh's
 # header for the incident that made that non-optional.
-broker_count         = 3
-client_count         = 2
+broker_count = 3
+client_count = 2

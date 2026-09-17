@@ -260,6 +260,9 @@ cfg_set core_balancing_on_core_count_change false
 
 CLOCK_RMS_MICROS=0
 record_clock_sync "$RESULTS_DIR/clock-sync.json"
+# Alongside the clock residual, for the same reason: a condition the result
+# depends on and does not control. See record_network_baseline.
+record_network_baseline "$RESULTS_DIR/network-baseline.json"
 
 orders="orders-e2-${RUN_ID}"
 fills="fills-e2-${RUN_ID}"

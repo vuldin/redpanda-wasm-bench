@@ -67,7 +67,10 @@
   tasks:
     - name: Install common packages
       apt:
-        name: [mdadm, xfsprogs, curl, chrony, vim, sysstat, jq]
+        # iputils-ping: the produce leg's network floor is recorded per run
+        # and broker-to-broker at deploy time, and Ubuntu minimal images do not
+        # always carry ping.
+        name: [mdadm, xfsprogs, curl, chrony, vim, sysstat, jq, iputils-ping]
         state: present
         update_cache: true
     - name: Enable chrony (clean latency measurements)
@@ -564,6 +567,59 @@
       when: this_node_needs_restart
 
 # --- Client: ship this project's own tools, not OMB --------------------------
+
+# Broker-to-broker RTT, measured here because this is the only place with
+# access to all three brokers. It is the raft-replication half of `produce`,
+# the leg that varies more between cluster instantiations than the thing this
+# benchmark measures. Written where the runs will pick it up, so a result can
+# be correlated against the network it was taken on.
+- name: Record the broker-to-broker network baseline
+  hosts: broker
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Measure RTT to the other brokers
+      ansible.builtin.shell: |
+        set -o pipefail
+        for h in {{ groups['broker'] | map('extract', hostvars, 'private_ip') | join(' ') }}; do
+          [ "$h" = "{{ private_ip }}" ] && continue
+          line=$(ping -n -q -c 20 -i 0.2 -w 15 "$h" 2>/dev/null | tail -1)
+          avg=$(echo "$line" | sed -n 's|.*= [0-9.]*/\([0-9.]*\)/.*|\1|p')
+          mdev=$(echo "$line" | sed -n 's|.*= [0-9.]*/[0-9.]*/[0-9.]*/\([0-9.]*\) ms.*|\1|p')
+          echo "$h ${avg:-0} ${mdev:-0}"
+        done
+      args: { executable: /bin/bash }
+      register: b2b
+      changed_when: false
+      failed_when: false
+
+    - name: Show it
+      ansible.builtin.debug:
+        msg: "broker {{ id }} -> {{ b2b.stdout_lines | default([]) }} (host avg_ms mdev_ms)"
+
+- name: Publish the broker-to-broker baseline where runs will collect it
+  hosts: "{{ groups['client'][0] }}"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Write broker-network-baseline.json
+      ansible.builtin.copy:
+        dest: /opt/wasm-bench/broker-network-baseline.json
+        mode: "0644"
+        content: |
+          {
+            "available": true,
+            "measured": "deploy time",
+            "note": "broker-to-broker RTT in microseconds: the raft-replication half of the produce leg. Recorded because produce varies more between cluster instantiations than the measured architecture does.",
+            "placement_group": "{{ broker_placement_group | default('unknown') }}",
+            "pairs": [
+          {% for h in groups['broker'] %}
+          {% for line in hostvars[h].b2b.stdout_lines | default([]) %}
+              {"from": "broker{{ hostvars[h].id }}", "to": "{{ line.split()[0] }}", "avg_us": {{ (line.split()[1] | float * 1000) | round(1) }}, "mdev_us": {{ (line.split()[2] | float * 1000) | round(1) }}}{{ "," if not loop.last or not loop.parent.last else "" }}
+          {% endfor %}
+          {% endfor %}
+            ]
+          }
 
 - name: Set up the load client with this project's own tools
   hosts: client

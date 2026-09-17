@@ -47,3 +47,10 @@ output "grafana_url" {
 output "prometheus_url" {
   value = length(aws_instance.monitor) > 0 ? "http://${aws_instance.monitor[0].public_ip}:9090" : ""
 }
+
+# Empty when the brokers are not in a placement group. Part of a result's
+# fingerprint: two runs with different broker placement are not strictly
+# comparable on the produce leg.
+output "broker_placement_group" {
+  value = length(aws_placement_group.brokers) > 0 ? aws_placement_group.brokers[0].name : ""
+}

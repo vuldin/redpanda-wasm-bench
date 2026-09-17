@@ -29,13 +29,29 @@
 # non-empty. It bills from the moment it is active, so it is cancelled
 # immediately - a few seconds of the fleet is cents against a multi-minute
 # stall and a half-built cluster.
+# A 5th argument is a placement-group ARN to reserve INSIDE. That matters:
+# putting the brokers in a cluster placement group makes AWS find adjacent
+# capacity, which is strictly harder than finding capacity anywhere in the AZ.
+# Probing without it would answer an easier question than the apply asks and go
+# back to passing while RunInstances stalls - the exact failure the count fix
+# addressed. create-capacity-reservation takes --placement-group-arn for this.
 capacity_available() {
-  local region="$1" az="$2" itype="$3" count="${4:-1}"
+  local region="$1" az="$2" itype="$3" count="${4:-1}" pg_arn="${5:-}"
   local out id
+  # Build the optional flag as ARRAY ELEMENTS. `${pg_arn:+--flag "$pg_arn"}`
+  # looks right and is not: the quotes inside a :+ expansion are literal
+  # characters, so the ARN reaches the CLI wrapped in quote marks, the request
+  # is rejected, and the refusal is indistinguishable from "no capacity". That
+  # made a placement-group probe report NO while the same call by hand
+  # succeeded - a false negative, which for a capacity probe means refusing to
+  # provision a cluster that would have been fine.
+  local pg_args=()
+  [ -n "$pg_arn" ] && pg_args=(--placement-group-arn "$pg_arn")
   out=$(aws ec2 create-capacity-reservation --region "$region" \
         --instance-type "$itype" --instance-platform Linux/UNIX \
         --availability-zone "$az" --instance-count "$count" \
         --instance-match-criteria open \
+        "${pg_args[@]}" \
         --end-date-type limited \
         --end-date "$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%S)" 2>&1) || true
   id=$(printf '%s' "$out" | grep -o '"CapacityReservationId": "[^"]*"' | cut -d'"' -f4 || true)
@@ -46,6 +62,30 @@ capacity_available() {
   fi
   printf '%s' "$out" | grep -oE '"Message": "[^"]*"' >&2 || true
   return 1
+}
+
+# temp_placement_group <region> <strategy>
+# Creates a throwaway placement group, echoes its ARN, and leaves deleting it
+# to the caller via delete_placement_group.
+#
+# Needed because the probe runs BEFORE terraform creates the real group, so
+# there is nothing to reserve inside yet. Placement groups cost nothing and are
+# instant, so making one to ask the question and removing it afterwards is
+# cheaper than discovering the answer during a 12-instance apply.
+temp_placement_group() {
+  local region="$1" strategy="${2:-cluster}"
+  local name="rp-bench-probe-$$-$(date +%s)"
+  aws ec2 create-placement-group --region "$region" \
+    --group-name "$name" --strategy "$strategy" \
+    --query 'PlacementGroup.GroupArn' --output text 2>/dev/null || return 1
+}
+
+delete_placement_group() {  # <region> <arn-or-name>
+  local region="$1" ref="$2"
+  local name="${ref##*/}"
+  [ -n "$name" ] || return 0
+  aws ec2 delete-placement-group --region "$region" --group-name "$name" \
+    >/dev/null 2>&1 || true
 }
 
 # region_azs <region> <n>
@@ -101,16 +141,37 @@ capacity_probe_azs() {
   local region="$1" bcount="$2" bitype="$3" ccount="$4" citype="$5" nazs="$6"
   shift 6
   local azs=("$@")
-  local fail=0 az itype n
+
+  # When the brokers will be placed in a cluster group, probe the BROKER type
+  # inside a throwaway group of the same strategy. BROKER_PLACEMENT_GROUP is
+  # read from the environment so the two callers need no new argument.
+  local pg_arn=""
+  if [ "${BROKER_PLACEMENT_GROUP:-false}" = "true" ] && [ "$nazs" -eq 1 ]; then
+    pg_arn="$(temp_placement_group "$region" cluster)" || pg_arn=""
+    if [ -n "$pg_arn" ]; then
+      echo "    (probing $bitype inside a throwaway cluster placement group)"
+    else
+      echo "    WARNING: could not create a probe placement group; the broker" >&2
+      echo "             capacity answer below is for unplaced capacity and is" >&2
+      echo "             therefore optimistic." >&2
+    fi
+  fi
+
+  local fail=0 az itype n this_pg
   while read -r az itype n; do
     [ -z "$az" ] && continue
-    if capacity_available "$region" "$az" "$itype" "$n"; then
-      echo "    OK   ${n}x $itype in $az"
+    # Only the brokers are placed, so only they are probed inside the group.
+    this_pg=""
+    [ "$itype" = "$bitype" ] && this_pg="$pg_arn"
+    if capacity_available "$region" "$az" "$itype" "$n" "$this_pg"; then
+      echo "    OK   ${n}x $itype in $az${this_pg:+ (placement group)}"
     else
-      echo "    FAIL ${n}x $itype in $az"
+      echo "    FAIL ${n}x $itype in $az${this_pg:+ (placement group)}"
       fail=1
     fi
   done < <(needed_pairs "$nazs" "$bcount" "$bitype" "$ccount" "$citype" "${azs[@]}")
+
+  [ -n "$pg_arn" ] && delete_placement_group "$region" "$pg_arn"
   return "$fail"
 }
 
