@@ -97,10 +97,17 @@ python3 scripts/verify-staging.py "$(pwd)/ansible/deploy-wasm.yaml" "$STAGE_DIR"
 
 echo "=== running deploy-wasm.yaml against $(pwd)/terraform/hosts.ini ==="
 cd ansible
+# The placement group the brokers actually landed in, read from terraform so
+# the recorded baseline says what it measured rather than guessing. Empty when
+# the brokers are unplaced.
+BROKER_PG="$(cd ../terraform 2>/dev/null && terraform output -raw broker_placement_group 2>/dev/null || true)"
+echo "--- broker placement group: ${BROKER_PG:-<none>} ---"
+
 ansible-playbook deploy-wasm.yaml \
   --private-key "$BENCH_SSH_KEY" \
   -e "local_artifacts_dir=$STAGE_DIR" \
   -e "redpanda_binary_path=$REDPANDA_BIN" \
+  -e "broker_placement_group_name=${BROKER_PG:-none}" \
   "$@"
 
 echo ""

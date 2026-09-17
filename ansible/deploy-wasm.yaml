@@ -602,6 +602,18 @@
   become: true
   gather_facts: false
   tasks:
+    # This play runs BEFORE the client-setup play that normally creates this
+    # directory, so on a fresh cluster it does not exist yet and the copy below
+    # fails. Create it here rather than reordering the plays: the baseline has
+    # to be measured while the brokers are up and settled, which is here.
+    - name: Ensure the tool directory exists
+      ansible.builtin.file:
+        path: /opt/wasm-bench
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+
     - name: Write broker-network-baseline.json
       ansible.builtin.copy:
         dest: /opt/wasm-bench/broker-network-baseline.json
@@ -611,7 +623,7 @@
             "available": true,
             "measured": "deploy time",
             "note": "broker-to-broker RTT in microseconds: the raft-replication half of the produce leg. Recorded because produce varies more between cluster instantiations than the measured architecture does.",
-            "placement_group": "{{ broker_placement_group | default('unknown') }}",
+            "placement_group": "{{ broker_placement_group_name | default('not-passed') }}",
             "pairs": [
           {% for h in groups['broker'] %}
           {% for line in hostvars[h].b2b.stdout_lines | default([]) %}
