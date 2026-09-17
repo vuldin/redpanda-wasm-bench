@@ -917,6 +917,37 @@ Corollary worth keeping in mind: the scrape is also load. It is aimed at
 nothing on these dashboards needs it. If you want a run with no observer on
 the network at all, `monitor_count = 0` removes it and changes nothing else.
 
+### 31. A measurement that falls back to zero cannot be told apart from a real reading
+
+The RTT baseline exists to remove network distance as a variable, so that a
+produce leg that moved between runs can be checked against the network it was
+measured on. Both recorders parsed `ping`'s summary line and substituted a
+default when the parse found nothing: `${avg:-0}` in the ansible play,
+`stats="0 0 0 0"` in `bench/lib-cluster.sh`.
+
+The security group permits TCP only. ICMP was never allowed inside the VPC, so
+every ping was 100% loss, no summary line was printed, and the whole feature
+reported `0` on its first run. `broker 0 -> ['10.0.0.116 0 0', ...]` and
+`client-to-broker RTT: worst avg 0us (the produce leg's network floor)` are
+what a working cluster of adjacent machines would plausibly print. Nothing
+looked wrong.
+
+Zero is a legal value in the units being reported, which is what makes the
+substitution dangerous. A missing value has to be recorded as missing:
+`{"host": "...", "reachable": false}` rather than a number, and a summary line
+that says NOT MEASURED rather than a figure. The ansible play now fails with
+the likely cause named, because a baseline nobody can measure should stop the
+deploy rather than quietly ship a zero into a results directory.
+
+`terraform/main.tf` carries an icmp ingress rule for `10.0.0.0/16` for this
+reason. A cluster provisioned before that rule existed needs a `terraform
+apply` to add it; the SG updates in place, so no instance is replaced.
+
+This is the same shape as #21 and #24, and worth stating as a rule: when a
+parse or probe can come back empty, the empty case needs its own
+representation. Choosing a neutral-looking default makes the failure
+indistinguishable from success in exactly the output a reader trusts.
+
 ## `write.caching`: read this before you set it
 
 `write.caching=true` defers fsync, batching multiple produces into one flush

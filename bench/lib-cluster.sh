@@ -538,7 +538,7 @@ record_network_baseline() {
     echo "  WARNING: no ping; the produce leg has no network error bar" >&2
     return 0
   fi
-  local first=1
+  local first=1 measured=0 unreachable=""
   { printf '{"available": true, "from": "loadgen", "targets": ['
     local hostport host line
     for hostport in $(echo "$brokers" | tr ',' ' '); do
@@ -548,11 +548,20 @@ record_network_baseline() {
       line="$(ping -n -q -c 20 -i 0.2 -w 15 "$host" 2>/dev/null | tail -1)"
       # rtt min/avg/max/mdev = 0.123/0.234/0.456/0.078 ms
       local stats; stats="$(echo "$line" | sed -n 's|.*= \([0-9.]*\)/\([0-9.]*\)/\([0-9.]*\)/\([0-9.]*\) ms.*|\1 \2 \3 \4|p')"
-      [ -z "$stats" ] && stats="0 0 0 0"
-      set -- $stats
+      # An unreachable target is recorded as such, never as a zero. Zero is a
+      # legal value in these units, so substituting it turns "not measured"
+      # into "measured as adjacent" - which is how a missing ICMP rule went
+      # unnoticed for a whole run. See docs/METHODOLOGY.md #31.
       [ "$first" -eq 0 ] && printf ','
       first=0
-      printf '{"host":"%s","min_us":%s,"avg_us":%s,"max_us":%s,"mdev_us":%s}' \
+      if [ -z "$stats" ]; then
+        unreachable="${unreachable}${unreachable:+ }${host}"
+        printf '{"host":"%s","reachable":false,"note":"ping produced no rtt summary (100%% loss)"}' "$host"
+        continue
+      fi
+      measured=$((measured + 1))
+      set -- $stats
+      printf '{"host":"%s","reachable":true,"min_us":%s,"avg_us":%s,"max_us":%s,"mdev_us":%s}' \
         "$host" \
         "$(awk -v v="$1" 'BEGIN{printf "%.1f", v*1000}')" \
         "$(awk -v v="$2" 'BEGIN{printf "%.1f", v*1000}')" \
@@ -561,13 +570,22 @@ record_network_baseline() {
     done
     printf ']}\n'
   } > "$out"
+  if [ -n "$unreachable" ]; then
+    echo "  WARNING: no RTT sample for $unreachable - ping saw 100% loss." >&2
+    echo "           ICMP has to be permitted inside the VPC (terraform/main.tf);" >&2
+    echo "           a cluster provisioned before that rule existed needs an apply." >&2
+  fi
+  if [ "$measured" -eq 0 ]; then
+    echo "  client-to-broker RTT: NOT MEASURED (the produce leg has no network error bar)"
+    return 0
+  fi
   local worst
   worst="$(python3 -c "
-import json,sys
+import json
 d=json.load(open('$out'))
-t=d.get('targets') or []
+t=[x for x in (d.get('targets') or []) if x.get('reachable')]
 print(f\"{max((x['avg_us'] for x in t), default=0):.0f}\")" 2>/dev/null || echo 0)"
-  echo "  client-to-broker RTT: worst avg ${worst}us (the produce leg's network floor)"
+  echo "  client-to-broker RTT: worst avg ${worst}us over ${measured} broker(s) (the produce leg's network floor)"
 }
 
 record_clock_sync() {

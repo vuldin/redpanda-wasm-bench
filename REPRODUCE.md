@@ -153,6 +153,11 @@ raft replication. The brokers also sit in a cluster placement group by default
 explanation - though not noisy neighbours, hardware generation, or
 instance-store variance.
 
+The RTT files report a target as `"reachable": false` when ping got nothing
+back, rather than as a zero. If you see that, the cluster's security group is
+probably missing the icmp rule inside the VPC, and a `terraform apply` adds it
+in place without replacing any instance. See docs/METHODOLOGY.md #31.
+
 The older framing of this paragraph follows, and still holds within a run. It reads 578, 750, 606 and 963 us across the traditional ladder,
 and the in-broker arm's own three trials put it at 666, 899 and 625 us. Both
 arms are a client producing to a quorum, so this leg should be identical and

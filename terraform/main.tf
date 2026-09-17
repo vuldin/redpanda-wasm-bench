@@ -66,6 +66,17 @@ resource "aws_security_group" "bench" {
     cidr_blocks = ["10.0.0.0/16"]
   }
 
+  # ICMP inside the VPC, so the RTT baseline can be measured. Without this the
+  # TCP rule above is enough for the benchmark itself to run, and ping reports
+  # 100% loss - which the baseline recorders used to turn into a plausible
+  # "0us" instead of an error. See docs/METHODOLOGY.md #31.
+  ingress {
+    from_port   = -1
+    to_port     = -1
+    protocol    = "icmp"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
   # SSH + admin/metrics from the machine running this harness only
   ingress {
     from_port   = 0

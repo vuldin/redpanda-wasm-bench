@@ -578,24 +578,71 @@
   become: true
   gather_facts: false
   tasks:
+    # Emits "<host> <avg_ms> <mdev_ms>" per reachable peer and "<host> FAILED"
+    # for one that produced no rtt summary line, exiting non-zero if any did.
+    # An unmeasured peer must NOT fall back to a zero: a zero here is a
+    # plausible-looking number in the units this baseline reports, so it would
+    # be read as "these brokers are adjacent" rather than "nothing was
+    # measured". That exact substitution hid a missing ICMP rule for a whole
+    # run. See docs/METHODOLOGY.md #31.
     - name: Measure RTT to the other brokers
       ansible.builtin.shell: |
         set -o pipefail
+        rc=0
         for h in {{ groups['broker'] | map('extract', hostvars, 'private_ip') | join(' ') }}; do
           [ "$h" = "{{ private_ip }}" ] && continue
           line=$(ping -n -q -c 20 -i 0.2 -w 15 "$h" 2>/dev/null | tail -1)
-          avg=$(echo "$line" | sed -n 's|.*= [0-9.]*/\([0-9.]*\)/.*|\1|p')
-          mdev=$(echo "$line" | sed -n 's|.*= [0-9.]*/[0-9.]*/[0-9.]*/\([0-9.]*\) ms.*|\1|p')
-          echo "$h ${avg:-0} ${mdev:-0}"
+          stats=$(echo "$line" | sed -n 's|.*= [0-9.]*/\([0-9.]*\)/[0-9.]*/\([0-9.]*\) ms.*|\1 \2|p')
+          if [ -z "$stats" ]; then
+            echo "$h FAILED"
+            rc=1
+          else
+            echo "$h $stats"
+          fi
         done
+        exit $rc
       args: { executable: /bin/bash }
       register: b2b
       changed_when: false
       failed_when: false
 
+    - name: Fail when a broker pair produced no RTT sample
+      ansible.builtin.fail:
+        msg: >-
+          No RTT summary from broker {{ id }} to
+          {{ b2b.stdout_lines | default([]) | select('search', ' FAILED$')
+             | map('regex_replace', ' FAILED$', '') | list | join(', ') }}.
+          ping reported 100% loss. The usual cause is a security group that
+          permits TCP but not ICMP inside the VPC - terraform/main.tf has an
+          icmp ingress rule for 10.0.0.0/16 for exactly this, so a cluster
+          provisioned before that rule existed needs a terraform apply.
+      when: b2b.rc != 0
+
     - name: Show it
       ansible.builtin.debug:
         msg: "broker {{ id }} -> {{ b2b.stdout_lines | default([]) }} (host avg_ms mdev_ms)"
+
+    # Structured here, on the broker that owns both `id` and its own ping
+    # output, so the publish play below concatenates flat per-host lists
+    # instead of walking a nested loop. The nested version needed a trailing
+    # comma decided by `loop.parent.last`, which does not exist in Jinja2 -
+    # it raised "LoopContext object has no attribute 'parent'" and failed the
+    # deploy. Assembling real data and handing it to to_nice_json removes the
+    # hand-written-JSON class of bug rather than fixing one instance of it.
+    - name: Start with an empty pair list so the publish play can always read it
+      ansible.builtin.set_fact:
+        b2b_pairs: []
+
+    - name: Turn the ping output into structured pairs
+      ansible.builtin.set_fact:
+        b2b_pairs: >-
+          {{ b2b_pairs + [{
+               'from': 'broker' ~ id,
+               'to': item.split() | first,
+               'avg_us': ((item.split()[1] | float) * 1000) | round(1),
+               'mdev_us': ((item.split()[2] | float) * 1000) | round(1)
+             }] }}
+      loop: "{{ b2b.stdout_lines | default([]) }}"
 
 - name: Publish the broker-to-broker baseline where runs will collect it
   hosts: "{{ groups['client'][0] }}"
@@ -618,20 +665,14 @@
       ansible.builtin.copy:
         dest: /opt/wasm-bench/broker-network-baseline.json
         mode: "0644"
-        content: |
-          {
-            "available": true,
-            "measured": "deploy time",
-            "note": "broker-to-broker RTT in microseconds: the raft-replication half of the produce leg. Recorded because produce varies more between cluster instantiations than the measured architecture does.",
-            "placement_group": "{{ broker_placement_group_name | default('not-passed') }}",
-            "pairs": [
-          {% for h in groups['broker'] %}
-          {% for line in hostvars[h].b2b.stdout_lines | default([]) %}
-              {"from": "broker{{ hostvars[h].id }}", "to": "{{ line.split()[0] }}", "avg_us": {{ (line.split()[1] | float * 1000) | round(1) }}, "mdev_us": {{ (line.split()[2] | float * 1000) | round(1) }}}{{ "," if not loop.last or not loop.parent.last else "" }}
-          {% endfor %}
-          {% endfor %}
-            ]
-          }
+        content: "{{ {
+          'available': true,
+          'measured': 'deploy time',
+          'note': 'broker-to-broker RTT in microseconds: the raft-replication half of the produce leg. Recorded because produce varies more between cluster instantiations than the measured architecture does.',
+          'placement_group': broker_placement_group_name | default('not-passed'),
+          'pairs': groups['broker'] | map('extract', hostvars)
+                   | map(attribute='b2b_pairs') | list | flatten(levels=1)
+          } | to_nice_json }}"
 
 - name: Set up the load client with this project's own tools
   hosts: client
