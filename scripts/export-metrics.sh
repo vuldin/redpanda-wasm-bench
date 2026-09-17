@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Export the scraped metrics for a run's MEASURED WINDOWS into a self-contained
+# bundle that opens in a fresh Grafana with no cluster.
+#
+# WHY WINDOWS AND NOT THE WHOLE RUN: a reproduction is ~90 minutes of wall
+# clock containing ~10 minutes of measurement. The rest is provisioning, 500
+# consumers being deployed, topic cleanup and settle time. Exporting only the
+# windows is roughly a 10x reduction, which is what makes it affordable to
+# include the full internal vectorized_* set rather than just the families the
+# dashboards happen to query.
+#
+# WHY promtool AND NOT A COPY OF THE DATA DIRECTORY: Prometheus keeps the most
+# recent ~2h in the write-ahead log, uncompacted. For a run shorter than that
+# the blocks on disk are EMPTY and `cp -r data` produces a bundle with nothing
+# in it. `promtool tsdb dump-openmetrics` replays the WAL itself - verified
+# 2026-09-16 by dumping a 25s-old Prometheus and getting 15,458 lines when no
+# block existed yet. It also needs no admin API and no restart, so the running
+# stack is untouched.
+#
+# The dump and the block build both happen ON THE MONITORING HOST, which
+# already has promtool from ansible/monitoring.yaml. The bundle therefore ships
+# finished TSDB blocks and the person opening it needs no Prometheus tooling.
+#
+# Usage: export-metrics.sh <results-dir> [out-dir]
+#   results-dir  a local run directory holding loadgen reports, e.g.
+#                results/reproduce-1789583726
+#   out-dir      defaults to <results-dir>/metrics-bundle
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+WB="$HERE/wb"
+
+RESULTS="${1:?usage: export-metrics.sh <results-dir> [out-dir]}"
+OUT="${2:-$RESULTS/metrics-bundle}"
+[ -d "$RESULTS" ] || { echo "no such results dir: $RESULTS" >&2; exit 1; }
+
+# Seconds of padding either side of each measured window. The ramp into a
+# window and the settle after it are the parts that explain its shape, so a
+# window clipped exactly to the measurement is harder to read than one with
+# shoulders.
+PAD="${METRICS_EXPORT_PAD_SECS:-60}"
+# full | public | dashboards. `full` includes the internal vectorized_* set,
+# which is where the series count is; the windowing above is what pays for it.
+SCOPE="${METRICS_EXPORT_SCOPE:-full}"
+PROM_VERSION="${PROM_VERSION:-3.5.0}"
+GRAFANA_VERSION="${GRAFANA_VERSION:-11.6.1}"
+
+say() { printf '\n=== %s ===\n' "$*"; }
+die() { echo "export-metrics: $*" >&2; exit 1; }
+
+case "$SCOPE" in
+  full)       MATCH='' ;;
+  public)     MATCH='{__name__=~"redpanda_.*|node_.*|loadgen_.*|up|scrape_.*"}' ;;
+  dashboards) MATCH='{__name__=~"redpanda_relay_.*|redpanda_transform_.*|redpanda_wasm_.*|redpanda_cpu_.*|node_cpu_.*|node_load1|node_network_.*|loadgen_.*|up|scrape_duration_seconds"}' ;;
+  *) die "METRICS_EXPORT_SCOPE must be full, public or dashboards (got '$SCOPE')" ;;
+esac
+
+eval "$(bash "$WB" env 2>/dev/null | grep -E '^(MONITOR_PUB|PROMETHEUS_URL)=')" || true
+[ -n "${MONITOR_PUB:-}" ] || die "no monitoring host in this cluster.
+     The metrics live on it, and \`wb teardown\` destroys it, so there is
+     nothing to export from once the cluster is gone."
+
+# --- the windows ------------------------------------------------------------
+# Derived from the reports rather than from wall clock: each report carries the
+# window it measured, so the bundle covers exactly what was measured even if
+# the export runs hours later.
+say "deriving measured windows from $RESULTS"
+WINDOWS="$(python3 "$HERE/metrics-windows.py" "$RESULTS" --pad "$PAD")" \
+  || die "could not derive windows"
+[ -n "${WINDOWS//[[:space:]]/}" ] || die "no loadgen reports with usable timestamps under $RESULTS"
+echo "$WINDOWS" | sed 's/^/  /'
+NWIN=$(echo "$WINDOWS" | grep -c .)
+
+# --- dump + build, on the monitoring host -----------------------------------
+say "dumping $NWIN window(s) on the monitoring host (scope=$SCOPE)"
+REMOTE_WORK="/tmp/wasm-bench-metrics-export"
+bash "$WB" ssh monitor "sudo rm -rf $REMOTE_WORK && sudo mkdir -p $REMOTE_WORK/data && sudo chmod 777 $REMOTE_WORK $REMOTE_WORK/data" \
+  || die "could not prepare the remote work dir"
+
+i=0
+while read -r label start_ms end_ms; do
+  [ -z "$label" ] && continue
+  i=$((i+1))
+  printf '  [%d/%d] %-26s ' "$i" "$NWIN" "$label"
+  # promtool reads the live data directory, including the WAL, so nothing is
+  # stopped and no admin endpoint is needed.
+  out="$(bash "$WB" ssh monitor \
+    "sudo promtool tsdb dump-openmetrics --min-time=$start_ms --max-time=$end_ms \
+       ${MATCH:+--match='$MATCH'} /var/lib/prometheus > $REMOTE_WORK/w.om 2>/dev/null \
+     && sudo promtool tsdb create-blocks-from openmetrics -q $REMOTE_WORK/w.om $REMOTE_WORK/data \
+     && wc -c < $REMOTE_WORK/w.om" 2>&1 | tr -d '\r' | tail -1)"
+  if [ -z "${out//[!0-9]/}" ]; then
+    echo "FAILED"
+    echo "      $out" >&2
+    die "window $label could not be exported"
+  fi
+  echo "ok ($(numfmt --to=iec "${out//[!0-9]/}" 2>/dev/null || echo "$out bytes") of openmetrics text)"
+done <<< "$WINDOWS"
+
+# One import per window, so each becomes its own time-disjoint block. Do NOT
+# concatenate the dumps into a single import: per-series sample ordering is
+# only guaranteed within one window, and the importer needs it in order.
+say "blocks built"
+bash "$WB" ssh monitor "sudo promtool tsdb list $REMOTE_WORK/data 2>/dev/null | head -20" | sed 's/^/  /'
+
+# --- bring it down ----------------------------------------------------------
+say "copying blocks to $OUT"
+mkdir -p "$OUT/data" "$OUT/grafana/provisioning/datasources" \
+         "$OUT/grafana/provisioning/dashboards" "$OUT/grafana/dashboards"
+H="$(echo "$MONITOR_PUB" | awk '{print $1}')"
+rsync -az --delete -e "ssh -i ${BENCH_SSH_KEY:-$HOME/.ssh/jlp-aws-iceberg.pem} \
+  -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+  "ubuntu@$H:$REMOTE_WORK/data/" "$OUT/data/" || die "rsync of the blocks failed"
+bash "$WB" ssh monitor "sudo rm -rf $REMOTE_WORK" >/dev/null 2>&1 || true
+
+echo "  bundle data: $(du -sh "$OUT/data" | cut -f1)"
+
+# --- the viewer half -------------------------------------------------------
+say "writing the bundle"
+WINFILE="$(mktemp)"; trap 'rm -f "$WINFILE"' EXIT
+printf '%s\n' "$WINDOWS" > "$WINFILE"
+python3 "$HERE/metrics-bundle.py" "$OUT" "$WINFILE" \
+  --prom "$PROM_VERSION" --grafana "$GRAFANA_VERSION" \
+  --scope "$SCOPE" --results "$RESULTS" || die "could not write the bundle"
+
+say "done"
+cat <<EOM
+  $OUT
+
+  View it with no cluster:
+    cd $OUT && docker compose up
+    open http://localhost:3000
+
+  Check that every panel returns data:
+    cd $OUT && docker compose up -d && ./validate.sh
+
+  The bundle covers the measured windows only. Everything between them was
+  provisioning, consumer deployment, cleanup and settle, so panels are empty
+  outside those ranges by construction.
+EOM

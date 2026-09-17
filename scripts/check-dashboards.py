@@ -11,7 +11,14 @@ Two failure modes this catches, both of which are silent in Grafana:
      are listed here by name and everything else is a failure.
 
 Usage:
-  scripts/check-dashboards.py <prometheus-url> [dashboard-dir]
+  scripts/check-dashboards.py <prometheus-url> [dashboard-dir] [--at UNIX]
+
+--at evaluates every query at that instant instead of now, which is what makes
+this usable against an exported bundle. A bundle is a RECORDING: its newest
+sample is however old the run is, and Prometheus instant queries only look back
+five minutes, so every query against a recording returns empty at `now` and the
+whole validator reports failure on a perfectly good bundle. Pass the midpoint
+of the recorded range - export-metrics.sh reads it out of the bundle manifest.
 
 Exit status is non-zero if anything failed, so it can gate a deploy.
 """
@@ -45,8 +52,11 @@ def allowed_empty(expr):
     return None
 
 
-def query(base, expr):
-    body = urllib.parse.urlencode({"query": expr}).encode()
+def query(base, expr, at=None):
+    params = {"query": expr}
+    if at is not None:
+        params["time"] = str(at)
+    body = urllib.parse.urlencode(params).encode()
     req = urllib.request.Request(
         base.rstrip("/") + "/api/v1/query", data=body,
         headers={"Content-Type": "application/x-www-form-urlencoded"})
@@ -68,10 +78,19 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    base = sys.argv[1]
-    ddir = Path(sys.argv[2] if len(sys.argv) > 2
-                else "ansible/files/dashboards")
+    args = [a for a in sys.argv[1:]]
+    at = None
+    if "--at" in args:
+        i = args.index("--at")
+        at = float(args[i + 1])
+        del args[i:i + 2]
+    base = args[0]
+    ddir = Path(args[1] if len(args) > 1 else "ansible/files/dashboards")
 
+    if at is not None:
+        print(f"# evaluating every query at {int(at)} rather than now, because a\n"
+              f"# recording's newest sample is older than the 5m instant-query\n"
+              f"# lookback and would otherwise read as entirely empty\n")
     files = sorted(ddir.rglob("*.json"))
     if not files:
         print(f"no dashboards under {ddir}")
@@ -87,7 +106,7 @@ def main():
                 # Grafana expands this from the panel's step and the
                 # datasource interval; Prometheus does not know it.
                 concrete = expr.replace("$__rate_interval", "30s")
-                res, err = query(base, concrete)
+                res, err = query(base, concrete, at)
                 title = pan.get("title", "?")
                 if err:
                     bad.append((f.name, title, expr, err))

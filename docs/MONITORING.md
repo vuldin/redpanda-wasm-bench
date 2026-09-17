@@ -213,6 +213,97 @@ than guessed, and the generator records where:
 All of them register on the public metric registry, which is why they all
 arrive on `/public_metrics`.
 
+## Taking the metrics with you
+
+The monitoring host is created per run and destroyed by teardown, so the
+scraped metrics have exactly one copy and it dies with the cluster. `wb monitor
+export` turns the measured windows into a bundle that opens in a fresh Grafana
+with nothing else running:
+
+```bash
+./scripts/wb monitor export           # newest results dir, or pass one
+cd results/reproduce-<id>/metrics-bundle
+docker compose up
+./validate.sh                         # every panel, checked
+```
+
+`reproduce.sh` does this automatically at the end of a run, and `wb teardown`
+says something when no bundle exists, because forgetting is permanent.
+
+### Why it exports from Prometheus and not Grafana
+
+Grafana stores no metrics. It is a query layer, so there is nothing in it to
+export. The one exception is a Grafana snapshot, which bakes rendered query
+results into the dashboard JSON and needs no datasource at all - but it freezes
+the data at one resolution and one time range, so it cannot be re-queried, the
+window cannot be changed, and a panel cannot be added. That is a picture, not a
+dataset, and combined with METHODOLOGY 30 it is a picture someone would
+eventually quote. So the bundle ships real TSDB blocks and the dashboards that
+read them.
+
+### Why windows and not the whole run
+
+A reproduction is a couple of hours of wall clock containing about ten minutes
+of measurement. The rest is provisioning, 500 consumers being deployed, topic
+cleanup and settle time. Measured on the 2026-09-16 run: seven windows totalling
+11.7 minutes against roughly 130 minutes of monitoring-host uptime, an 11x
+reduction. That is what makes it affordable to include the full internal
+`vectorized_*` set rather than only the families the dashboards query.
+
+Each window is warmup + duration + drain, padded 30s either side. The drain is
+inside the window deliberately: receipts are still arriving during it, so a
+window clipped before the drain cuts the tail off the distribution being
+measured. The padding is 30s rather than 60s because the measured span is 70s
+at the published settings and 60s either side nearly triples it.
+
+Panels are empty between windows. That is construction, not breakage, and the
+bundle README says so.
+
+### Why promtool and not a copy of the data directory
+
+Prometheus keeps the most recent two hours in the write-ahead log, uncompacted.
+For a run shorter than that the blocks on disk are EMPTY, so `cp -r data`
+produces a bundle containing nothing. `promtool tsdb dump-openmetrics` replays
+the WAL itself - verified by dumping a 25-second-old Prometheus and getting
+15,458 lines when no block existed yet.
+
+It also reads a LIVE data directory, so no admin API has to be enabled, nothing
+is restarted, and the running stack is untouched. The dump and the block build
+both happen on the monitoring host, which already has `promtool`, so the bundle
+ships finished blocks and whoever opens it needs no Prometheus tooling.
+
+One dump and one import per window, each becoming its own time-disjoint block.
+Do not concatenate the dumps into a single import: per-series sample ordering is
+only guaranteed within a window.
+
+### Things that were tried and were wrong
+
+Recorded because each one produces a bundle that looks broken rather than one
+that fails loudly:
+
+- `--storage.tsdb.retention.time=0` does NOT disable retention. Zero is read as
+  "not set" and Prometheus falls back to its 15d default, announcing it in the
+  log: "No time or size retention was set so using the default time retention
+  duration=15d". The bundle uses `100y`. (Separately, an idle Prometheus was
+  observed not to evict 30-day-old blocks under a 15d retention within 150s, so
+  this may never have bitten - but a recording should not depend on that.)
+- The data directory must be writable by the container user. `prom/prometheus`
+  runs as nobody and panics on start with "open /prometheus/queries.active:
+  permission denied" if it cannot write, even though it only ever serves. The
+  bundle's data dir is made world-writable at build time so no environment
+  variables are needed.
+- The dashboards must carry an ABSOLUTE time range. They ship defaulting to
+  `now-15m`, which in a recording shows nothing.
+- `check-dashboards.py` needs `--at`. A recording's newest sample is older than
+  Prometheus's five-minute instant-query lookback, so every query evaluated at
+  `now` returns empty. Measured on a real bundle: 51 queries returning data
+  with `--at`, against 0 returning and 9 failing without it. `validate.sh`
+  computes it from the manifest.
+- `dump-openmetrics` is experimental and drops native histograms. Redpanda's
+  are classic `_bucket` series today, so nothing is lost, but a future build
+  using native histograms would lose them silently. The manifest records the
+  build.
+
 ## Validating a change
 
 `wb monitor check` asks the live Prometheus every query in every dashboard and

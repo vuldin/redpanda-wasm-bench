@@ -290,6 +290,22 @@ python3 "$HERE/render-tables.py" "$OUT_LOCAL" \
   --labels "fanout-,trad-" \
   | tee "$OUT_LOCAL/TABLES.md"
 
+# Export the metrics BEFORE the run ends, because the monitoring host holds the
+# only copy and `wb teardown` destroys it. Non-fatal: a failed export must not
+# make a completed run look failed, and it can be retried by hand while the
+# cluster is still up.
+if [ -n "$(bash "$HERE/wb" env 2>/dev/null | sed -n 's/^MONITOR_PUB="\(.*\)"$/\1/p')" ]; then
+  say "exporting the measured windows' metrics"
+  if bash "$HERE/export-metrics.sh" "$OUT_LOCAL" 2>&1 | tail -20; then
+    :
+  else
+    echo "  NOTE: the metrics export failed. The run and its results are"
+    echo "  unaffected, but the scraped metrics exist only on the monitoring"
+    echo "  host, which teardown destroys. Retry while the cluster is up:"
+    echo "      ./scripts/wb monitor export $OUT_LOCAL"
+  fi
+fi
+
 show_monitoring
 
 cat <<EOF

@@ -45,7 +45,10 @@
 #   monitor [sub]       prometheus/grafana host: status (default, prints the
 #                       Grafana URL and checks it is reachable), deploy,
 #                       dashboards (regenerate and push), check (validate every
-#                       dashboard query against the live Prometheus)
+#                       dashboard query against the live Prometheus),
+#                       export (bundle the measured windows' metrics so they
+#                       open in a fresh Grafana with no cluster - do this
+#                       BEFORE teardown, which destroys the monitoring host)
 #   ssh <target> [cmd]  broker0..2 / client0..1, correct flags applied
 #   logs <target> [n]   redpanda journal from a broker
 #   teardown|down       terraform destroy (prompts unless --yes)
@@ -761,6 +764,18 @@ cmd_monitor() {
       python3 "$HERE/check-dashboards.py" "$PROMETHEUS_URL" \
         "$ROOT/ansible/files/dashboards"
       ;;
+    export)
+      # The metrics live on the monitoring host and `wb teardown` destroys it,
+      # so this is the one monitoring operation with a deadline.
+      local rdir="${1:-}"
+      if [ -z "$rdir" ]; then
+        rdir="$(ls -dt "$ROOT"/results/reproduce-* 2>/dev/null | head -1)"
+        [ -n "$rdir" ] || die "no results directory found under $ROOT/results.
+       Pass one: wb monitor export <results-dir>"
+        note "using the most recent results dir: $rdir"
+      fi
+      BENCH_SSH_KEY="$BENCH_SSH_KEY" bash "$HERE/export-metrics.sh" "$rdir" "${2:-}"
+      ;;
     status|urls)
       if [ -z "${MONITOR_PUB// /}" ]; then
         echo "wb: no monitoring host (monitor_count=0)"
@@ -846,7 +861,7 @@ EOM
       echo "  loadgen is expected to be 0/N between runs - it is a batch"
       echo "  process, not a service."
       ;;
-    *) die "usage: wb monitor [status|deploy|dashboards|check]" ;;
+    *) die "usage: wb monitor [status|deploy|dashboards|check|export]" ;;
   esac
 }
 
@@ -854,9 +869,37 @@ cmd_teardown() {
   local yes="${1:-}"
   [ -d "$TF/.terraform" ] || die "no terraform state - nothing to tear down"
   if [ "$yes" != "--yes" ]; then
-    echo "This destroys the cluster (3 brokers + 2 clients). Re-run with --yes to confirm:"
+    echo "This destroys the cluster (3 brokers + 8 clients + the monitoring host)."
+    echo "Re-run with --yes to confirm:"
     echo "  wb teardown --yes"
     return 1
+  fi
+
+  # The scraped metrics live only on the monitoring host, which this destroys.
+  # Unlike the run's JSON reports - which `wb results` has usually already
+  # copied - there is no second copy anywhere, so a teardown without an export
+  # loses them permanently. Warn rather than refuse: someone tearing down a
+  # failed run does not want to be blocked on exporting metrics they do not
+  # want.
+  load_env 2>/dev/null || true
+  if [ -n "${MONITOR_PUB// /}" ]; then
+    local latest bundle
+    latest="$(ls -dt "$ROOT"/results/reproduce-* 2>/dev/null | head -1)"
+    bundle=""
+    [ -n "$latest" ] && [ -d "$latest/metrics-bundle" ] && bundle="$latest/metrics-bundle"
+    if [ -z "$bundle" ]; then
+      echo ""
+      echo "  NOTE: no metrics bundle found under ${latest:-results/}."
+      echo "  The scraped metrics exist only on the monitoring host this is about"
+      echo "  to destroy, and there is no other copy. If you want them:"
+      echo ""
+      echo "      wb monitor export"
+      echo ""
+      echo "  Continuing with the teardown in 10s. Ctrl-C to stop."
+      sleep 10
+    else
+      note "metrics bundle present: $bundle"
+    fi
   fi
   # Terraform's AWS provider could NOT consume the SSO cache even while
   # `aws sts get-caller-identity` succeeded - it failed with "failed to refresh
