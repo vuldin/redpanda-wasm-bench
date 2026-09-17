@@ -263,6 +263,16 @@ record_clock_sync "$RESULTS_DIR/clock-sync.json"
 # Alongside the clock residual, for the same reason: a condition the result
 # depends on and does not control. See record_network_baseline.
 record_network_baseline "$RESULTS_DIR/network-baseline.json"
+# The broker-to-broker half is measured once at deploy, by the ansible play,
+# and lands outside RESULTS_DIR. Copy it in so it survives teardown: without
+# this it exists only on the client's disk, and the run's own record of the
+# network it was measured on dies with the cluster it describes.
+if [ -f /opt/wasm-bench/broker-network-baseline.json ]; then
+  cp /opt/wasm-bench/broker-network-baseline.json \
+     "$RESULTS_DIR/broker-network-baseline.json"
+else
+  echo "  NOTE: no broker-to-broker baseline to collect (deploy predates it)" >&2
+fi
 
 orders="orders-e2-${RUN_ID}"
 fills="fills-e2-${RUN_ID}"
