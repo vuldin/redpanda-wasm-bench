@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 """Emit the measured windows of a run, as `label start_ms end_ms` lines.
 
+PREFERRED SOURCE IS PROMETHEUS, not the reports. With --prometheus, the windows
+are the periods when the `loadgen` scrape target was UP, which is exactly when
+a measurement was in flight: loadgen is a per-window batch process, so its
+target exists only while it runs. Measured 2026-09-17 against a 3-trial run:
+three up-periods of 65-70s, matching the configured warmup+duration+drain of
+70s to within a scrape interval.
+
+The report-derived fallback below is WRONG BY ABOUT 150 SECONDS and is only
+used when no loadgen signal exists. run_id is when the RUNNER started, not when
+measuring started, and between those two instants the runner creates topics,
+deploys 500 consumers and runs a deliverability precheck. Anchoring on run_id
+therefore exports the deploy phase. That is not a hypothetical: the first real
+export did it, capturing 12-17s of each 95s traffic period, and every latency
+panel in the bundle was blank.
+
 This is what makes "the metrics during the tests" a precise statement rather
 than an approximate one. A reproduction is ~90 minutes of wall clock containing
 ~10 minutes of measurement; the rest is provisioning, 500 consumers being
@@ -15,7 +30,7 @@ drain is included because receipts are still arriving during it - a window
 clipped before the drain cuts the tail off the very distribution being
 measured.
 
-Usage: metrics-windows.py <results-dir> [--pad SECONDS]
+Usage: metrics-windows.py <results-dir> [--pad SECONDS] [--prometheus URL]
 """
 import argparse
 import json
@@ -74,6 +89,54 @@ def window_for(path, d):
     return label, float(started), float(started) + span
 
 
+def loadgen_windows(prom, lo, hi, step=5):
+    """Periods where the loadgen scrape target was up, within [lo, hi] seconds.
+
+    This is the authoritative window signal. loadgen runs for exactly one
+    measurement and its Prometheus target is up only while it does, so the
+    up-periods ARE the measured windows - no arithmetic on configured durations
+    and no assumption about how long setup took.
+    """
+    import urllib.parse
+    import urllib.request
+    q = urllib.parse.urlencode({
+        "query": 'max(up{job="loadgen"})',
+        "start": str(int(lo)), "end": str(int(hi)), "step": str(step),
+    }).encode()
+    req = urllib.request.Request(
+        prom.rstrip("/") + "/api/v1/query_range", data=q)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            res = json.load(r)["data"]["result"]
+    except Exception as e:
+        print(f"metrics-windows: could not query {prom}: {e}", file=sys.stderr)
+        return []
+    if not res:
+        return []
+    runs, cur = [], None
+    for ts, val in res[0]["values"]:
+        t = float(ts)
+        if val == "1":
+            if cur is None:
+                cur = [t, t]
+            else:
+                cur[1] = t
+        elif cur is not None:
+            runs.append(cur)
+            cur = None
+    if cur is not None:
+        runs.append(cur)
+    # A scrape gap inside a window would split it; stitch anything closer than
+    # a few steps back together.
+    merged = []
+    for a, b in runs:
+        if merged and a - merged[-1][1] <= step * 4:
+            merged[-1][1] = b
+        else:
+            merged.append([a, b])
+    return [(a, b) for a, b in merged if b - a >= 5]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("results")
@@ -82,6 +145,9 @@ def main():
     # shoulders nobody reads. Measured 2026-09-16: pad=60 turned 7 minutes of
     # measurement into 19 minutes of export.
     ap.add_argument("--pad", type=float, default=30.0)
+    ap.add_argument("--prometheus", default="",
+                    help="query loadgen target uptime for the real windows "
+                         "instead of deriving them from run_id")
     a = ap.parse_args()
 
     root = Path(a.results)
@@ -101,6 +167,29 @@ def main():
             skipped.append(str(p.relative_to(root)))
             continue
         wins.append(w)
+
+    # Prometheus wins when available. The reports still supply the SEARCH
+    # RANGE, so the query does not have to scan the whole retention.
+    if a.prometheus and wins:
+        lo = min(s for _, s, _ in wins) - 300
+        hi = max(e for _, _, e in wins) + 1800
+        live = loadgen_windows(a.prometheus, lo, hi)
+        if live:
+            print(f"metrics-windows: using {len(live)} loadgen up-period(s) "
+                  f"from {a.prometheus} rather than run_id arithmetic",
+                  file=sys.stderr)
+            labels = [l for l, _, _ in wins]
+            wins = []
+            for i, (s0, e0) in enumerate(live):
+                lbl = labels[i] if i < len(labels) else f"window{i + 1}"
+                wins.append((lbl, s0, e0))
+        else:
+            print("metrics-windows: WARNING - no loadgen target uptime found. "
+                  "Falling back to run_id arithmetic, which anchors on when "
+                  "the RUNNER started rather than when measuring started and "
+                  "is wrong by however long setup took (about 150s for a "
+                  "500-consumer fan-out level). The exported windows may miss "
+                  "the traffic entirely.", file=sys.stderr)
 
     if skipped:
         print(f"metrics-windows: {len(skipped)} report(s) had no usable "

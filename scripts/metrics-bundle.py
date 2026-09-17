@@ -213,6 +213,62 @@ providers:
     data_dir = out / "data"
     blocks = sorted(p.name for p in data_dir.glob("01*") if p.is_dir()) \
         if data_dir.exists() else []
+
+    # VERIFY THE BLOCKS ACTUALLY COVER THE WINDOWS before writing a manifest
+    # that claims they do.
+    #
+    # The first real export shipped a manifest listing three windows over a
+    # single block containing only the first. An ssh call inside the dump loop
+    # had eaten the remaining stdin, so two windows were never dumped - and the
+    # bundle was 60 MB of real data with a plausible manifest, which is the
+    # worst possible shape for a mistake. The manifest is the thing someone
+    # trusts when they cannot see the cluster any more, so it must not be
+    # written unless it is true.
+    #
+    # Block boundaries come from each block's own meta.json, so this needs no
+    # promtool and works wherever the bundle is assembled.
+    covered = []
+    for b in (data_dir.glob("01*") if data_dir.exists() else []):
+        meta = b / "meta.json"
+        if not meta.is_file():
+            continue
+        try:
+            m = json.loads(meta.read_text())
+            covered.append((int(m["minTime"]), int(m["maxTime"])))
+        except (json.JSONDecodeError, OSError, KeyError, ValueError):
+            continue
+
+    def overlap_ms(w):
+        """How much of window w any block actually covers."""
+        total = 0
+        for lo_b, hi_b in covered:
+            total += max(0, min(w["end_ms"], hi_b) - max(w["start_ms"], lo_b))
+        return total
+
+    missing = []
+    for w in wins:
+        span = w["end_ms"] - w["start_ms"]
+        got = overlap_ms(w)
+        w["covered_ms"] = got
+        # 50%: a window's edges are padding, and the importer aligns blocks, so
+        # demanding the full span would false-alarm. A window that is genuinely
+        # absent shows up as zero or near-zero, not as 60%.
+        if span > 0 and got < span * 0.5:
+            missing.append((w["label"], got, span))
+
+    if missing:
+        lines = "\n".join(
+            f"    {lbl}: only {g / 1000:.0f}s of {sp / 1000:.0f}s is in the blocks"
+            for lbl, g, sp in missing)
+        raise SystemExit(
+            f"REFUSING to write a manifest that misrepresents the data.\n"
+            f"  {len(missing)} of {len(wins)} window(s) are not covered by any "
+            f"block:\n{lines}\n"
+            f"  Blocks present: {len(covered)} covering "
+            f"{sorted((lo, hi) for lo, hi in covered)}\n"
+            f"  The dump loop did not produce a block for every window. Check "
+            f"the per-window output above for one that failed, and note that an "
+            f"ssh inside a `while read` loop will silently end it early.")
     size = sum(f.stat().st_size for f in data_dir.rglob("*") if f.is_file()) \
         if data_dir.exists() else 0
 
@@ -228,6 +284,8 @@ providers:
             "exported_seconds": sum(
                 (w["end_ms"] - w["start_ms"]) / 1000 for w in wins),
         },
+        # covered_ms per window is the verified overlap with the blocks on
+        # disk, not a restatement of the request.
         "windows": wins,
         "blocks": blocks,
         "data_bytes": size,

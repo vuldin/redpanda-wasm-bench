@@ -241,6 +241,34 @@ dataset, and combined with METHODOLOGY 30 it is a picture someone would
 eventually quote. So the bundle ships real TSDB blocks and the dashboards that
 read them.
 
+### How big it is, measured
+
+From the 2026-09-16 three-trial in-broker run, `us-east-1a`:
+
+| | |
+|---|---|
+| series in one window | 295k, 562k, 830k |
+| samples in one window | 9.4M, 34.6M, 53.4M |
+| intermediate OpenMetrics text | 2.0 GB, 7.4 GB, 12 GB |
+| shipped blocks | 41 MB, 83 MB, 122 MB |
+| bundle total, 3 windows | 245 MB |
+
+Two things to take from that.
+
+The series count TRIPLES across three identical trials, and so does the dump.
+Each trial deploys 500 new relay consumers with new names, and the branch
+retains a transform's metrics past its last processor, so the sets accumulate.
+A 7-window both-arms export is therefore much more than twice a 3-window one.
+
+And `scope` barely helps. `public` came out at 2.0/7.4/12 GB against `full`'s
+2.4/7.1/12 GB - nearly identical - because the bulk is not the internal
+`vectorized_*` set at all. It is the 500 consumers' own per-function
+`redpanda_transform_*` and `redpanda_wasm_engine_*` series, which are on the
+PUBLIC endpoint. Narrowing the scope excludes the cheap half.
+
+If an export is too slow or too large, the lever is fewer consumers or fewer
+trials, not a narrower scope.
+
 ### Why windows and not the whole run
 
 A reproduction is a couple of hours of wall clock containing about ten minutes
@@ -303,11 +331,55 @@ that fails loudly:
   are classic `_bucket` series today, so nothing is lost, but a future build
   using native histograms would lose them silently. The manifest records the
   build.
+- Windows derived from `run_id` are WRONG BY ABOUT 150 SECONDS. `run_id` is
+  when the runner started, and between then and the first measured sample it
+  creates topics, deploys 500 consumers and runs a deliverability precheck. The
+  first real export anchored on it and captured 12-17s of each 95s traffic
+  period - the deploy phase, not the measurement. The windows now come from
+  `up{job="loadgen"}`, which is up exactly while a measurement is in flight.
+- An `ssh` inside a `while read` loop silently ends the loop. ssh reads stdin,
+  so the first invocation consumes the rest of the list. Three windows were
+  derived and one was dumped. The loop reads an array now.
+- The remote dump SURVIVES its ssh. Killing an export leaves promtool running
+  on the monitoring host, and a retry against a fixed work path then races it
+  for the same file - both truncate it and the retry sits at zero bytes. The
+  work directory is unique per invocation and the export refuses to start while
+  a dump is in flight.
+- `wb ssh` wraps every command in `timeout ${RSH_TIMEOUT:-300}`, and wb's own
+  header warns that long-running work must not use that default. A full-scope
+  window dump takes many minutes, so 300s kills it - and the failure arrives as
+  an EMPTY error string, because the output dies with the connection. The
+  export sets 7200s.
+- The manifest must be verified against the blocks, not written from the
+  request. A truncated export produced 60 MB of real data describing itself as
+  three windows while holding one. `metrics-bundle.py` reads each block's
+  `meta.json` and refuses to write a manifest it cannot substantiate.
 
 ## Validating a change
 
 `wb monitor check` asks the live Prometheus every query in every dashboard and
-reports whether each one returns data.
+reports whether each one returns data. A bundle carries its own copy plus
+`validate.sh`.
+
+Validating a RECORDING needs two things that validating a live cluster does
+not, and both were learned by having a bad bundle pass:
+
+- **NaN is not data.** `histogram_quantile` over a rate window with no samples
+  returns a result whose value is NaN, and Grafana renders it as an empty
+  panel. Counting it as data is how this reported "57 queries returning data"
+  for a bundle whose every latency panel was blank. Excluding NaN took the same
+  bundle to 29 returning and 34 empty.
+- **Probe every window, not one instant.** Windows are padded and separated by
+  gaps, so the midpoint of the whole recording can land after traffic stopped.
+  A query passes if ANY window has its data; `validate.sh` derives one instant
+  per window from the manifest.
+
+Recording mode is also stricter about what may be empty. On a live cluster
+`redpanda_relay_*` can legitimately be absent - nothing is deployed between
+runs. In a recording it cannot: the recording exists because a measurement
+happened, so an empty relay panel means the wrong range was captured. Only
+`loadgen_*`, the residency gauges and processor-create latency are allowed
+empty.
 
 This exists because the two ways a panel breaks are both silent. A query that
 doesn't parse renders an empty panel with the error behind a hover. A query

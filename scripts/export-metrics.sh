@@ -39,7 +39,10 @@ OUT="${2:-$RESULTS/metrics-bundle}"
 # window and the settle after it are the parts that explain its shape, so a
 # window clipped exactly to the measurement is harder to read than one with
 # shoulders.
-PAD="${METRICS_EXPORT_PAD_SECS:-60}"
+# 30s, matching metrics-windows.py's own default. These were 60 and 30
+# respectively, so the export silently padded twice as wide as the tool it
+# calls documents.
+PAD="${METRICS_EXPORT_PAD_SECS:-30}"
 # full | public | dashboards. `full` includes the internal vectorized_* set,
 # which is where the series count is; the windowing above is what pays for it.
 SCOPE="${METRICS_EXPORT_SCOPE:-full}"
@@ -66,21 +69,67 @@ eval "$(bash "$WB" env 2>/dev/null | grep -E '^(MONITOR_PUB|PROMETHEUS_URL)=')" 
 # window it measured, so the bundle covers exactly what was measured even if
 # the export runs hours later.
 say "deriving measured windows from $RESULTS"
-WINDOWS="$(python3 "$HERE/metrics-windows.py" "$RESULTS" --pad "$PAD")" \
+# --prometheus is what makes the windows right. Without it the windows are
+# derived from run_id, which is when the RUNNER started rather than when
+# measuring started, and is wrong by however long setup took - about 150s for a
+# 500-consumer fan-out level, enough to export the deploy phase instead of the
+# measurement.
+WINDOWS="$(python3 "$HERE/metrics-windows.py" "$RESULTS" --pad "$PAD" \
+            --prometheus "${PROMETHEUS_URL:-}")" \
   || die "could not derive windows"
 [ -n "${WINDOWS//[[:space:]]/}" ] || die "no loadgen reports with usable timestamps under $RESULTS"
 echo "$WINDOWS" | sed 's/^/  /'
 NWIN=$(echo "$WINDOWS" | grep -c .)
 
 # --- dump + build, on the monitoring host -----------------------------------
+# wb's rsh wraps every ssh in `timeout ${RSH_TIMEOUT:-300}`, and its own
+# header says long-running work must not use that default. A full-scope window
+# dump is 6-20 GB of OpenMetrics text and takes many minutes, so 300s kills it
+# mid-dump - and the failure arrives as an empty error string, because the
+# output is lost with the connection. That is exactly how window 2 of the first
+# corrected export "FAILED" with nothing to show for it. 2h per window is
+# effectively no limit while still bounding a wedged host.
+export RSH_TIMEOUT="${RSH_TIMEOUT:-7200}"
+
 say "dumping $NWIN window(s) on the monitoring host (scope=$SCOPE)"
-REMOTE_WORK="/tmp/wasm-bench-metrics-export"
-bash "$WB" ssh monitor "sudo rm -rf $REMOTE_WORK && sudo mkdir -p $REMOTE_WORK/data && sudo chmod 777 $REMOTE_WORK $REMOTE_WORK/data" \
+# Unique per invocation. A fixed path is a collision: killing an export does
+# NOT kill the promtool it started on the monitoring host - the remote command
+# has no tty and survives its ssh - so a retry would find the previous dump
+# still writing to the same w.om and both would truncate it. Observed: a
+# retried export sat at 0 bytes while an orphan from the prior attempt wrote to
+# the same file.
+REMOTE_WORK="/tmp/wasm-bench-metrics-export-$$-$(date +%s)"
+
+# And refuse to start if a dump is already in flight, rather than racing it for
+# the Prometheus data directory.
+_inflight="$(bash "$WB" ssh monitor "ps -eo args | grep -c '[p]romtool tsdb'" </dev/null 2>/dev/null | tr -dc '0-9')"
+if [ -n "$_inflight" ] && [ "$_inflight" -gt 0 ]; then
+  die "a promtool dump is already running on the monitoring host ($_inflight
+       process(es)). An earlier export was probably interrupted - its remote
+       work survives the ssh that started it. Wait for it, or clear it:
+         wb ssh monitor \"sudo pkill -f 'promtool tsdb'\""
+fi
+
+bash "$WB" ssh monitor "sudo rm -rf $REMOTE_WORK && sudo mkdir -p $REMOTE_WORK/data && sudo chmod 777 $REMOTE_WORK $REMOTE_WORK/data" </dev/null \
   || die "could not prepare the remote work dir"
 
+# Read the windows into an ARRAY rather than piping them into the loop.
+#
+# ssh reads stdin. A `while read ... done <<< "$WINDOWS"` loop whose body calls
+# ssh therefore loses the rest of the list to the first ssh invocation: the loop
+# runs exactly once and then stdin is exhausted. That is not hypothetical - it
+# is what the first real export did, and the failure was silent. Three windows
+# were derived, one was dumped, and the bundle came out looking entirely
+# plausible at 60 MB with a manifest that listed all three.
+#
+# The array removes stdin from the picture entirely. The redirections on the
+# ssh calls below are belt-and-braces for the same hazard.
+mapfile -t WINLINES <<< "$WINDOWS"
+
 i=0
-while read -r label start_ms end_ms; do
-  [ -z "$label" ] && continue
+for _line in "${WINLINES[@]}"; do
+  [ -z "${_line//[[:space:]]/}" ] && continue
+  read -r label start_ms end_ms <<< "$_line"
   i=$((i+1))
   printf '  [%d/%d] %-26s ' "$i" "$NWIN" "$label"
   # promtool reads the live data directory, including the WAL, so nothing is
@@ -89,20 +138,24 @@ while read -r label start_ms end_ms; do
     "sudo promtool tsdb dump-openmetrics --min-time=$start_ms --max-time=$end_ms \
        ${MATCH:+--match='$MATCH'} /var/lib/prometheus > $REMOTE_WORK/w.om 2>/dev/null \
      && sudo promtool tsdb create-blocks-from openmetrics -q $REMOTE_WORK/w.om $REMOTE_WORK/data \
-     && wc -c < $REMOTE_WORK/w.om" 2>&1 | tr -d '\r' | tail -1)"
+     && wc -c < $REMOTE_WORK/w.om" </dev/null 2>&1 | tr -d '\r' | tail -1)"
   if [ -z "${out//[!0-9]/}" ]; then
     echo "FAILED"
-    echo "      $out" >&2
-    die "window $label could not be exported"
+    echo "      remote output: ${out:-<empty>}" >&2
+    die "window $label could not be exported.
+       An EMPTY remote output usually means the ssh was killed rather than the
+       command failing - check RSH_TIMEOUT (currently ${RSH_TIMEOUT}s) against
+       how long a ${SCOPE}-scope dump takes, and check disk on the monitoring
+       host (a full-scope window is 6-20 GB of intermediate text)."
   fi
   echo "ok ($(numfmt --to=iec "${out//[!0-9]/}" 2>/dev/null || echo "$out bytes") of openmetrics text)"
-done <<< "$WINDOWS"
+done
 
 # One import per window, so each becomes its own time-disjoint block. Do NOT
 # concatenate the dumps into a single import: per-series sample ordering is
 # only guaranteed within one window, and the importer needs it in order.
 say "blocks built"
-bash "$WB" ssh monitor "sudo promtool tsdb list $REMOTE_WORK/data 2>/dev/null | head -20" | sed 's/^/  /'
+bash "$WB" ssh monitor "sudo promtool tsdb list $REMOTE_WORK/data 2>/dev/null | head -20" </dev/null | sed 's/^/  /'
 
 # --- bring it down ----------------------------------------------------------
 say "copying blocks to $OUT"

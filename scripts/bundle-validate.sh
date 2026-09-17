@@ -9,7 +9,14 @@
 set -uo pipefail
 cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 
-AT=$(python3 -c "import json; m=json.load(open('manifest.json'))['recording']; print(int((m['start_ms'] + m['end_ms']) / 2000))")
+# One instant per WINDOW, not the midpoint of the whole recording. Windows are
+# padded and separated by gaps, so the recording's midpoint can land after
+# traffic stopped - which reports every latency panel as broken on a bundle
+# that is entirely fine. A query passes if any window has its data.
+AT=$(python3 -c "
+import json
+ws = json.load(open('manifest.json'))['windows']
+print(','.join(str(int((w['start_ms'] + w['end_ms']) / 2000)) for w in ws))")
 
 if ! curl -sf --max-time 5 http://localhost:9090/-/ready >/dev/null 2>&1; then
   echo "prometheus is not up on :9090 - start the recording first:" >&2

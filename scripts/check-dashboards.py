@@ -45,8 +45,47 @@ ALLOWED_EMPTY = {
 }
 
 
-def allowed_empty(expr):
-    for prefix, why in ALLOWED_EMPTY.items():
+# In RECORDING mode the allowance is much narrower. A live cluster can
+# legitimately have no relay or transform series - nothing is deployed between
+# runs. A recording cannot: it exists precisely because a measurement happened,
+# so an empty relay panel means the wrong time range was captured, not that a
+# feature was off.
+#
+# This distinction is why a mis-windowed bundle passed validation. The export
+# captured ~12s of each ~95s traffic period, every latency panel was blank, and
+# the relay families were waved through as "only exist while running".
+RECORDING_ALLOWED_EMPTY = {
+    "loadgen_": ALLOWED_EMPTY["loadgen_"],
+    "redpanda_wasm_binary_resident": ALLOWED_EMPTY["redpanda_wasm_binary_resident"],
+    "redpanda_transform_processor_create_latency": (
+        "processor create latency is only recorded when a processor is created, "
+        "which may not happen inside a measured window"),
+}
+
+
+def _real(series):
+    """True if any sample is a real number.
+
+    NaN is NOT data. histogram_quantile over a rate window with no samples
+    returns a result entry whose value is NaN, and Grafana renders that as an
+    empty panel. Counting it as data is how this validator once reported 57
+    queries returning data against a recording that had captured the wrong
+    time range and whose every latency panel was blank.
+    """
+    for smp in series:
+        v = smp.get("value", [None, "NaN"])[1]
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if fv == fv:
+            return True
+    return False
+
+
+def allowed_empty(expr, recording=False):
+    table = RECORDING_ALLOWED_EMPTY if recording else ALLOWED_EMPTY
+    for prefix, why in table.items():
         if prefix in expr:
             return why
     return None
@@ -79,18 +118,21 @@ def main():
         print(__doc__)
         return 2
     args = [a for a in sys.argv[1:]]
-    at = None
+    ats = []
     if "--at" in args:
         i = args.index("--at")
-        at = float(args[i + 1])
+        ats = [float(x) for x in args[i + 1].split(",") if x.strip()]
         del args[i:i + 2]
     base = args[0]
     ddir = Path(args[1] if len(args) > 1 else "ansible/files/dashboards")
 
-    if at is not None:
-        print(f"# evaluating every query at {int(at)} rather than now, because a\n"
-              f"# recording's newest sample is older than the 5m instant-query\n"
-              f"# lookback and would otherwise read as entirely empty\n")
+    if ats:
+        print("# evaluating at " + ", ".join(str(int(a)) for a in ats)
+              + " rather than now: a recording's newest\n"
+              "# sample is older than the 5m instant-query lookback, so every\n"
+              "# query would read empty at `now`. A query passes if ANY of these\n"
+              "# instants has data - windows are padded, so the midpoint of the\n"
+              "# whole recording can land in a pad after traffic stopped.\n")
     files = sorted(ddir.rglob("*.json"))
     if not files:
         print(f"no dashboards under {ddir}")
@@ -106,20 +148,30 @@ def main():
                 # Grafana expands this from the panel's step and the
                 # datasource interval; Prometheus does not know it.
                 concrete = expr.replace("$__rate_interval", "30s")
-                res, err = query(base, concrete, at)
+                # Any instant with real data is enough: a panel works if
+                # the recording contains its data somewhere, not if it happens
+                # to be non-empty at one arbitrary moment.
                 title = pan.get("title", "?")
-                if err:
+                res, err, n = None, None, 0
+                for _at in (ats or [None]):
+                    res, err = query(base, concrete, _at)
+                    if err or res is None or res.get("status") != "success":
+                        continue
+                    got = res["data"]["result"]
+                    if got and _real(got):
+                        n = len(got)
+                        break
+                if n == 0 and err:
                     bad.append((f.name, title, expr, err))
                     print(f"  FAIL  {title}: {err}")
                     continue
-                if res.get("status") != "success":
+                if n == 0 and res is not None and res.get("status") != "success":
                     reason = res.get("error", "unknown")
                     bad.append((f.name, title, expr, reason))
                     print(f"  FAIL  {title}: {reason}")
                     continue
-                n = len(res["data"]["result"])
                 if n == 0:
-                    why = allowed_empty(expr)
+                    why = allowed_empty(expr, recording=bool(ats))
                     if why:
                         empty.append((f.name, title, expr, why))
                         print(f"  empty {title}  (expected: {why[:60]}...)")
