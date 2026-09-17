@@ -419,6 +419,10 @@ deploy_consumer() {
 # follow-up, not this sweep.
 deploy_fanout_consumers() {
   local n="$1" i shard name
+  # Before adding this trial's consumers, make sure the previous trial's are
+  # gone. See wait_for_relay_subscriptions_drained for the run where a trial
+  # inherited 62 of them and was rejected for lag as a result.
+  wait_for_relay_subscriptions_drained
   # Fail here, not on consumer 2 of 50. Both guests are required: the measured
   # one emits receipts, the fillers must NOT, and silently substituting
   # relay-probe for relay-sink is what invalidated Round 2.
@@ -818,6 +822,25 @@ for level in $SWEEP; do
   tp50=$(jq -r '.total.p50_micros' "$RESULTS_DIR/${tag}.json")
   dropped=$(jq -r '.resources.relay_dropped_delta' "$RESULTS_DIR/${tag}.json")
   clean=$(jq -r '.clean' "$RESULTS_DIR/${tag}.json")
+  # Did this trial have exactly the fan-out it asked for? Reported rather than
+  # folded into `clean`, because what counts as publishable is a policy call,
+  # not this script's to make - but an unattributed rejection is worse. On
+  # 2026-09-17 trial 2 of 3 ran at 562.1 against an intended 500 because 62
+  # subscriptions from trial 1 were still attached, and that surplus is what
+  # pushed its lag past the threshold. Without this line the report says
+  # "rejected for lag" and never says why the lag was there.
+  if [ "$MODE" = "fanout" ]; then
+    per_push=$(jq -r '.resources.relay_delivered_per_logical_push // empty' "$RESULTS_DIR/${tag}.json")
+    if [ -n "$per_push" ]; then
+      awk -v got="$per_push" -v want="$level" 'BEGIN{
+        if (want <= 0) exit 0
+        d = (got - want) / want
+        if (d < 0) d = -d
+        if (d > 0.02)
+          printf "  NOTE: fan-out measured %.1f against %d intended (%.1f%% off).\n        Subscribers this level did not deploy were attached - usually the\n        previous trial not yet drained. Extra delivery work inflates lag.\n", got, want, d * 100
+      }' >&2
+    fi
+  fi
   # From loadgen's own report: its internal scrape brackets the timed window
   # only, so these are free of warmup contamination (see the note above).
   minv=$(jq -r --arg n "$want_producer" '.resources.per_function[$n].cpu_micros_per_invocation // "n/a"' "$RESULTS_DIR/${tag}.json")

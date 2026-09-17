@@ -504,6 +504,45 @@ wait_for_transform_failures_quiescent() {
   return 0
 }
 
+# wait_for_relay_subscriptions_drained [max_secs]
+# Wait for the previous trial's relay subscriptions to go away before the next
+# trial's consumers are deployed.
+#
+# Why this is needed, measured on 2026-09-17 (run 1789658612). Three identical
+# trials: trials 1 and 3 ran with relay_active_subscriptions_end exactly 1500
+# and relay_delivered_per_logical_push exactly 500. Trial 2 ran with 1562 and
+# 562.1 - it inherited 62 live subscriptions from trial 1, did 12.4% more
+# delivery work (33,725,745 against 30,000,000), and its transform lag peaked
+# at 1166 against a 1000-record threshold, so the trial was rejected. Nothing
+# was wrong with the code; the previous trial had not finished letting go.
+#
+# wait_for_relay_subscriptions cannot catch this and is not meant to: it takes
+# the CONSUMER count (500) and compares it against a subscription count that is
+# consumers x partitions led (1500), so it is a loose lower bound by
+# construction, and a stale-inflated 1562 satisfies it just as well as a
+# correct 1500. A lower bound cannot detect a number that is too HIGH.
+wait_for_relay_subscriptions_drained() {
+  local max_secs="${1:-120}" have="" waited=0
+  while [ "$waited" -lt "$max_secs" ]; do
+    have="$(curl -sf "$ADMIN_URL/public_metrics" 2>/dev/null | \
+      awk '/^redpanda_relay_active_subscriptions\{/{s+=$2} END{print s+0}')"
+    if [ -n "$have" ] && awk -v h="$have" 'BEGIN{exit !(h==0)}'; then
+      [ "$waited" -gt 0 ] && echo "  relay subscriptions drained to 0 after ${waited}s"
+      return 0
+    fi
+    sleep 2; waited=$((waited + 2))
+  done
+  # Deliberately not fatal: a trial that starts contaminated is still worth
+  # running, because its throughput and receipt counts stay valid and the
+  # latency gates judge it on its own lag. Say so loudly instead, so a
+  # rejected trial can be attributed rather than puzzled over.
+  echo "  WARNING: relay subscriptions still at ${have:-<unknown>} after ${max_secs}s," >&2
+  echo "           not 0. This trial starts with the previous one's consumers" >&2
+  echo "           still attached, which adds delivery work it did not ask for." >&2
+  echo "           Expect inflated relay_delivered_per_logical_push and lag." >&2
+  return 0
+}
+
 wait_for_relay_subscriptions() {
   local want="$1"
   local have=""

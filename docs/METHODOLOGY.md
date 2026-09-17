@@ -975,6 +975,39 @@ cleanup - retry it, then warn. And when you add a resource type, add it to
 the verifier in the same commit, because a verifier is only evidence about the
 resources it was taught.
 
+### 33. A lower-bound gate cannot catch a number that is too high
+
+Three identical trials on 2026-09-17 (run 1789658612). Trials 1 and 3 ran with
+`relay_active_subscriptions_end` at exactly 1500 and
+`relay_delivered_per_logical_push` at exactly 500. Trial 2 ran at 1562 and
+562.1: it started with 62 relay subscriptions from trial 1 still attached, did
+12.4% more delivery work (33,725,745 deliveries against 30,000,000), and its
+transform lag peaked at 1166 against the 1000-record threshold, so it was
+rejected. Its throughput and receipts were perfect - 30,000 of 30,000, zero
+missing, zero dropped.
+
+`wait_for_relay_subscriptions` was in the path and passed. It could not have
+caught this. It takes the CONSUMER count (500) and compares it against a
+subscription count that is consumers x partitions led (1500), so it is a loose
+lower bound by construction, and it reported "1562 (>= 1500 wanted)" - which
+reads exactly like success. `h >= w` is satisfied by a contaminated count as
+comfortably as by a correct one.
+
+The lesson generalises past this gate. Most readiness checks are written as
+"has enough of X appeared yet", because the failure being guarded against is
+too little. Contamination from a previous run produces too MUCH, and every
+lower-bound check in the harness is blind to it by design. Where a count has a
+known exact value, assert the value; where the concern is leftovers, wait for
+the drain to zero before setting up, which is what
+`wait_for_relay_subscriptions_drained` now does.
+
+The rejection message is also worth noting on its own. "Rejected for transform
+lag" was true and useless: the lag was a symptom of a fan-out the level never
+asked for. The runner now reports measured fan-out against intended whenever
+they differ by more than 2%, so a rejected trial can be attributed instead of
+puzzled over. That is reported rather than folded into `clean`, because what
+counts as publishable is a policy decision and not a script's to make.
+
 ## `write.caching`: read this before you set it
 
 `write.caching=true` defers fsync, batching multiple produces into one flush
