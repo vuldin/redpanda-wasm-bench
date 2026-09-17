@@ -489,7 +489,18 @@ wait_for_transform_failures_quiescent() {
     prev="$cur"
     sleep 2
   done
-  echo "  WARNING: transform_failures still moving after $((budget * 2))s (last $cur) - the level will likely report unclean" >&2
+  # Deliberately does NOT predict the verdict. This counter is the CLUSTER-WIDE
+  # sum, which is the right scope for what this gate waits on - the consumer
+  # ramp's retries - but the clean/unclean verdict is scoped to the matcher
+  # alone (loadgen's -transform-name), so a moving sum here says nothing about
+  # whether the level will be rejected. An earlier version of this message
+  # claimed "the level will likely report unclean"; on 2026-09-17 it printed
+  # that for two trials, one of which came back clean and the other of which
+  # was rejected for transform lag, a reason unrelated to this number.
+  echo "  NOTE: cluster-wide transform_failures still moving after $((budget * 2))s (last $cur)." >&2
+  echo "        That is the consumer ramp, not a verdict: the level is judged on the" >&2
+  echo "        MATCHER's failure delta across the window. Retries landing inside the" >&2
+  echo "        window are the risk, so check the level's own unclean_reasons." >&2
   return 0
 }
 
