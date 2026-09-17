@@ -84,8 +84,45 @@ delete_placement_group() {  # <region> <arn-or-name>
   local region="$1" ref="$2"
   local name="${ref##*/}"
   [ -n "$name" ] || return 0
-  aws ec2 delete-placement-group --region "$region" --group-name "$name" \
-    >/dev/null 2>&1 || true
+  # Retried, because cancel-capacity-reservation returns before the
+  # reservation has actually let go of the group: a delete issued straight
+  # after the cancel fails with the group still in use. The first version
+  # swallowed that with `|| true` and leaked six groups across three regions
+  # in one run before anyone looked. They cost nothing, but they count
+  # against the per-region placement-group limit, and a cleanup that cannot
+  # fail out loud is not a cleanup.
+  local err="" i
+  for i in 1 2 3 4 5 6; do
+    if err="$(aws ec2 delete-placement-group --region "$region" \
+                --group-name "$name" 2>&1)"; then
+      return 0
+    fi
+    sleep 5
+  done
+  echo "    WARNING: could not delete probe placement group $name in $region" >&2
+  echo "             after 30s: ${err##*: }" >&2
+  echo "             Sweep leftovers with: wb verify-clean" >&2
+  return 0
+}
+
+# sweep_probe_placement_groups <region>
+# Removes probe groups an earlier run leaked. Named separately from
+# delete_placement_group because it deletes by PATTERN rather than by a
+# reference the caller is holding - the leaked ones are exactly those whose
+# caller is gone.
+sweep_probe_placement_groups() {
+  local region="$1" name found=0
+  while read -r name; do
+    [ -z "$name" ] && continue
+    if aws ec2 delete-placement-group --region "$region" \
+         --group-name "$name" >/dev/null 2>&1; then
+      echo "    removed stale probe placement group $name in $region"
+      found=$((found + 1))
+    fi
+  done < <(aws ec2 describe-placement-groups --region "$region" \
+             --query 'PlacementGroups[?starts_with(GroupName, `rp-bench-probe-`)].GroupName' \
+             --output text 2>/dev/null | tr '\t' '\n')
+  return 0
 }
 
 # region_azs <region> <n>

@@ -52,6 +52,8 @@
 #   ssh <target> [cmd]  broker0..2 / client0..1, correct flags applied
 #   logs <target> [n]   redpanda journal from a broker
 #   teardown|down       terraform destroy (prompts unless --yes)
+#   sweep-probe-groups  delete probe placement groups an earlier run leaked
+#                       (free, but capped per region; see verify-clean)
 #   reproduce           one command: prereqs -> region -> provision -> deploy
 #                       -> both arms -> tables. See REPRODUCE.md
 #   cleanup-orphans     delete benchmark transforms/topics left by a killed
@@ -994,6 +996,34 @@ verify_torn_down() {
     echo "  STILL PRESENT - VPCs (no direct cost, blocks the next apply):"; echo "$vpcs" | sed 's/^/    /'; bad=1
   else echo "  ok: no VPCs"; fi
 
+  # Placement groups, in EVERY candidate region rather than just this one: the
+  # capacity probe creates a throwaway group per region it probes, so the
+  # leftovers are in regions this checkout never applied to. They are free and
+  # they carry no owner tag (there is nothing to tag before the cluster
+  # exists), so they are matched by the rp-bench- name prefix instead.
+  #
+  # This check exists because it was missing: adding a resource type without
+  # teaching the verifier about it meant six leaked groups passed a VERIFIED
+  # CLEAN. A verifier that only knows the resources it was written for reports
+  # clean about the ones it has never heard of.
+  local pg_region pgs pg_bad=0
+  for pg_region in $(echo "${REGIONS:-us-east-1 us-east-2 us-west-2 eu-west-1}" | tr ' ' '\n' | grep -v '^$'); do
+    pgs="$(aws ec2 describe-placement-groups --region "$pg_region" \
+      --query 'PlacementGroups[?starts_with(GroupName, `rp-bench-`)].[GroupName,State]' \
+      --output text 2>/dev/null)"
+    if [ -n "$pgs" ]; then
+      echo "  STILL PRESENT - placement groups in $pg_region (free, but capped per region):"
+      echo "$pgs" | sed 's/^/    /'
+      pg_bad=1
+    fi
+  done
+  if [ "$pg_bad" = "0" ]; then
+    echo "  ok: no rp-bench placement groups in any candidate region"
+  else
+    echo "  remove them with: ./scripts/wb sweep-probe-groups"
+    bad=1
+  fi
+
   # The region above is the one this checkout last applied in. It is not proof
   # that nothing is running ELSEWHERE: select-region.sh falls back between
   # regions on capacity, so a cluster from an earlier session can sit in a
@@ -1098,6 +1128,14 @@ case "${1:-}" in
   # "unknown command" and three r8id.8xlarge kept running until someone looked.
   teardown|down|destroy) shift; cmd_teardown "$@" ;;
   verify-clean) shift; verify_torn_down "$@" ;;
+  sweep-probe-groups)
+    shift
+    . "$ROOT/scripts/lib-capacity.sh"
+    for _r in $(echo "${REGIONS:-us-east-1 us-east-2 us-west-2 eu-west-1}" | tr ' ' '\n' | grep -v '^$'); do
+      sweep_probe_placement_groups "$_r"
+    done
+    echo "wb: probe placement group sweep done"
+    ;;
   cleanup-orphans) shift; cmd_cleanup_orphans "$@" ;;
   # reproduce.sh runs its own prerequisite check and reads these from the
   # ENVIRONMENT. wb computes them as plain shell variables, so exec'ing

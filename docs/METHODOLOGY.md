@@ -948,6 +948,33 @@ parse or probe can come back empty, the empty case needs its own
 representation. Choosing a neutral-looking default makes the failure
 indistinguishable from success in exactly the output a reader trusts.
 
+### 32. A verifier reports clean about resources it has never heard of
+
+Adding the broker placement group added a resource type, and the capacity
+probe creates a throwaway one per region it probes so it can ask about placed
+capacity rather than unplaced. `wb verify-clean` checked instances, volumes,
+Elastic IPs and VPCs, because those were the resource types that existed when
+it was written. It printed VERIFIED CLEAN with six probe placement groups
+still sitting in three regions.
+
+They leaked because `cancel-capacity-reservation` returns before the
+reservation has let go of the group, so the delete issued immediately after
+the cancel fails with the group in use - and the cleanup swallowed that with
+`|| true`. Deleting the same groups by hand an hour later succeeded first
+time, which is how the timing was confirmed.
+
+Placement groups cost nothing, so this leaked no money. It is in this list
+because of the shape, not the impact: the probe groups carry no `owner` tag,
+since there is nothing to tag before the cluster exists, so they are matched
+by name prefix instead of by the tag every other check uses. A sweep written
+around one identifying convention silently excludes whatever does not follow
+it.
+
+Two rules worth keeping. A cleanup that cannot fail out loud is not a
+cleanup - retry it, then warn. And when you add a resource type, add it to
+the verifier in the same commit, because a verifier is only evidence about the
+resources it was taught.
+
 ## `write.caching`: read this before you set it
 
 `write.caching=true` defers fsync, batching multiple produces into one flush
