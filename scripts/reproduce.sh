@@ -53,11 +53,31 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 # advice ("wipe /var/lib/redpanda/data") is wildly disproportionate for it.
 # Waiting here turns a spurious hard failure into a pause.
 wait_healthy() {
-  local budget="${1:-180}" seed cp waited=0
+  local budget="${1:-180}" allow_absent="${2:-false}" seed cp waited=0
   eval "$(bash "$HERE/wb" env 2>/dev/null | grep -E '^(BROKER_PRIV|CLIENT_PUB)=')"
   seed=$(echo "$BROKER_PRIV" | cut -d' ' -f1)
   cp=$(echo "$CLIENT_PUB" | cut -d' ' -f1)
   [ -n "$seed" ] && [ -n "$cp" ] || { echo "  cannot resolve cluster addresses; skipping health wait"; return 0; }
+  # A cluster that does not exist yet cannot become healthy. On a fresh apply
+  # the pre-deploy call waited out the whole budget and printed "still not
+  # healthy after 180s" - which reads like a problem - immediately before the
+  # deploy's own preflight correctly reported "seed not reachable yet on :9644
+  # - treating as a fresh cluster".
+  #
+  # Only the pre-deploy caller passes allow_absent. The post-deploy calls must
+  # NOT skip on an unreachable admin port: there the cluster does exist and an
+  # unanswered probe is the transient this gate is for (clearing groups makes
+  # __consumer_offsets briefly leaderless). Deciding by probe alone would turn
+  # that wait into a no-op exactly when it matters.
+  if [ "$allow_absent" = "true" ]; then
+    if ! ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+         -i "${BENCH_SSH_KEY:-$HOME/.ssh/id_rsa}" "ubuntu@$cp" \
+         "curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://$seed:9644/v1/cluster/health_overview" \
+         </dev/null 2>/dev/null | grep -q '^2'; then
+      echo "  no redpanda answering on the seed yet - fresh cluster, nothing to wait for"
+      return 0
+    fi
+  fi
   while [ "$waited" -lt "$budget" ]; do
     if ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
          -i "${BENCH_SSH_KEY:-$HOME/.ssh/id_rsa}" "ubuntu@$cp" \
@@ -188,7 +208,7 @@ show_monitoring
 
 if [ "$SKIP_DEPLOY" != "true" ]; then
   say "waiting for cluster health before deploying"
-  wait_healthy 180
+  wait_healthy 180 true
   say "deploying broker binary and client tools"
   REDPANDA_BIN="$REDPANDA_BIN" WASM_DIR="$WASM_DIR" bash "$HERE/wb" deploy \
     || die "deploy failed"

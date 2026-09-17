@@ -188,10 +188,15 @@
   hosts: broker
   become: true
   tasks:
+    # failed_when: false rather than ignore_errors: true. Both let the play
+    # continue, but ignore_errors prints a red "fatal: ... FAILED!" block per
+    # broker first, and a non-zero exit here is the EXPECTED case on a fresh
+    # host - it is how this task reports "not mounted yet". Three fatal blocks
+    # that mean nothing is bad output for anyone following the README.
     - name: Check whether /var/lib/redpanda is already mounted (idempotency across re-runs)
       command: mountpoint -q /var/lib/redpanda
       register: already_mounted
-      ignore_errors: true
+      failed_when: false
       changed_when: false
 
     - name: Discover instance-store NVMe devices (no partitions = not the root EBS volume)
