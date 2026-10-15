@@ -701,8 +701,16 @@ func encodeBookPreload(runID int64, depth int) [][]byte {
 			OrderID:     restingID(runID, 'p', seq-int64(depth)),
 			Participant: "depth-buyer",
 			Side:        0,
-			// Well below the measured sell at 100, so it never crosses.
-			Price: 1 + int64(i),
+			// Strictly below the measured sell at 100 at EVERY depth. This
+			// used to be 1+i, which reaches 100 at depth 100 and passes it
+			// beyond: a preload bid then consumed one measured sell, leaving
+			// one aggressor buy per envelope resting instead of filling, and
+			// the 2026-10-15 depth sweep lost exactly one receipt per envelope
+			// at depth 100 and failed its precheck at 1,000 and 10,000. Prices
+			// cycle through 2..99, so the book is still a sorted, multi-level
+			// structure at any depth - many orders share a level, as in a
+			// real book.
+			Price: 99 - int64(i%98),
 			Qty:   1,
 		}))
 	}

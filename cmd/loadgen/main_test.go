@@ -637,7 +637,17 @@ func TestStddevMeasuresSpread(t *testing.T) {
 // level, which looks exactly like "depth is free".
 func TestBookPreloadOrdersCannotCross(t *testing.T) {
 	const runID = int64(1787938000000000000)
-	const depth = 50
+	// Every depth the sweep uses, and the boundaries around the measured
+	// prices. This test used to check only depth 50, which is below the
+	// point where the old 1+i bid pricing crossed the measured sell at 100 -
+	// so it passed while the real sweep (0 100 1000 10000) was broken.
+	for _, depth := range []int{1, 50, 98, 99, 100, 101, 199, 200, 1000, 10000, 20000} {
+		t.Run(strconv.Itoa(depth), func(t *testing.T) { checkPreloadDepth(t, runID, depth) })
+	}
+}
+
+func checkPreloadDepth(t *testing.T, runID int64, depth int) {
+	t.Helper()
 	recs := encodeBookPreload(runID, depth)
 	if len(recs) != depth*2 {
 		t.Fatalf("got %d records, want %d (both sides)", len(recs), depth*2)
