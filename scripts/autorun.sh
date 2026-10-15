@@ -425,6 +425,15 @@ cmd_start() {
   [ $(( hard - now )) -gt $(( (RESERVE_MIN + 30) * 60 )) ] \
     || die "credentials expire $(date -u -d @"$exp" +%FT%TZ): not enough time for a run. Log in again."
   [ -n "${HARD_DEADLINE_EPOCH:-}" ] && hard="$HARD_DEADLINE_EPOCH"
+  # Continuing a run whose watchdog is still armed: that watchdog's deadline
+  # is the real one, so plan against it rather than against a fresh cap.
+  if [ -f "$RUN_DIR/watchdog.pid" ] && kill -0 "$(cat "$RUN_DIR/watchdog.pid")" 2>/dev/null; then
+    local wd=""
+    [ -f "$RUN_DIR/DEADLINE" ] && wd="$(cat "$RUN_DIR/DEADLINE")"
+    [ -n "$wd" ] || wd="$(sed -n 's/.*watchdog pid=[0-9]* armed for \([0-9TZ:-]*\).*/\1/p' "$RUN_DIR/autorun.log" 2>/dev/null | tail -1 | xargs -r -I{} date -d {} +%s)"
+    [ -n "$wd" ] && hard="$wd"
+  fi
+  echo "$hard" > "$RUN_DIR/DEADLINE"
   echo "$plan" > "$RUN_DIR/PLAN"
   local e=(env RUN_DIR="$RUN_DIR" HARD_DEADLINE_EPOCH="$hard" WB="$WB" RESERVE_MIN="$RESERVE_MIN" GATE_FILE="$GATE_FILE" ARCHIVE_DIR="$ARCHIVE_DIR")
   # One watchdog per RUN_DIR: a --existing run on a dir whose watchdog is still
