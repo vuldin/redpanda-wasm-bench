@@ -41,7 +41,8 @@ scripts/autorun.sh status               # progress, the Grafana URL, where resul
 | `published.plan` | the published in-broker vs external comparison ([REPRODUCE.md](REPRODUCE.md)), then the resilience series | ~2.5 h | $130 |
 | `resilience.plan` | latency and correctness while a broker goes into maintenance mode or leadership is transferred, graceful drain on vs off ([RESILIENCE.md](docs/RESILIENCE.md)) | ~1.5 h | $90 |
 | `book-durability.plan` | a stateful matcher's book: depth up to 10,000 orders, and whether it survives maintenance, transfers and broker kills | ~3 h | $200 |
-| `production-shape.plan` | in-broker vs external vs co-located (also on isolated cores), all with a 1,000-deep book and cancels; p99.99; rate with that book; kills with failover | ~1.7 h | $120 |
+| `production-shape.plan` | in-broker vs external vs co-located (also on isolated cores), all with a 1,000-deep book and cancels; p99.99; rate with that book; kills with failover | ~1.8 h | $120 |
+| `relay-modes.plan` | the latency cost of delivering to in-broker consumers only after the output is quorum-acknowledged (`RELAY_DELIVERY=committed`) instead of before (`precommit`, the default) | ~30 min | $70 |
 
 `scripts/autorun.sh check <plan>` lists a plan's phases and whether they fit
 the time cap, without spending anything. Each run writes to its own
@@ -75,7 +76,7 @@ While a run is going, Grafana's URL is in `autorun.log` and in `status`.
 ## Repo layout
 
 ```
-plans/      test plans for scripts/autorun.sh (smoke, published, resilience, book-durability)
+plans/      test plans for scripts/autorun.sh (smoke, published, resilience, book-durability, production-shape, relay-modes)
 scripts/    wb (entry point), autorun.sh (unattended plan runs + watchdog),
             offline-gate.sh (every free check; autorun requires it),
             summarize-run.py (a run directory -> RESULTS.md),
@@ -96,7 +97,8 @@ ansible/    broker install and client tool deployment, plus monitoring.yaml
 bench/      the measurement scripts both arms run, plus run-resilience.sh
             (the optional maintenance/leadership-move series),
             run-durability.sh (does a stateful guest's book survive moves and
-            kills) and local-rehearsal.sh (the same on one local broker)
+            kills), local-rehearsal.sh (the same on one local broker) and
+            local-relay-delivery.sh (RELAY_DELIVERY on one local broker)
 cmd/        loadgen (rate-paced generator, source of every published number),
             fanout-load (background consumer groups), statecheck (sentinel
             orders that read a matcher's book back after an event)

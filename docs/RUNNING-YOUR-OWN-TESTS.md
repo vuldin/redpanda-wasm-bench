@@ -72,11 +72,16 @@ wasm build with the published-module checksums, `go vet`/`go test`, the bench
 shell suites, a syntax check of every script and plan, and
 `bench/local-rehearsal.sh` - one broker from your build, a snapshotting guest,
 traffic, sentinel orders, SIGKILL, restart, and a check that the book came
-back. It records the commits of all three repos in `results/GATE-PASSED`.
+back - and `bench/local-relay-delivery.sh`, which runs the e2 harness on one
+local broker with `RELAY_DELIVERY=precommit` and then `committed` and checks
+that both deliver every record and that committed waits for the output write
+(it is measurably slower on the relay hop; a broker without the option
+measures the same in both). It records the commits of all three repos in
+`results/GATE-PASSED`.
 
 `autorun.sh start` refuses to provision unless the gate passed for exactly the
 commits you are running, and refuses uncommitted bench changes. Commit first,
-then gate, then start. `REHEARSAL=0` skips the local broker test when the
+then gate, then start. `REHEARSAL=0` skips both local broker tests when the
 broker has not changed; don't skip it after broker changes - it is the check
 that found snapshot persistence silently not working in a real broker.
 
@@ -110,7 +115,8 @@ Shipped plans:
 | `published.plan` | the published in-broker vs external comparison (REPRODUCE.md) and the resilience series | ~145 min | 3 brokers + 8 clients |
 | `resilience.plan` | the resilience series on its own: maintenance mode and leadership transfer, graceful drain unset vs set, then the module-residency A/B ([RESILIENCE.md](RESILIENCE.md)) | ~90 min | 3 brokers + 8 clients |
 | `book-durability.plan` | the 2026-10-15 book-depth + durability suite | ~171 min | 6 brokers |
-| `production-shape.plan` | the in-broker matcher against external, co-located and co-located-on-isolated-cores deployments with the same production-shaped book and order flow; long windows for p99.99; rate with that book; kills with the victim held down | ~99 min | 6 brokers |
+| `production-shape.plan` | the in-broker matcher against external, co-located and co-located-on-isolated-cores deployments with the same production-shaped book and order flow; long windows for p99.99; rate with that book; kills with the victim held down | ~107 min | 6 brokers |
+| `relay-modes.plan` | what waiting for the output quorum costs in-broker consumers: `RELAY_DELIVERY=precommit` vs `committed`, interleaved, at fan-out 1 and 20 | ~30 min | 6 brokers |
 
 `smoke`, `published` and `book-durability`, one after the other, is the full
 set (`published` already includes the resilience series). They use different
@@ -135,6 +141,7 @@ refer to `$RUN_DIR`.
 | `CAP_HOURS` (5) | wall-clock cap; the deadline is also pulled in to your credentials' expiry minus the reserve |
 | `RESERVE_MIN` (25) | time held back for fetch, archive, teardown, verify |
 | `KEEP_CLUSTER=1` | skip the end-of-run teardown to keep iterating; the watchdog still tears down at the deadline |
+| `EXPORT_RESERVE_S` (900), `EXPORT_MIN_S` (600), `EXPORT_MAX_S` (3600) | the end-of-run metrics export gets the time left before the deadline less `EXPORT_RESERVE_S`, clamped to [min, max]; a full-scope dump runs ~50s per measured window |
 | `RUN_DIR`, `ARCHIVE_DIR` | where results go; ARCHIVE_DIR also gets a sha256-checked tarball |
 
 Credentials: the run exports your role credentials once at start, so it
@@ -177,6 +184,10 @@ be zero, are in [MONITORING.md](MONITORING.md).
   `GUEST=book-matcher`, `STATE=off|snapshot`, `SNAPSHOT_EVERY_MS`,
   `CANCEL_FRACTION` (share of input records that are cancels, with as many
   passive inserts), `MODE=bookdepth` with `BOOKDEPTH_LEVELS`.
+  `RELAY_DELIVERY=precommit|committed` (needs a broker with the option) sets
+  when in-broker relay consumers get the producer's output: before its
+  durable write (default) or after a quorum has acknowledged it. It is set on
+  the producing transform and recorded in the report fingerprint.
 - **`run durability`** (from your machine, because a kill needs ssh to the
   leader) - per trial: fresh topics, deploy book-matcher, traffic over a
   preloaded book, sentinel orders in waves at T-10/-6/-3/-1/-0.3s, the action
