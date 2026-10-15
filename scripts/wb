@@ -93,6 +93,7 @@ TFVARS_MULTI="r8id-8xl-wasm-multi-az.tfvars"
 REDPANDA_BIN="${REDPANDA_BIN:-$REDPANDA_SRC/bazel-bin/src/v/redpanda/redpanda}"
 REMOTE_BIN=/opt/redpanda/bin/redpanda.real
 REMOTE_TOOLS=/opt/wasm-bench
+CLUSTER_UP_MARK="$HERE/.wb-cluster-up-at"
 
 # Properties whose value the running broker only picks up at boot. `wb set`
 # rolls the cluster after changing any of these. Keep in sync with
@@ -461,6 +462,10 @@ cmd_up() {
   # switch-topology.sh does the capacity probe and the instance-count check.
   # It reads the public key from BENCH_PUB_KEY, defaulting to id_rsa.pub - the
   # export below is why the right key gets imported.
+  # Marks when THIS cluster came up, so teardown can tell whether its metrics
+  # were exported (a bundle newer than this) rather than trusting whatever
+  # bundle happens to be newest.
+  [ -f "$CLUSTER_UP_MARK" ] || date +%s > "$CLUSTER_UP_MARK"
   ( cd "$TF" && BENCH_PUB_KEY="$BENCH_PUB_KEY" BENCH_SSH_KEY="$BENCH_SSH_KEY" \
       bash "$HERE/switch-topology.sh" "$topo" ) || die "provisioning failed (capacity? see output above)"
   load_env refresh
@@ -960,10 +965,17 @@ cmd_teardown() {
   # want.
   load_env 2>/dev/null || true
   if [ -n "${MONITOR_PUB// /}" ]; then
-    local latest bundle
-    latest="$(ls -dt "$ROOT"/results/reproduce-* 2>/dev/null | head -1)"
-    bundle=""
-    [ -n "$latest" ] && [ -d "$latest/metrics-bundle" ] && bundle="$latest/metrics-bundle"
+    local bundle=""
+    # A bundle counts only if it was written after this cluster came up. The
+    # old check took the newest results/reproduce-* bundle, which on
+    # 2026-10-15 was a September one: teardown called the metrics exported
+    # and destroyed the only copy of that day's Prometheus data.
+    if [ -f "$CLUSTER_UP_MARK" ]; then
+      bundle="$(find "$ROOT/results" -maxdepth 3 -type d -name metrics-bundle -newer "$CLUSTER_UP_MARK" 2>/dev/null | head -1)"
+    else
+      local latest; latest="$(ls -dt "$ROOT"/results/reproduce-* 2>/dev/null | head -1)"
+      [ -n "$latest" ] && [ -d "$latest/metrics-bundle" ] && bundle="$latest/metrics-bundle"
+    fi
     if [ -z "$bundle" ]; then
       echo ""
       echo "  NOTE: no metrics bundle found under ${latest:-results/}."
@@ -990,7 +1002,7 @@ cmd_teardown() {
     || die "destroy failed - CHECK THE CONSOLE, instances may still be billing"
 
   verify_torn_down
-  rm -f "$ENVFILE"
+  rm -f "$ENVFILE" "$CLUSTER_UP_MARK"
 }
 
 # The region the cluster was actually applied in.

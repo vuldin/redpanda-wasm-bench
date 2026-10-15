@@ -123,6 +123,24 @@ work lands on specific shards, and one saturated shard against twelve idle ones
 is the shape of this workload's ceiling. `num_cores` is 13 on `r8id.8xlarge`,
 not 32, since SMT is off and cores are reserved for the OS.
 
+The last row, **stateful transforms**, is for guests that persist state
+(`book-matcher STATE=snapshot`) and for the durability series:
+
+- `redpanda_transform_state_recovery_failures` has to be zero. Non-zero means
+  a persisted snapshot existed and could not be delivered into the guest on
+  start - the guest ran, or refused to run under `require_state_recovery`,
+  without its state.
+- `redpanda_transform_state_restore_latency_seconds` is the broker copying the
+  snapshot back into the guest's region. It scales with the registered region
+  (the broker copies all of it), not with what the guest stored in it.
+- `redpanda_transform_startup_latency_seconds` is the transform's dark time on
+  each bring-up, which is paid on every leadership change; beside it, the
+  phases (engine start, offset load, state restore) that make it up. The
+  durability runner's failover figure is larger: it also includes the raft
+  election before this starts.
+- transform lag per function shows a replay (the durability runner's
+  `REPLAY=1`) as a spike draining to zero.
+
 ### relay stages
 
 One row per stage, in the order a record traverses them, each with its own
@@ -227,8 +245,17 @@ docker compose up
 ./validate.sh                         # every panel, checked
 ```
 
-`reproduce.sh` does this automatically at the end of a run, and `wb teardown`
-says something when no bundle exists, because forgetting is permanent.
+`reproduce.sh` does this automatically at the end of a run, and so does
+`scripts/autorun.sh`, before every teardown - including the watchdog's - into
+`<run-dir>/metrics-bundle`. `wb teardown` says something when no bundle newer
+than the cluster exists, because forgetting is permanent. (It used to accept
+the newest `reproduce-*` bundle of any age; on 2026-10-15 that was a September
+one, and the day's metrics were destroyed unexported.)
+
+For a durability trial to be in the bundle, its loadgen must have been
+scraped: export finds windows by when the `loadgen` target was up.
+`run-durability.sh` exposes loadgen's endpoint whenever a monitoring host
+exists.
 
 ### Why it exports from Prometheus and not Grafana
 

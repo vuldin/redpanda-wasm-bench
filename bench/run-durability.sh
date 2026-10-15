@@ -26,6 +26,7 @@ HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 WB="${WB:-$ROOT/scripts/wb}"
 eval "$("$WB" env 2>/dev/null | grep -E '^[A-Z_]+=')"
+MONITOR_PUB="${MONITOR_PUB:-}"
 : "${BROKERS:?no cluster env - is a cluster provisioned?}"
 
 ACTIONS="${ACTIONS:-maintenance transfer kill}"
@@ -162,7 +163,11 @@ run_trial() {
   # Timed window long enough to span the waves, the action and the recovery.
   local dur=75
   local lg_start; lg_start=$(now_ms)
-  CBG "nohup ./loadgen -brokers $BROKERS -input-topic $orders -receipt-source fills -fills-topic $fills \
+  # Exposed whenever there is a monitoring host: Prometheus scrapes loadgen
+  # on :9110, and `wb monitor export` finds a trial's window by when that
+  # target was up. Without it the durability trials were invisible to export.
+  local lgm=""; [ -n "${MONITOR_PUB// /}" ] && lgm="-metrics-listen :9110"
+  CBG "nohup ./loadgen $lgm -brokers $BROKERS -input-topic $orders -receipt-source fills -fills-topic $fills \
       -rate $RATE -orders-per-record $OPR -producers $PRODUCERS -payload-bytes $PAYLOAD -acks all -linger-ms 0 \
       -book-depth $depth -cancel-fraction $CANCEL_FRACTION -warmup 5s -duration ${dur}s -drain 20s -sample-every 1 \
       -timeline-ms 500 -metadata-min-age 250ms -retry-backoff-max 100ms \

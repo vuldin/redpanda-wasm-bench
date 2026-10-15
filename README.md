@@ -139,11 +139,13 @@ run rather than read about it afterwards.
 ```
 
 Grafana opens on anonymous viewer access, so the URL works without a login.
-Use `admin` / `wasmbench` if you want to edit. Three dashboards ship:
+Use `admin` / `wasmbench` if you want to edit. Plan runs (`scripts/autorun.sh`)
+log the URL as soon as the cluster is ready (`autorun.sh status` shows it
+too) and export the metrics before tearing down. Three dashboards ship:
 
 | dashboard | what it answers |
 |---|---|
-| overview | how fast the in-broker path is, and whether the result is admissible at all |
+| overview | how fast the in-broker path is, and whether the result is admissible at all; its last row covers stateful transforms (snapshot restore, dark time across leadership moves, recovery failures) |
 | relay stages | which of the four relay stages the microseconds are in |
 | measurement health | whether this run's numbers can be trusted |
 
@@ -355,9 +357,10 @@ means a long-running cluster is on a clock you don't control.
 ## Repo layout
 
 ```
-plans/      test plans for scripts/autorun.sh (smoke, book-durability)
+plans/      test plans for scripts/autorun.sh (smoke, published, book-durability)
 scripts/    wb (entry point), autorun.sh (unattended plan runs + watchdog),
             offline-gate.sh (every free check; autorun requires it),
+            summarize-run.py (a run directory -> RESULTS.md),
             deploy-transform.sh (admin-API deploy with state options and the
             trusted-module grant), select-region.sh, size-clients.sh,
             lib-capacity.sh, switch-topology.sh, deploy-wasm-cluster.sh,

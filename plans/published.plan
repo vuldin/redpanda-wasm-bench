@@ -1,0 +1,34 @@
+# The published comparison (REPRODUCE.md): in-broker wasm vs a traditional
+# external deployment, plus the optional resilience series - on the same
+# cluster, unattended, with automatic metrics export and teardown.
+#
+#   scripts/autorun.sh check plans/published.plan
+#   scripts/autorun.sh start plans/published.plan
+#
+# 3 brokers + 8 clients + monitoring, ~$40/hr; ~2.5h of phases.
+#
+# NOT YET RUN END TO END THROUGH autorun.sh (wb reproduce itself is the
+# path every published number came from). If a phase fails, the phase log
+# says why; `wb reproduce` with SKIP_PROVISION=true is the manual equivalent.
+
+TOPOLOGY=single-az
+# The published configuration: the playbook defaults.
+DEPLOY_ARGS=()
+
+EXTERNAL_LADDER="1 10 50 500"
+REGIONS="us-east-1 us-east-2 us-west-2 eu-west-1"
+
+# Sizing and region choice must precede provisioning (they write
+# terraform/clients.auto.tfvars and region.auto.tfvars). reproduce.sh does
+# them itself when it provisions; here autorun provisions, so do them first.
+pre_up() {
+  EXTERNAL_LADDER="$EXTERNAL_LADDER" bash "$ROOT/scripts/size-clients.sh" \
+    && REGIONS="$REGIONS" bash "$ROOT/scripts/select-region.sh"
+}
+
+# wb reproduce reads its settings from the environment.
+export SKIP_PROVISION=true EXTERNAL_LADDER
+export OUT_LOCAL="$RUN_DIR/reproduce"
+
+phase reproduce 100 reproduce
+phase resilience 45 run resilience

@@ -328,6 +328,69 @@ def overview():
     ))
     y += 6
 
+    # Guest-state persistence and leadership moves (the durability series).
+    # All of these come from the transform processor's own probe, so they
+    # exist on every broker running the branch whether or not a guest
+    # snapshots; the state panels just stay at zero for stateless guests.
+    p.append(row(6, "Stateful transforms: restore, dark time, recovery", y)); y += 1
+    p.append(stat(
+        60, "state recovery failures", 0, y, 4, 6,
+        [("sum(redpanda_transform_state_recovery_failures) or vector(0)", "failures")],
+        thresholds={"mode": "absolute", "steps": [
+            {"color": "green", "value": None}, {"color": "red", "value": 1}]},
+        desc=("A persisted snapshot existed but could not be delivered into the "
+              "guest on start (lost capability grant, or the guest never "
+              "registered its region). Must be zero. With "
+              "require_state_recovery the processor also refuses to start."),
+    ))
+    p.append(panel(
+        61, "snapshot restore latency", 4, y, 7, 6,
+        [(hist_quantile("redpanda_transform_state_restore_latency_seconds", q), lab)
+         for q, lab in QUANTILES],
+        unit="s", legend_table=True,
+        desc=("Writing the persisted snapshot back into the guest's region on "
+              "start. Scales with the region size, not the book: the broker "
+              "copies the whole registered region. ~1ms for a 4 MiB region; "
+              "the guest's own decode (its `STATE restored restore_us=`) comes "
+              "on top."),
+    ))
+    p.append(panel(
+        62, "transform dark time (startup)", 11, y, 7, 6,
+        [(hist_quantile("redpanda_transform_startup_latency_seconds", q), lab)
+         for q, lab in QUANTILES],
+        unit="s", legend_table=True,
+        desc=("From the broker beginning to bring the partition's transform up "
+              "to it running: paid on every leadership change. Read it next to "
+              "the durability runner's failover figure, which also includes "
+              "the raft election before this starts."),
+    ))
+    p.append(panel(
+        63, "startup phases", 18, y, 6, 6,
+        [(hist_quantile("redpanda_transform_engine_start_latency_seconds", 0.99), "engine start p99"),
+         (hist_quantile("redpanda_transform_offset_load_latency_seconds", 0.99), "offset load p99"),
+         (hist_quantile("redpanda_transform_state_restore_latency_seconds", 0.99), "state restore p99")],
+        unit="s", legend_table=True,
+        desc=("Where the dark time goes. Offset load is the phase that cannot "
+              "start before the broker leads the partition, so it is the floor."),
+    ))
+    y += 6
+    p.append(panel(
+        64, "transform lag by function", 0, y, 12, 6,
+        [("sum by (function_name) (redpanda_transform_lag)", "{{function_name}}")],
+        unit="short", legend_table=True,
+        desc=("Records waiting on the input topic. A replay deploy (the "
+              "durability runner's REPLAY=1) shows here as a spike draining to "
+              "zero; its width is the replay time."),
+    ))
+    p.append(panel(
+        65, "transform failures and given-up batches", 12, y, 12, 6,
+        [("sum by (function_name) (rate(redpanda_transform_failures[$__rate_interval]))", "failures {{function_name}}"),
+         ("sum by (function_name) (rate(redpanda_transform_batches_given_up[$__rate_interval]))", "given up {{function_name}}")],
+        unit="short", legend_table=True,
+        desc="Both must be zero; a broker kill can show one failure on the dying node.",
+    ))
+    y += 6
+
     return dashboard(
         "wasm-bench-overview", "wasm bench: overview", p,
         desc=("The in-broker wasm transform benchmark at a glance. Latency "

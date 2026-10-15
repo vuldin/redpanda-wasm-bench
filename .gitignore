@@ -10,3 +10,4 @@
 /scripts/.wb-env
 /scripts/__pycache__/
 wb.local.env
+/scripts/.wb-cluster-up-at

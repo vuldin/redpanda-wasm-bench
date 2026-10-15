@@ -67,6 +67,9 @@ phase() {
 load_plan() {
   local plan="$1"
   [ -f "$plan" ] || die "no such plan: $plan"
+  # Plans may refer to RUN_DIR (e.g. for a runner's own output directory);
+  # `check` has none yet, so give it a placeholder rather than tripping set -u.
+  : "${RUN_DIR:=<run-dir>}"
   # shellcheck disable=SC1090
   source "$plan"
   [ "${#PHASE_NAMES[@]}" -gt 0 ] || die "plan $plan defines no phases"
@@ -160,6 +163,37 @@ hygiene() {
   for ((i = 0; i < n; i++)); do
     timeout 60 "$WB" ssh "broker$i" "systemctl is-active --quiet redpanda || sudo systemctl start redpanda" >/dev/null 2>&1 || true
   done
+}
+
+# Where to watch. Written once the cluster is up, so `status` and RESULTS.md
+# can show it. The security group admits only the address that ran `wb up`.
+monitor_info() {
+  timeout 120 "$WB" monitor status > "$RUN_DIR/MONITORING.txt" 2>&1 || true
+  local g; g="$(grep -m1 -E 'Grafana' "$RUN_DIR/MONITORING.txt" | awk '{print $2}')"
+  if [ -n "$g" ]; then
+    log "WATCH: Grafana $g (anonymous viewer; admin/wasmbench to edit) - start with the 'wasm bench: overview' dashboard"
+  else
+    log "no monitoring host in this cluster (monitor_count=0) - nothing to watch or export"
+  fi
+}
+
+# The monitoring host holds the only copy of the scraped metrics and teardown
+# destroys it, so export before every teardown, time-boxed so a slow export
+# can never hold a billing cluster.
+export_metrics() {
+  local cap="${1:-900}"
+  grep -q 'Grafana' "$RUN_DIR/MONITORING.txt" 2>/dev/null || { [ "${DRY_RUN:-0}" = 1 ] || return 0; }
+  log "exporting the scraped metrics (measured windows) to metrics-bundle/"
+  if timeout "$cap" "$WB" monitor export "$RUN_DIR" >> "$RUN_DIR/metrics-export.log" 2>&1; then
+    log "metrics exported: $RUN_DIR/metrics-bundle (open: cd metrics-bundle && docker compose up)"
+  else
+    log "WARN: metrics export failed or timed out (see metrics-export.log); the cluster is torn down regardless"
+  fi
+}
+
+summarize() {
+  python3 "$ROOT/scripts/summarize-run.py" "$RUN_DIR" > "$RUN_DIR/RESULTS.md" 2>> "$RUN_DIR/autorun.log" \
+    && log "results summary: $RUN_DIR/RESULTS.md" || log "WARN: summarize-run.py failed"
 }
 
 fetch_results() {
@@ -256,14 +290,23 @@ run() {
 
   if [ "$existing" = 0 ]; then
     date +%s > "$RUN_DIR/PROVISIONED_AT"
+    # A plan may define pre_up() for steps that must precede provisioning,
+    # e.g. sizing the client fleet. A failure stops the run before any spend.
+    if declare -F pre_up >/dev/null; then
+      log "pre_up: running the plan's pre-provisioning step"
+      if ! (pre_up) >> "$RUN_DIR/pre_up.log" 2>&1; then
+        refuse "the plan's pre_up step failed (see pre_up.log)" pre_up
+      fi
+    fi
     run_phase P0-up 25 "up ${TOPOLOGY:?plan must set TOPOLOGY}" || { finish "provisioning failed"; return 1; }
-    local d; printf -v d '%q ' "${DEPLOY_ARGS[@]}"
+    local d=""; [ "${#DEPLOY_ARGS[@]}" -gt 0 ] && printf -v d '%q ' "${DEPLOY_ARGS[@]}"
     run_phase P0-deploy 25 "deploy $d" || { finish "deploy failed"; return 1; }
     run_phase P0-ready 10 "ready" || { hygiene; run_phase P0-ready-2 10 "ready" || { finish "cluster never ready"; return 1; }; }
     "$WB" doctor >> "$RUN_DIR/doctor.log" 2>&1 || log "WARN: wb doctor reported problems (see doctor.log)"
   else
     hygiene
   fi
+  monitor_info
 
   local i
   for i in "${!PHASE_NAMES[@]}"; do
@@ -276,6 +319,8 @@ run() {
 finish() {
   local why="$1"
   fetch_results
+  export_metrics 900
+  summarize
   write_status "$why (pre-teardown)"
   archive
   if [ "${KEEP_CLUSTER:-0}" = 1 ]; then
@@ -318,6 +363,8 @@ watchdog() {
   rmdir "$RUN_DIR/.teardown.lock" 2>/dev/null || true
   record watchdog fired 0 -
   fetch_results
+  export_metrics 600
+  summarize
   teardown_and_verify watchdog
   write_status "watchdog fired at the hard deadline"
   archive
@@ -387,6 +434,8 @@ cmd_status() {
     if [ -f "$d/$p.pid" ] && kill -0 "$(cat "$d/$p.pid")" 2>/dev/null; then echo "$p: running (pid $(cat "$d/$p.pid"))"; else echo "$p: not running"; fi
   done
   [ -f "$d/DONE" ] && echo "DONE - teardown: $(cat "$d/TEARDOWN-RESULT" 2>/dev/null)"
+  grep -E 'Grafana|Prometheus' "$d/MONITORING.txt" 2>/dev/null | sed 's/^ */watch: /'
+  [ -f "$d/RESULTS.md" ] && echo "results: $d/RESULTS.md"
   echo "--- phases"; cat "$d/phases.tsv" 2>/dev/null
   echo "--- last log lines"; tail -5 "$d/autorun.log" 2>/dev/null
 }

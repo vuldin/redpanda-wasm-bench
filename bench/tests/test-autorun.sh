@@ -8,7 +8,12 @@
 #   3. retry: a phase that fails once is retried and recorded both ways.
 #   4. --existing: no provisioning phases run.
 #   5. watchdog: a phase that hangs past the hard deadline is killed by the
-#      independent watchdog, which performs the single teardown.
+#      independent watchdog, which performs the single teardown - after
+#      exporting the metrics.
+#   6. observability: the Grafana URL is logged, metrics are exported BEFORE
+#      teardown, and RESULTS.md is written.
+#   7. pre_up: runs before `wb up`; a failing pre_up stops the run before any
+#      provisioning.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 AUTORUN="$HERE/../../scripts/autorun.sh"
@@ -26,6 +31,11 @@ case "$1" in
       *FAILONCE*) if [ ! -f "$STUB_LOG.failed" ]; then touch "$STUB_LOG.failed"; exit 1; fi ;;
     esac ;;
   teardown) echo teardown >> "$STUB_LOG.teardowns" ;;
+  monitor)
+    case "$2" in
+      status) echo "  Grafana     http://203.0.113.9:3000"; echo "  Prometheus  http://203.0.113.9:9090" ;;
+      export) mkdir -p "$3/metrics-bundle" ;;
+    esac ;;
   env) echo 'BROKER_PUB="1.1.1.1"' ;;
 esac
 exit 0
@@ -62,6 +72,21 @@ check "quoting: a spaced value stays one argument" "grep -q 'ARGC=4 run e2 LEVEL
 check "@RUN_DIR@ substituted" "grep -q 'OUT=$R3/second' '$T/s3'"
 check "retry: one teardown" "[ \"\$(wc -l < '$T/s3.teardowns')\" = 1 ]"
 
+# 6: observability on the normal path (run 3's logs)
+check "observability: Grafana URL logged" "grep -q 'WATCH: Grafana http://203.0.113.9:3000' '$R3/autorun.log'"
+check "observability: export ran before teardown" "awk '/ monitor export /{e=NR} / teardown /{t=NR} END{exit !(e && t && e < t)}' '$T/s3'"
+check "observability: metrics-bundle and RESULTS.md written" "[ -d '$R3/metrics-bundle' ] && grep -q '^# Results' '$R3/RESULTS.md'"
+
+# 7: pre_up
+printf 'pre_up() { echo ran > "%s/preup-ran"; }\n' "$T" | cat - "$T/test.plan" > "$T/preup.plan"
+printf 'pre_up() { return 3; }\n' | cat - "$T/test.plan" > "$T/preup-bad.plan"
+R7="$T/r7"; mkdir -p "$R7"
+base "$T/s7" "$R7" RESERVE_MIN=0 HARD_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) bash "$AUTORUN" __run "$T/preup.plan" 0 >/dev/null 2>&1
+check "pre_up: ran before provisioning" "[ -f '$T/preup-ran' ] && grep -q 'ARGC=2 up single-az' '$T/s7'"
+R8="$T/r8"; mkdir -p "$R8"
+base "$T/s8" "$R8" RESERVE_MIN=0 HARD_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) bash "$AUTORUN" __run "$T/preup-bad.plan" 0 >/dev/null 2>&1
+check "pre_up: a failure provisions nothing" "! grep -q ' up ' '$T/s8' 2>/dev/null && grep -q 'pre_up step failed' '$R8/autorun.log'"
+
 # 4: --existing
 R4="$T/r4"; mkdir -p "$R4"
 base "$T/s4" "$R4" RESERVE_MIN=0 HARD_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) bash "$AUTORUN" __run "$T/test.plan" 1 >/dev/null 2>&1
@@ -75,6 +100,7 @@ base "$T/s5" "$R5" RESERVE_MIN=-5 HARD_DEADLINE_EPOCH=$(( $(date +%s) + 30 )) ba
 for _ in $(seq 1 90); do [ -f "$R5/DONE" ] && break; sleep 1; done
 check "watchdog: run marked DONE" "[ -f '$R5/DONE' ]"
 check "watchdog: it was the watchdog that tore down" "grep -q 'watchdog: TEARDOWN' '$R5/autorun.log'"
+check "watchdog: metrics exported before its teardown" "awk '/ monitor export /{e=NR} / teardown /{t=NR} END{exit !(e && t && e < t)}' '$T/s5'"
 check "watchdog: exactly one teardown" "[ \"\$(wc -l < '$T/s5.teardowns' 2>/dev/null)\" = 1 ]"
 check "watchdog: run process is gone" "! kill -0 \$(cat '$R5/autorun.pid') 2>/dev/null"
 
