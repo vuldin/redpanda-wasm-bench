@@ -23,16 +23,17 @@ Grafana), runs a test plan, exports the metrics, writes a results summary,
 tears the cluster down and verifies that through the EC2 API. A separate
 watchdog tears down at a hard deadline even if the run itself dies.
 
+First time only: install the tools and build the broker branch and the guests,
+as in [docs/SETUP.md](docs/SETUP.md) (the broker build takes 1-2 hours cold).
+Then:
+
 ```bash
 cp wb.local.env.example wb.local.env    # once: AWS profile, ssh key, checkout paths
 aws sso login --profile <your-profile>
-scripts/offline-gate.sh                 # every free check, incl. a local broker crash test
+scripts/offline-gate.sh                 # every free check: tools, builds, tests, a local broker crash test
 scripts/autorun.sh start plans/smoke.plan
 scripts/autorun.sh status               # progress, the Grafana URL, where results are
 ```
-
-Prerequisites (tools, building the broker branch and the guests) are in
-[docs/SETUP.md](docs/SETUP.md).
 
 | plan | what it tests | phases | cost, roughly |
 |---|---|---|---|

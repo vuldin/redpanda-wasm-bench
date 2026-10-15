@@ -20,6 +20,10 @@ fail=0
 step() { echo ""; echo "=== $*"; }
 bad() { echo "GATE FAIL: $*" >&2; fail=1; }
 
+step "wb doctor: tools, AWS session, keys, local build, guest artifacts"
+"$ROOT/scripts/wb" doctor >/tmp/gate-doctor-$$.log 2>&1 && echo "  ok" || { bad "wb doctor"; grep -vE '^\s*OK|^===|^$' /tmp/gate-doctor-$$.log | head -10; }
+rm -f /tmp/gate-doctor-$$.log
+
 step "clean working trees (a gate result must describe committed code)"
 [ -z "$(git -C "$ROOT" status --porcelain -- . ':!results')" ] || bad "uncommitted changes in $ROOT"
 [ -z "$(git -C "$CLIENTS_REPO" status --porcelain)" ] || bad "uncommitted changes in $CLIENTS_REPO"
@@ -38,6 +42,15 @@ if [ -x "$REDPANDA_BIN" ]; then
   echo "  $(sha256sum "$REDPANDA_BIN" | cut -c1-16) $REDPANDA_BIN (built $(date -r "$REDPANDA_BIN" '+%F %T'))"
 else
   bad "no broker binary at $REDPANDA_BIN"
+fi
+
+step "the external host (bin/wasm-client) was built after its source last changed"
+hostbin="$CLIENTS_REPO/bin/wasm-client"
+if [ -x "$hostbin" ]; then
+  newer="$(find "$CLIENTS_REPO/host" -type f -name '*.go' -newer "$hostbin" 2>/dev/null | head -3)"
+  [ -z "$newer" ] || { bad "host sources changed after $hostbin was built - run: make -C $CLIENTS_REPO build-host"; echo "$newer" | sed 's/^/    /'; }
+else
+  bad "no $hostbin - run: make -C $CLIENTS_REPO build-host"
 fi
 
 step "guests: rust tests, wasm build, published modules unchanged"
