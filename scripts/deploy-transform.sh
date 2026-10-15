@@ -11,7 +11,12 @@
 # The trust step is a read-merge of wasm_trusted_modules, so other entries
 # (and other capabilities on this sha) survive.
 #
-# usage: deploy-transform.sh ADMIN_URL NAME INPUT_TOPIC OUTPUT_TOPIC WASM \
+# ADMIN_URL may be a comma-separated list. Deploy and config writes are
+# retried across all of them with backoff: a broker that is not the leader of
+# the partition the request needs answers 503 "Leader not available", which
+# rpk retries elsewhere and so must this.
+#
+# usage: deploy-transform.sh ADMIN_URL[,ADMIN_URL...] NAME INPUT_TOPIC OUTPUT_TOPIC WASM \
 #          [--require-state-recovery] [--from-start] [--env K=V]...
 set -euo pipefail
 admin="$1" name="$2" input="$3" output="$4" wasm="$5"
@@ -35,13 +40,27 @@ admin, name, inp, out, wasm, require, offset, *envs = sys.argv[1:]
 data = open(wasm, "rb").read()
 sha = hashlib.sha256(data).hexdigest()
 
-def req(method, path, body=None, ctype="application/json"):
-    r = urllib.request.Request(admin + path, data=body, method=method, headers={"Content-Type": ctype})
+admins = [a.strip() for a in admin.split(",") if a.strip()]
+
+def req_once(base, method, path, body, ctype):
+    r = urllib.request.Request(base + path, data=body, method=method, headers={"Content-Type": ctype})
     try:
         with urllib.request.urlopen(r, timeout=60) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
+    except Exception as e:  # connection refused, timeout: try the next broker
+        return 599, str(e).encode()
+
+def req(method, path, body=None, ctype="application/json"):
+    st, out = 599, b"no admin endpoint"
+    for attempt in range(8):
+        for base in admins:
+            st, out = req_once(base, method, path, body, ctype)
+            if st < 500:
+                return st, out
+        time.sleep(min(2 * (attempt + 1), 8))
+    return st, out
 
 st, body = req("GET", "/v1/cluster_config")
 if st != 200:

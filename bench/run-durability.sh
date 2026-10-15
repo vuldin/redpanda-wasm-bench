@@ -143,7 +143,7 @@ run_trial() {
   C "$RPKR topic create $orders -p 1 -r $RF -c write.caching=true >/dev/null && $RPKR topic create $fills -p 1 -r $RF -c write.caching=true >/dev/null" \
     || { say "  FAIL: topic create"; return 1; }
   local req=""; [ "$STATE" = snapshot ] && req="--require-state-recovery"
-  C "bash ./deploy-transform.sh $ADMIN_URL $name $orders $fills ./book-matcher.wasm $req \
+  C "bash ./deploy-transform.sh $ADMIN_URLS $name $orders $fills ./book-matcher.wasm $req \
       --env RISK_LIMIT=0 --env STATE=$STATE --env SEQ_LANES=$PRODUCERS --env SNAPSHOT_EVERY_MS=$SNAPSHOT_EVERY_MS" \
     >> "$base.deploy.txt" 2>&1 || { say "  FAIL: deploy (see $base.deploy.txt)"; cleanup_trial "$name" "$orders" "$fills"; return 1; }
   wait_running "$name" 90 || { say "  FAIL: transform never running"; cleanup_trial "$name" "$orders" "$fills"; return 1; }
@@ -247,7 +247,7 @@ replay_arm() {
   local T=$(( $(now_ms) + 3000 ))
   C "./statecheck place -brokers $BROKERS -topic $orders -per-wave $PER_WAVE -waves 1 -at-unix-ms $T -out /tmp/$tag.replay.placed.json > /tmp/$tag.replay.place.log 2>&1"
   local t0; t0=$(now_ms)
-  C "bash ./deploy-transform.sh $ADMIN_URL $rname $orders $rfills ./book-matcher.wasm --from-start \
+  C "bash ./deploy-transform.sh $ADMIN_URLS $rname $orders $rfills ./book-matcher.wasm --from-start \
       --env RISK_LIMIT=0 --env STATE=off --env SEQ_LANES=$PRODUCERS" >> "$base.replay.deploy.txt" 2>&1 || { say "  replay: deploy failed"; return 1; }
   local i lag="" running_at="" caught_at=""
   for i in $(seq 1 600); do

@@ -438,7 +438,7 @@ deploy_producer() {
       wasm="$BIN/book-matcher.wasm"
       [ -f "$wasm" ] || { echo "ERROR: $wasm not found" >&2; return 1; }
       echo "--- deploying producer $name (book-matcher STATE=$STATE) ---"
-      bash "$BIN/deploy-transform.sh" "$ADMIN_URL" "$name" "$orders" "$fills" "$wasm" \
+      bash "$BIN/deploy-transform.sh" "$ADMIN_URLS" "$name" "$orders" "$fills" "$wasm" \
         --env RISK_LIMIT=0 --env "STATE=$STATE" --env "SEQ_LANES=$PRODUCERS" \
         --env "SNAPSHOT_EVERY_MS=$SNAPSHOT_EVERY_MS" >/dev/null || return 1
       wait_for_transforms_running "$name"
