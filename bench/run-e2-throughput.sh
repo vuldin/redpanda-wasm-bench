@@ -688,9 +688,19 @@ for level in $SWEEP; do
     bookdepth)
       this_depth="$level"
       # The depth guest must be one that keeps a book at all - passthrough
-      # has none, so a depth sweep against it measures nothing.
-      this_guest="matcher" ;;
+      # has none, so a depth sweep against it measures nothing. Envelopes
+      # need the envelope-capable guest; it also decodes the single-order
+      # preload records.
+      if [ "$this_opr" -gt 1 ]; then this_guest="mass-matcher"; else this_guest="matcher"; fi ;;
   esac
+  # Any envelope level, in ANY mode: a latency sample is one envelope, so the
+  # sampled population shrinks by N. This used to live only in the massquote
+  # case, so a rate or depth sweep at ORDERS_PER_RECORD>1 sampled 10x too
+  # sparsely for the tail figures it exists to produce.
+  if [ "$this_opr" -gt 1 ]; then
+    this_sample_every=1
+    [ "$MODE" != massquote ] && [ "$this_guest" = matcher ] && this_guest="mass-matcher"
+  fi
   # Fail before the level runs, not after. A guest that cannot decode what
   # loadgen sends drops every record and reports zero receipts, which costs a
   # full level of cluster time to discover and reads like a broker problem
