@@ -7,6 +7,71 @@ broker, client and on the monitoring host itself.
 so the URL exists while a run is happening rather than after it. `wb monitor`
 prints it.
 
+## Using the dashboards
+
+`wb up` brings up Prometheus and Grafana on their own instance before the
+broker binary is deployed and before anything is measured, so you can watch a
+run rather than read about it afterwards.
+
+```bash
+./scripts/wb monitor              # the URL, plus whether it's reachable
+./scripts/wb monitor deploy       # redeploy the stack
+./scripts/wb monitor dashboards   # regenerate and push panels, no restart
+./scripts/wb monitor check        # validate every panel query against Prometheus
+./scripts/wb monitor export       # bundle the metrics so they outlive the cluster
+```
+
+Grafana opens on anonymous viewer access, so the URL works without a login.
+Use `admin` / `wasmbench` if you want to edit. Plan runs (`scripts/autorun.sh`)
+log the URL as soon as the cluster is ready (`autorun.sh status` shows it
+too) and export the metrics before tearing down. Three dashboards ship:
+
+| dashboard | what it answers |
+|---|---|
+| overview | how fast the in-broker path is, and whether the result is admissible at all; its last row covers stateful transforms (snapshot restore, dark time across leadership moves, recovery failures) |
+| relay stages | which of the four relay stages the microseconds are in |
+| measurement health | whether this run's numbers can be trusted |
+
+Start with the overview. It leads on `emit -> guest`, the single span worth
+quoting for the in-broker arm, and puts the correctness gates next to it as
+stat panels: relay drops, transform failures and batches given up all have to
+be zero, and active subscriptions has to match the fan-out you asked for. A
+fast number with a non-zero drop rate is the latency of an incomplete stream.
+
+Measurement health exists because of METHODOLOGY 29. Background consumer
+groups co-located with loadgen starved it, its send lateness went past the
+pacing interval, and the latency it reported included its own queueing. That
+reads exactly like an architectural result and nothing broker-side showed it,
+so the client host panels come first on that dashboard.
+
+A few things worth knowing before you read anything off these:
+
+- The scrape is not the measurement. Every published number comes from
+  loadgen's own histograms and its own before/after snapshots. Prometheus is
+  there to be watched, which is why the scrape interval is chosen for
+  legibility rather than defended as methodology.
+- The relay stage panels need `relay_stage_metrics_enabled`, which is off by
+  default because each stage costs a clock read on the relay hot path.
+  `wb reproduce` turns it on for the in-broker arm.
+- The `loadgen` scrape target is down between runs. loadgen is a per-window
+  batch process, not a service, so that's correct rather than broken.
+- `wb monitor check` is the one to run if a panel looks empty. It asks
+  Prometheus every dashboard query and separates "this metric doesn't exist"
+  from "this feature is off", which Grafana renders identically.
+
+### If Grafana won't load
+
+`wb monitor` tells you, and prints the fix. The cause is almost always the
+security group: terraform admits the single address an IP reflector reported
+for this machine at apply time. That breaks if your egress IP has changed
+since, or if it isn't stable per flow, which is common behind carrier-grade
+NAT where a browser can leave from a different address than the reflector
+reported. Either way the symptom is a connection that times out rather than
+one that's refused, while the VPC, route table and security group all look
+correct, so it reads as a broken Grafana. Widen the range with
+`operator_extra_cidrs` and re-apply; that changes only the security group rule
+and doesn't touch the instances.
+
 ## Purpose
 
 To watch a run, and to tell a fast number from an admissible one.

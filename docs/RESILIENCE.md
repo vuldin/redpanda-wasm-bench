@@ -1,8 +1,9 @@
 # Latency during leadership movement
 
 What an in-broker wasm deployment costs while its partition changes leader,
-and how long until it's normal again. Produced by `wb run resilience`, see the
-README section for how to run it.
+and how long until it's normal again. Produced by `wb run resilience`.
+
+To run it yourself, see [Running the series](#running-the-series) at the end; `plans/resilience.plan` runs it unattended.
 
 This is separate from [REPRODUCE.md](../REPRODUCE.md) on purpose. Those tables
 are steady state, and folding a disturbance into them would make them
@@ -353,3 +354,77 @@ having happened after it ended.
   enough to eliminate duplicates and the e2e cost scales with the budget, so
   larger values weren't worth cluster time. If you need to know what a
   particular budget costs, sweep it with `DRAIN_TIMEOUT_SET`.
+
+## Running the series
+
+The published tables measure steady state. This series is separate, and
+deliberately not part of `wb reproduce`, since folding a disturbance into
+those numbers would make them incomparable.
+
+Unattended, with provisioning, metrics export and teardown handled:
+
+```bash
+scripts/autorun.sh start plans/resilience.plan
+```
+
+By hand, on a cluster you brought up with `wb up` and `wb deploy`:
+
+```bash
+# the four-arm series: two actions, drain unset vs 200ms
+./scripts/wb run resilience ACTIONS="maintenance transfer" DRAIN_AB=1
+
+# the eight-arm series the published figures come from, adding the
+# residency A/B on top
+./scripts/wb run resilience ACTIONS="maintenance transfer" DRAIN_AB=1 \
+  RESIDENCY_LEVELS="0 8"
+```
+
+It answers three questions per action, against a cluster already running the
+wasm arm:
+
+- Does the deployment survive? `missing` receipts must be zero. Anything else
+  is data loss, not a slowdown.
+- What does latency do while it happens? A baseline window, then the same
+  window with the action injected part-way through.
+- How long until it's normal again? Repeated short windows until p99 is back
+  within `RECOVERY_BAND` of the measured baseline and holds there for
+  `RECOVERY_SUSTAIN` windows. Both conditions matter. Without the second, one
+  lucky window reads as recovered and time-to-baseline is understated exactly
+  when it's most interesting.
+
+The baseline is measured rather than assumed, because absolute latency moves
+between cluster instantiations.
+
+### Duplicates are expected
+
+Transforms are at-least-once. A leadership move discards work that was read
+but not committed, and the next owner reprocesses it, which shows up
+downstream as duplicate output because a transform takes a new producer id
+whenever it starts. So `duplicate` receipts should be non-zero on every
+planned move.
+
+That's why `DRAIN_AB=1` (the default) runs each action twice, once with
+`data_transforms_graceful_transfer_timeout_ms` unset and once set. The setting
+lets a transform finish and commit in-flight work before leadership goes away,
+so duplicates fall to zero at the cost of some added drain time. Without that
+contrast this series only establishes that nothing crashed, which the upstream
+ducktape suite already covers.
+
+| knob | default | notes |
+|---|---|---|
+| `ACTIONS` | `maintenance transfer` | `restart` is stubbed, not implemented |
+| `DRAIN_AB` / `DRAIN_TIMEOUT_MS` | `1` / `200` | the unset-vs-set comparison. 200 ms eliminates duplicates and the e2e cost scales with the budget, so there's no reason to go higher |
+| `DRAIN_TIMEOUT_SET` | unset | run one arm at this budget instead of the A/B, for sweeping it |
+| `RESIDENCY_LEVELS` | unset | set to `0 8` to A/B `data_transforms_max_resident_factories`. Unset runs one pass at whatever the cluster already has |
+| `BASELINE_SECS` / `DURING_SECS` | `60` / `30` | 60 s because 30 s baselines came in below the cluster's own steady state and produced false "did not recover" verdicts |
+| `INJECT_AT_SECS` | `10` | when the action fires inside the during-window |
+| `RECOVERY_WINDOW_SECS` | `10` | granularity of time-to-baseline |
+| `RECOVERY_BAND` / `RECOVERY_SUSTAIN` | `1.35` / `2` | what "recovered" means |
+| `SETTLE_SECS` / `SETTLE_MAX_SECS` | `30` / `150` | leadership must be unchanged this long before an arm's baseline. Arms used to run back to back and one arm's residual landed in the next one's baseline |
+| `METADATA_MIN_AGE` / `RETRY_BACKOFF_MAX` | `100ms` / `500ms` | tuned by default here, unlike `loadgen`'s own defaults. Set both to `5s` to reproduce the untuned tail |
+
+This needs a broker built from a branch carrying
+`data_transforms_graceful_transfer_timeout_ms` and
+`data_transforms_max_resident_factories`. Without them the A/B collapses to
+two identical arms, which is worth knowing before you read the output as a
+result.

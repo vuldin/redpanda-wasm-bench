@@ -5,7 +5,8 @@ module. Read [Reading these numbers honestly](#reading-these-numbers-honestly)
 before quoting any of them, since a few are easy to misread in a way that
 overstates the case.
 
-Prerequisites and cost are in [README.md](README.md). Budget ~$40/hr for 1-2
+Prerequisites and cost are in [docs/SETUP.md](docs/SETUP.md); to run this
+unattended, `scripts/autorun.sh start plans/published.plan` (see the [README](README.md)). Budget ~$40/hr for 1-2
 hours.
 
 The cluster: 3 x `r8id.8xlarge` brokers, 8 x `c5n.9xlarge` clients and one

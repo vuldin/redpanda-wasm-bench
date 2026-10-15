@@ -55,7 +55,7 @@ Beyond upstream `dev`, the branch carries (each commit builds standalone; see
 
 1. **Three checkouts.** This repo; [redpanda-wasm-clients](https://github.com/vuldin/redpanda-wasm-clients)
    (the guests); the broker branch. Build the broker with the capped bazel
-   command in the [README](../README.md#a-redpanda-binary-built-from-the-branch)
+   command in [SETUP.md](SETUP.md#a-redpanda-binary-built-from-the-branch)
    (`-c opt --jobs=6 --local_resources=memory=16384`; uncapped builds have
    exhausted workstation memory). Build the guests with `make build-wasm`.
 2. **`wb.local.env`.** Copy `wb.local.env.example` and set your AWS profile,
@@ -108,11 +108,14 @@ Shipped plans:
 |---|---|---|---|
 | `smoke.plan` | proves your build, keys and account end to end | ~22 min | 3 brokers |
 | `published.plan` | the published in-broker vs external comparison (REPRODUCE.md) and the resilience series | ~145 min | 3 brokers + 8 clients |
+| `resilience.plan` | the resilience series on its own: maintenance mode and leadership transfer, graceful drain unset vs set, then the module-residency A/B ([RESILIENCE.md](RESILIENCE.md)) | ~90 min | 3 brokers + 8 clients |
 | `book-durability.plan` | the 2026-10-15 book-depth + durability suite | ~171 min | 6 brokers |
 
-All three, one after the other, is the full set. They use different
-topologies, so they are separate runs (each provisions and tears down its
-own cluster). `published.plan` has not yet been run end to end through
+`smoke`, `published` and `book-durability`, one after the other, is the full
+set (`published` already includes the resilience series). They use different
+topologies, so they are separate runs; each provisions and tears down its own
+cluster and writes to its own run directory - no run's results, logs or
+metrics ever overwrite another's. `published.plan` has not yet been run end to end through
 autorun; `wb reproduce`, which it wraps, is the path every published number
 came from.
 
