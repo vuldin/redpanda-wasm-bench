@@ -19,6 +19,7 @@
 #
 # usage: autorun.sh start   # detaches this run and its watchdog, returns
 #        autorun.sh main    # the run itself (what `start` launches)
+#        autorun.sh resume  # continue on the existing cluster (see resume())
 #        autorun.sh watchdog
 #
 # Environment: RUN_DIR (required), HARD_DEADLINE_EPOCH (required), WB, GATE_FILE,
@@ -260,6 +261,34 @@ main() {
   finish "all phases attempted"
 }
 
+# Continue an existing run on the cluster it already provisioned: used when
+# the phase list has to change mid-run (2026-10-15c: the planned-move results
+# showed the broker default does no drain, so a graceful-transfer arm was
+# added). Same budget, retry, hygiene and single-teardown rules as main; the
+# watchdog keeps watching the pid this writes.
+resume() {
+  echo $$ > "$RUN_DIR/autorun.pid"
+  log "autorun RESUME pid=$$ (hard deadline unchanged: $(date -u -d @"$HARD_DEADLINE_EPOCH" +%FT%TZ))"
+  load_creds || log "WARN: could not re-export credentials; using the inherited ones"
+  hygiene
+  local E2="ORDERS_PER_RECORD=15 RATE=30000 FANOUT=20 PAYLOAD=650 ACKS=all RF=3 DURATION=30s WARMUP=10s DRAIN=30s RELAY_STAGE_METRICS=true WRITE_CACHING=true LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=1 MODE=bookdepth GUEST=book-matcher"
+  run_phase P2g-planned-moves-graceful 50 "$WB" run durability ACTIONS="maintenance transfer" DEPTHS="1000 10000" TRIALS=3 \
+    GRACEFUL_MS=5000 REPLAY=1 REPLAY_ACTION=transfer OUT="$RUN_DIR/p2g-planned-moves-graceful"
+  hygiene
+  run_phase P3-kill 35 "$WB" run durability ACTIONS=kill DEPTHS="1000 10000" TRIALS=3 OUT="$RUN_DIR/p3-kill"
+  hygiene
+  run_phase P3b-kill-nostate 10 "$WB" run durability ACTIONS=kill DEPTHS="1000 10000" TRIALS=1 STATE=off OUT="$RUN_DIR/p3b-kill-nostate"
+  hygiene
+  # P2 at the broker default again, now with traffic spanning T (the first
+  # P2 placed its sentinels after loadgen had finished).
+  run_phase P2r-planned-moves-default 30 "$WB" run durability ACTIONS="maintenance transfer" DEPTHS="1000 10000" TRIALS=2 \
+    OUT="$RUN_DIR/p2r-planned-moves-default"
+  hygiene
+  # shellcheck disable=SC2086
+  run_phase P5-reference-cancel 9 "$WB" run e2 ${E2/GUEST=book-matcher/GUEST=mass-matcher} CANCEL_FRACTION=0.3 BOOKDEPTH_LEVELS="0 100 1000"
+  finish "resumed phases attempted"
+}
+
 finish() {
   local why="$1"
   fetch_results
@@ -307,6 +336,7 @@ watchdog() {
 
 case "${1:-}" in
   main) main ;;
+  resume) resume ;;
   watchdog) watchdog ;;
   start)
     # Separate sessions: neither dies with this shell, nor with each other.

@@ -48,6 +48,11 @@ WAVES="${WAVES:-10,6,3,1,0.3}"
 # rather than the old leader coming straight back.
 KILL_DOWN_S="${KILL_DOWN_S:-20}"
 REPLAY="${REPLAY:-0}"
+# data_transforms_graceful_transfer_timeout_ms for the run. Unset (the broker
+# default, null) means a leadership move does NOT drain: no final offset flush
+# and no forced checkpoint, so a planned move falls back to the last periodic
+# snapshot exactly like a crash. Set (e.g. 5000) to measure the drain path.
+GRACEFUL_MS="${GRACEFUL_MS:-}"
 OUT="${OUT:-$ROOT/results/durability-$(date +%s)}"
 TOOLS="${TOOLS:-/opt/wasm-bench}"
 mkdir -p "$OUT"
@@ -55,6 +60,11 @@ SUMMARY="$OUT/summary.txt"
 
 say() { echo "$@" | tee -a "$SUMMARY"; }
 C() { "$WB" ssh client0 "cd $TOOLS && $*"; }
+# Background launch on client0. The shell's own fds are pointed away from the
+# ssh channel FIRST: with `cd && nohup x &` the backgrounded list is a subshell
+# still holding ssh's stdout, so ssh waited for loadgen to exit - which put
+# every trial's T after the traffic had already stopped (2026-10-15c P2).
+CBG() { "$WB" ssh client0 "cd $TOOLS && exec >/dev/null 2>&1 </dev/null; $* &"; }
 ADMIN_HOSTS="$(echo "$ADMIN_URLS" | sed 's|http://||g')"
 RPKR="./rpk -X brokers=$BROKERS -X admin.hosts=$ADMIN_HOSTS"
 now_ms() { date +%s%3N; }
@@ -151,21 +161,25 @@ run_trial() {
 
   # Timed window long enough to span the waves, the action and the recovery.
   local dur=75
-  C "nohup ./loadgen -brokers $BROKERS -input-topic $orders -receipt-source fills -fills-topic $fills \
+  local lg_start; lg_start=$(now_ms)
+  CBG "nohup ./loadgen -brokers $BROKERS -input-topic $orders -receipt-source fills -fills-topic $fills \
       -rate $RATE -orders-per-record $OPR -producers $PRODUCERS -payload-bytes $PAYLOAD -acks all -linger-ms 0 \
       -book-depth $depth -cancel-fraction $CANCEL_FRACTION -warmup 5s -duration ${dur}s -drain 20s -sample-every 1 \
       -timeline-ms 500 -metadata-min-age 250ms -retry-backoff-max 100ms \
       -guest book-matcher/state=$STATE -guest-sha256 \$(sha256sum book-matcher.wasm | cut -d' ' -f1) \
-      -admin-url $ADMIN_URLS -transform-name $name -label $tag -out /tmp/$tag.loadgen.json > /tmp/$tag.loadgen.log 2>&1 < /dev/null &"
+      -admin-url $ADMIN_URLS -transform-name $name -label $tag -out /tmp/$tag.loadgen.json > /tmp/$tag.loadgen.log 2>&1"
   # preload (20k records at depth 10k) + 3s ingest + warmup 5s, then into the window
   local lead_in=$(( 12 + depth / 2000 ))
   sleep "$lead_in"
   local leader; leader="$(leader_of "$orders")"
   local reps; reps="$(replicas_of "$orders")"
   local T=$(( $(now_ms) + 14000 ))
-  say "  leader=node$leader replicas=[$reps] T=$T"
-  C "nohup ./statecheck place -brokers $BROKERS -topic $orders -per-wave $PER_WAVE -waves $WAVES -at-unix-ms $T \
-      -out /tmp/$tag.placed.json > /tmp/$tag.place.log 2>&1 < /dev/null &"
+  # T must fall inside the timed window with room for the recovery after it.
+  local window_end=$(( lg_start + (depth / 2000 + 3 + 5 + dur) * 1000 ))
+  local in_window="yes"; [ $(( T + 30000 )) -gt "$window_end" ] && in_window="NO"
+  say "  leader=node$leader replicas=[$reps] T=$T T_minus_loadgen_start_s=$(( (T - lg_start) / 1000 )) traffic_spans_T_plus_30s=$in_window"
+  CBG "nohup ./statecheck place -brokers $BROKERS -topic $orders -per-wave $PER_WAVE -waves $WAVES -at-unix-ms $T \
+      -out /tmp/$tag.placed.json > /tmp/$tag.place.log 2>&1"
   while [ "$(now_ms)" -lt "$T" ]; do sleep 0.05; done
 
   local act_start act_end note=""
@@ -267,13 +281,17 @@ replay_arm() {
   say "  REPLAY-VERDICT $tag ${v:-<no verdict>}"
 }
 
-say "# durability run $(date -u +%FT%TZ) state=$STATE actions=[$ACTIONS] depths=[$DEPTHS] trials=$TRIALS rate=$RATE opr=$OPR producers=$PRODUCERS cancel_fraction=$CANCEL_FRACTION rf=$RF snapshot_every_ms=$SNAPSHOT_EVERY_MS per_wave=$PER_WAVE waves=$WAVES kill_down_s=$KILL_DOWN_S replay=$REPLAY"
+say "# durability run $(date -u +%FT%TZ) state=$STATE graceful_transfer_ms=${GRACEFUL_MS:-null} actions=[$ACTIONS] depths=[$DEPTHS] trials=$TRIALS rate=$RATE opr=$OPR producers=$PRODUCERS cancel_fraction=$CANCEL_FRACTION rf=$RF snapshot_every_ms=$SNAPSHOT_EVERY_MS per_wave=$PER_WAVE waves=$WAVES kill_down_s=$KILL_DOWN_S replay=$REPLAY"
 say "# guest sha256=$(C 'sha256sum book-matcher.wasm' | cut -d' ' -f1)"
 say "# broker cfg: $(C "$RPKR cluster config get data_transforms_per_function_memory_limit; $RPKR cluster config get data_transforms_state_snapshot_max_size; $RPKR cluster config get data_transforms_max_instances_per_core" | tr '\n' ' ')"
 # The leader balancer would move the partition on its own mid-trial and
 # confound the action under test. Restored at exit.
 C "$RPKR cluster config set enable_leader_balancer false >/dev/null" || true
-trap 'C "$RPKR cluster config set enable_leader_balancer true >/dev/null" || true; maintenance_clear_all; ensure_all_brokers_running' EXIT
+if [ -n "$GRACEFUL_MS" ]; then
+  C "$RPKR cluster config set data_transforms_graceful_transfer_timeout_ms $GRACEFUL_MS >/dev/null" || true
+fi
+say "# data_transforms_graceful_transfer_timeout_ms now: $(C "$RPKR cluster config get data_transforms_graceful_transfer_timeout_ms" 2>/dev/null)"
+trap 'C "$RPKR cluster config set enable_leader_balancer true >/dev/null" || true; [ -n "$GRACEFUL_MS" ] && C "$RPKR cluster config set data_transforms_graceful_transfer_timeout_ms null >/dev/null"; maintenance_clear_all; ensure_all_brokers_running' EXIT
 
 fails=0 total=0
 for depth in $DEPTHS; do
