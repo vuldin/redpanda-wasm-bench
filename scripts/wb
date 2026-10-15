@@ -758,7 +758,9 @@ cmd_results() {
     "ubuntu@$h:$REMOTE_TOOLS/results/" "$dest/" 2>/dev/null \
     || die "rsync failed (no results yet?)"
   echo "wb: results -> $dest"
-  find "$dest" -name '*.json' | head -20
+  # sed, not head: head exits after 20 lines, find dies of SIGPIPE, and under
+  # pipefail the whole fetch reported failure (rc 141) after a good rsync.
+  find "$dest" -name '*.json' | sed -n '1,20p'
 }
 
 cmd_ssh() {

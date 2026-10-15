@@ -184,12 +184,26 @@ monitor_info() {
 # The monitoring host holds the only copy of the scraped metrics and teardown
 # destroys it, so export before every teardown, time-boxed so a slow export
 # can never hold a billing cluster.
+#
+# The box is whatever time is left before the hard deadline, less
+# EXPORT_RESERVE_S for archive + teardown + verify, clamped to
+# [EXPORT_MIN_S, EXPORT_MAX_S]. A fixed 15 minutes was too short: a full-scope
+# dump runs ~50s per measured window, so the 27-window production-shape run
+# (2026-10-15) was killed at window 19 with hours of cap left. An explicit
+# argument (the watchdog's, past the deadline) is used as given.
 export_metrics() {
-  local cap="${1:-900}"
+  local cap="${1:-}"
+  if [ -z "$cap" ]; then
+    cap=$(( ${HARD_DEADLINE_EPOCH:-0} - $(date +%s) - ${EXPORT_RESERVE_S:-900} ))
+    [ "$cap" -lt "${EXPORT_MIN_S:-600}" ] && cap="${EXPORT_MIN_S:-600}"
+    [ "$cap" -gt "${EXPORT_MAX_S:-3600}" ] && cap="${EXPORT_MAX_S:-3600}"
+  fi
   grep -q 'Grafana' "$RUN_DIR/MONITORING.txt" 2>/dev/null || { [ "${DRY_RUN:-0}" = 1 ] || return 0; }
-  log "exporting the scraped metrics (measured windows) to metrics-bundle/"
+  log "exporting the scraped metrics (measured windows) to metrics-bundle/ (time box ${cap}s)"
   if timeout "$cap" "$WB" monitor export "$RUN_DIR" >> "$RUN_DIR/metrics-export.log" 2>&1; then
     log "metrics exported: $RUN_DIR/metrics-bundle (open: cd metrics-bundle && docker compose up)"
+  elif [ "${KEEP_CLUSTER:-0}" = 1 ]; then
+    log "WARN: metrics export failed or timed out (see metrics-export.log); KEEP_CLUSTER=1, so the cluster stays up - retry with: wb monitor export $RUN_DIR"
   else
     log "WARN: metrics export failed or timed out (see metrics-export.log); the cluster is torn down regardless"
   fi
@@ -323,7 +337,7 @@ run() {
 finish() {
   local why="$1"
   fetch_results
-  export_metrics 900
+  export_metrics
   summarize
   write_status "$why (pre-teardown)"
   archive

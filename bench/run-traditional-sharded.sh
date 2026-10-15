@@ -214,6 +214,11 @@ rpk()   { sh_on "$LG" "cd $BIN && ./rpk -X brokers=$BROKERS $*"; }
 # Admin API, called FROM the loadgen host (the private addresses are not
 # reachable from where this script runs).
 SEED_ADMIN="http://${BROKERS%%:*}:9644"
+# EVERY broker's admin endpoint, for loadgen's before/after resource scrape.
+# Without -admin-url loadgen marks the report clean=false ("latency without
+# resource attribution"), which is how every traditional level of the
+# 2026-10-15 production-shape run came out unclean despite 0 missing receipts.
+ADMIN_URLS="${ADMIN_URLS:-$(echo "$BROKERS" | tr ',' '\n' | sed 's|:[0-9]*$|:9644|; s|^|http://|' | paste -sd, -)}"
 admin() { sh_on "$LG" "curl -sfL $*"; }
 
 echo "roles: loadgen=$LG  matcher=$MATCH  fanout=${FANOUT_HOSTS[*]} ($NF hosts)"
@@ -356,7 +361,7 @@ sh_on "$LG" "cd $BIN && ./loadgen -brokers $BROKERS -input-topic $ORDERS \
   -orders-per-record $ORDERS_PER_RECORD -timeline-ms 500 \
   -book-depth $BOOK_DEPTH -cancel-fraction $CANCEL_FRACTION -guest ${MATCHER_MODULE%.wasm} \
   -linger-ms $LINGER_MS -acks $ACKS -producers 1 -clock-rms-micros $RMS \
-  -metrics-listen '$LOADGEN_METRICS_LISTEN' \
+  -metrics-listen '$LOADGEN_METRICS_LISTEN' -admin-url $ADMIN_URLS \
   -label trad-$MATCHER_PLACEMENT${MATCHER_CPUS:+-isolated}-$FANOUT_N -out $OUT/trad-$FANOUT_N.json" 2>&1 | grep -E 'wrote report|NOT CLEAN' || true
 
 sh_on "$LG" "cd $OUT && jq -r '\"clean=\(.clean)  recv=\(.received_receipts)/\(.expected_receipts)  miss=\(.missing_receipts)  e2e_p50=\(.total.p50_micros|floor)us  p90=\(.total.p90_micros|floor)us  p99=\(.total.p99_micros|floor)us  lateness_p99=\(.send_lateness.p99_micros|floor)us\"' trad-$FANOUT_N.json"

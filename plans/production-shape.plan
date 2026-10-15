@@ -44,5 +44,5 @@ phase rate-production 14 run e2 "${E2[@]}" MODE=rate BOOK_DEPTH=1000 DURATION=30
   'RATE_LEVELS=30000 60000 120000 200000'
 
 # 4. Kills with the victim held down for 20s.
-phase kill-held-down 22 run durability ACTIONS=kill 'DEPTHS=1000 10000' TRIALS=2 KILL_MODE=down \
+phase kill-held-down 30 run durability ACTIONS=kill 'DEPTHS=1000 10000' TRIALS=2 KILL_MODE=down \
   OUT=@RUN_DIR@/kill-held-down
