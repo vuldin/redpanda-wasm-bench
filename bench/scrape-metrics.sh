@@ -516,7 +516,13 @@ def hist_quantiles(base, qs=(0.5, 0.9, 0.99), label=None, label_value=None):
                     hit = round((prev_bound + (ub - prev_bound) * frac) * 1e6, 1)
                 break
             prev_cum, prev_bound = cum, as_f(b)
-        out[f"p{int(q * 100)}_micros"] = hit
+        # Key on the quantile itself, not int(q*100): that formatting maps
+        # 0.999 and 0.99 to the same "p99_micros" key, so adding a p99.9 here
+        # would silently overwrite p99 rather than erroring. Trailing zeros
+        # are trimmed so p50/p90/p99 keep the exact names every existing
+        # consumer of these files already reads.
+        label = f"{q * 100:g}".replace(".", "_")
+        out[f"p{label}_micros"] = hit
     out["samples"] = round(total)
     return out
 

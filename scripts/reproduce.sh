@@ -21,6 +21,18 @@ ACKS="${ACKS:-all}"
 INBROKER_CONSUMERS="${INBROKER_CONSUMERS:-500}"
 EXTERNAL_LADDER="${EXTERNAL_LADDER:-1 10 50 500}"
 TRIALS="${TRIALS:-3}"
+# Which sweep the in-broker arm runs.
+#   fanout    - the published sweep: N in-broker consumers at one envelope size
+#   massquote - the envelope series, at fixed fanout. Level 1 of MASS_LEVELS is
+#               the control and must stay in the list: the mass levels run the
+#               mass-matcher module, so an N=1 level with THAT module is what
+#               separates "envelopes help" from "this binary is different".
+INBROKER_MODE="${INBROKER_MODE:-fanout}"
+MASS_LEVELS="${MASS_LEVELS:-1 15 30 100}"
+# 10 matches the published runs. The runner pins it to 1 on any envelope level
+# regardless, because a latency sample is one envelope and the population
+# shrinks by N.
+SAMPLE_EVERY="${SAMPLE_EVERY:-10}"
 DURATION="${DURATION:-30s}"; WARMUP="${WARMUP:-10s}"; DRAIN="${DRAIN:-30s}"
 # Published region first - see select-region.sh for why.
 REGIONS="${REGIONS:-us-east-1 us-east-2 us-west-2 eu-west-1}"
@@ -38,6 +50,11 @@ REGIONS="${REGIONS:-us-east-1 us-east-2 us-west-2 eu-west-1}"
 # together. Clear the old arm's result directories on the client first -
 # `wb cleanup-results <pattern>` - or the median silently spans a fix.
 ARMS="${ARMS:-inbroker external}"
+# The co-located ladder, for ARMS containing "loopback". Short on purpose: this
+# arm answers one question - does removing the network hop alone get close to
+# in-broker execution - and that is visible at low fan-out, where the external
+# path is not yet fetch-bound and the comparison is cleanest.
+LOOPBACK_LADDER="${LOOPBACK_LADDER:-1 10 50}"
 SKIP_PROVISION="${SKIP_PROVISION:-false}"
 SKIP_DEPLOY="${SKIP_DEPLOY:-$SKIP_PROVISION}"
 RUN_ID="${RUN_ID:-$(date +%s)}"
@@ -129,19 +146,30 @@ if [ -z "${WASM_DIR:-}" ]; then
   FAILS+=("set WASM_DIR to redpanda-wasm-clients/bin, after running 'make' there")
 else
   wasm_missing=""
-  for w in wasm-matcher.wasm relay-probe.wasm passthrough.wasm relay-sink.wasm; do
+  for w in wasm-matcher.wasm relay-probe.wasm passthrough.wasm relay-sink.wasm \
+           position-tracker.wasm mass-matcher.wasm; do
     [ -f "$WASM_DIR/$w" ] || wasm_missing="$wasm_missing $w"
   done
   if [ -n "$wasm_missing" ]; then
     echo "  MISS  wasm guests:$wasm_missing"
-    FAILS+=("run 'make build-wasm' in redpanda-wasm-clients")
+    FAILS+=("run 'make build-wasm' in redpanda-wasm-clients (it restores the published modules after building)")
   else
     MATCHER_MD5=$(md5sum "$WASM_DIR/wasm-matcher.wasm" | cut -d' ' -f1)
     echo "  ok    wasm guests (matcher md5 $MATCHER_MD5)"
     if [ "$MATCHER_MD5" != "94c3d0177a754b9f0c1df80c10dea298" ]; then
-      echo "  NOTE  not the module the published numbers used"
-      echo "        (94c3d0177a754b9f0c1df80c10dea298). Results stay valid, but they"
-      echo "        are a different experiment - record this md5 with them."
+      # A stop, not a note. This is the script whose job is to REPRODUCE the
+      # published figures, and its baseline arm deploys wasm-matcher.wasm by
+      # name - so a different module there is a different experiment wearing
+      # the published one's label. Until 2026-10-15 a plain `make build-wasm`
+      # produced exactly that (2cf80fdc), and the hint below used to tell you to
+      # run it.
+      echo "  MISS  matcher md5 $MATCHER_MD5 is not the published module"
+      echo "        (94c3d0177a754b9f0c1df80c10dea298)."
+      if [ "${ALLOW_MATCHER_MD5_MISMATCH:-0}" = "1" ]; then
+        echo "        ALLOW_MATCHER_MD5_MISMATCH=1 - continuing; record this md5 with the results."
+      else
+        FAILS+=("restore it: cd redpanda-wasm-clients && make restore-published && make verify-published (or ALLOW_MATCHER_MD5_MISMATCH=1 to measure a different matcher on purpose)")
+      fi
     fi
   fi
   if [ -x "$WASM_DIR/wasm-client" ] || [ -x "$WASM_DIR/../bin/wasm-client" ]; then
@@ -243,9 +271,11 @@ say "arm 1: in-broker wasm, $INBROKER_CONSUMERS consumers, $TRIALS trials"
 for t in $(seq 1 "$TRIALS"); do
   echo "--- trial $t/$TRIALS ---"
   bash "$HERE/wb" run e2 \
-    MODE=fanout "FANOUT_LEVELS=$INBROKER_CONSUMERS" "RATE=$RATE" \
+    MODE="$INBROKER_MODE" "FANOUT_LEVELS=$INBROKER_CONSUMERS" "RATE=$RATE" \
+    "MASS_LEVELS=$MASS_LEVELS" "FANOUT=$INBROKER_CONSUMERS" \
     "PAYLOAD=$PAYLOAD" "ACKS=$ACKS" "RF=$RF" \
     "DURATION=$DURATION" "WARMUP=$WARMUP" "DRAIN=$DRAIN" \
+    "SAMPLE_EVERY=$SAMPLE_EVERY" \
     RELAY_STAGE_METRICS=true WRITE_CACHING=true LINGER_MS=0 \
     || echo "  trial $t did not complete cleanly" >&2
 done
@@ -298,6 +328,42 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 5. arm 3: the SAME external matcher, co-located on a broker over loopback
+#
+# The co-location alternative: run the external matcher on a broker host and
+# dial that broker over loopback (user->kernel->user roundtrip expected well
+# under 50us). Only the matcher's LOCATION differs from arm 2 - same
+# binary, same module, same consumer groups, same everything else - so the
+# difference between arms 2 and 3 is the network hop and nothing else.
+#
+# What it decides: if this lands much closer to arm 1 than to arm 2, then
+# co-location rather than in-broker execution is carrying most of the win, and
+# no Unix-socket listener would change that (loopback's 64 KiB MTU already
+# removes most packetisation cost). That is the most important negative result
+# available here, which is exactly why it is worth measuring ourselves.
+# ---------------------------------------------------------------------------
+if [[ " $ARMS " == *" loopback "* ]]; then
+say "arm 3: co-located matcher over loopback, ladder: $LOOPBACK_LADDER"
+eval "$(bash "$HERE/wb" env 2>/dev/null | grep -E '^(CLIENT_PUB|BROKER_PRIV|BROKER_PUB)=')"
+[ -n "${CLIENT_PUB:-}" ] || die "could not read CLIENT_PUB from wb env - is the cluster up?"
+[ -n "${BROKER_PUB:-}" ] || die "could not read BROKER_PUB from wb env - the co-located arm runs ON a broker"
+BROKERS_CSV=$(echo "$BROKER_PRIV" | tr ' ' '\n' | sed 's/$/:9092/' | paste -sd,)
+echo "  matcher will run on broker $(echo "$BROKER_PUB" | awk '{print $1}') against 127.0.0.1:9092"
+for level in $LOOPBACK_LADDER; do
+  echo "--- $level external consumer(s), matcher co-located ---"
+  CLIENTS="$CLIENT_PUB" BROKERS="$BROKERS_CSV" BROKER_PUB="$BROKER_PUB" \
+  BROKER_PRIV_LIST="$BROKER_PRIV" MATCHER_PLACEMENT=loopback \
+  FANOUT_N="$level" RATE="$RATE" PAYLOAD="$PAYLOAD" ACKS="$ACKS" \
+  DURATION="$DURATION" WARMUP="$WARMUP" DRAIN="$DRAIN" \
+    bash "$ROOT/bench/run-traditional-sharded.sh" \
+    || echo "  level $level did not complete cleanly" >&2
+done
+else
+  echo ""
+  echo "=== arm 3 (loopback) SKIPPED - ARMS=$ARMS ==="
+fi
+
+# ---------------------------------------------------------------------------
 # 5. collect and render
 # ---------------------------------------------------------------------------
 say "collecting results"
@@ -305,10 +371,26 @@ mkdir -p "$OUT_LOCAL"
 bash "$HERE/wb" results "$OUT_LOCAL" || echo "  could not copy results back" >&2
 # Scope to THIS run's labels. The results directory on the cluster accumulates
 # every run, and without this the tables silently average unrelated experiments.
-python3 "$HERE/render-tables.py" "$OUT_LOCAL" \
-  --inbroker-consumers "$INBROKER_CONSUMERS" --matcher-md5 "$MATCHER_MD5" \
-  --labels "fanout-,trad-" \
-  | tee "$OUT_LOCAL/TABLES.md"
+#
+# Once per envelope size. render-tables.py refuses to median different
+# orders_per_record values together (that reports a latency for a
+# configuration that never ran), so a massquote run rendered in one call wrote
+# an EMPTY TABLES.md - the refusal goes to stderr. Render each size into its
+# own file, and keep TABLES.md as the single-order table published runs have
+# always had, so nothing that reads it changes.
+OPR_SIZES=$(find "$OUT_LOCAL" -name '*.json' ! -name '*.before.json' ! -name '*.after.json' \
+  ! -name '*.resources.json' ! -name '*.precheck.json' -print0 2>/dev/null \
+  | xargs -0 -r jq -r '.config.orders_per_record // 1' 2>/dev/null | sort -n -u)
+[ -n "$OPR_SIZES" ] || OPR_SIZES=1
+for opr in $OPR_SIZES; do
+  out="$OUT_LOCAL/TABLES.md"
+  [ "$opr" != "1" ] && out="$OUT_LOCAL/TABLES-opr$opr.md"
+  python3 "$HERE/render-tables.py" "$OUT_LOCAL" \
+    --inbroker-consumers "$INBROKER_CONSUMERS" --matcher-md5 "$MATCHER_MD5" \
+    --labels "fanout-,trad-,massquote-" --orders-per-record "$opr" \
+    | tee "$out"
+  [ -s "$out" ] || echo "  WARNING: $out is empty - render-tables refused or found nothing at orders_per_record=$opr" >&2
+done
 
 # Export the metrics BEFORE the run ends, because the monitoring host holds the
 # only copy and `wb teardown` destroys it. Non-fatal: a failed export must not

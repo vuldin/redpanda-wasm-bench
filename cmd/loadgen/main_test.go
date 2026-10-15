@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"math"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vuldin/redpanda-wasm-bench/wire"
 )
 
 // The send timestamp riding in the order id is what replaces a per-order map,
@@ -410,4 +413,284 @@ func TestDecodeFills(t *testing.T) {
 			}
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// mass-quote envelopes
+// ---------------------------------------------------------------------------
+
+// The guard the whole backward-compatibility claim rests on: at
+// -orders-per-record=1 the generator emits exactly the bytes it emitted
+// before envelopes existed, with exactly the same ids. If this fails, no new
+// run can be compared against a published figure.
+func TestEnvelopePairAtN1IsByteIdenticalToSingleOrders(t *testing.T) {
+	const runID = int64(1787938000000000000)
+	const seq = int64(42)
+	const sendNanos = int64(1_000_000_000)
+
+	sell, buy := encodeEnvelopePair(runID, 't', seq, 1, sendNanos)
+
+	wantSell := wire.EncodeNewOrder(wire.NewOrder{
+		OrderID: restingID(runID, 't', seq), Participant: "seller", Side: 1, Price: 100, Qty: 1,
+	})
+	wantBuy := wire.EncodeNewOrder(wire.NewOrder{
+		OrderID: aggressorID(runID, 't', seq, sendNanos), Participant: "buyer", Side: 0, Price: 200, Qty: 1,
+	})
+	if !bytes.Equal(sell, wantSell) {
+		t.Errorf("resting leg differs:\n got %x\nwant %x", sell, wantSell)
+	}
+	if !bytes.Equal(buy, wantBuy) {
+		t.Errorf("aggressor leg differs:\n got %x\nwant %x", buy, wantBuy)
+	}
+	// And it must still be a plain NewOrder, not a count=1 envelope.
+	if wire.MessageType(buy[0]) != wire.MessageNewOrder {
+		t.Errorf("type byte = %d, want MessageNewOrder", buy[0])
+	}
+}
+
+// At N>1 the legs become envelopes carrying N orders each, with per-order ids
+// that all round trip back to the same envelope seq.
+func TestEnvelopePairCarriesNOrdersWithPerOrderIDs(t *testing.T) {
+	const runID = int64(1787938000000000000)
+	const seq = int64(7)
+	const sendNanos = int64(1_000_000_000)
+	const n = 15
+
+	sell, buy := encodeEnvelopePair(runID, 't', seq, n, sendNanos)
+
+	for name, raw := range map[string][]byte{"resting": sell, "aggressor": buy} {
+		if wire.MessageType(raw[0]) != wire.MessageMassQuote {
+			t.Fatalf("%s: type byte = %d, want MessageMassQuote", name, raw[0])
+		}
+		m, err := wire.DecodeMassQuote(raw)
+		if err != nil {
+			t.Fatalf("%s: DecodeMassQuote: %v", name, err)
+		}
+		if len(m.Orders) != n {
+			t.Fatalf("%s: %d orders, want %d", name, len(m.Orders), n)
+		}
+	}
+
+	m, _ := wire.DecodeMassQuote(buy)
+	seenK := map[int]bool{}
+	for _, o := range m.Orders {
+		pid := parseAggressorID(o.OrderID)
+		if !pid.ok {
+			t.Fatalf("aggressor id %q did not parse", o.OrderID)
+		}
+		if pid.seq != seq {
+			t.Errorf("id %q: seq = %d, want %d (seq must stay the ENVELOPE's)", o.OrderID, pid.seq, seq)
+		}
+		if pid.sendNanos != sendNanos {
+			t.Errorf("id %q: sendNanos = %d, want %d", o.OrderID, pid.sendNanos, sendNanos)
+		}
+		if seenK[pid.k] {
+			t.Errorf("id %q: duplicate envelope index %d", o.OrderID, pid.k)
+		}
+		seenK[pid.k] = true
+	}
+	if len(seenK) != n {
+		t.Errorf("distinct envelope indices = %d, want %d", len(seenK), n)
+	}
+}
+
+// One record earns one send instant, one match stamp and one receipt, so an
+// envelope must contribute exactly ONE latency sample per probe however many
+// orders it carries. Appending one per order would multiply Samples and
+// OverMicros by N while adding no information - and OverMicros is documented
+// as a count of affected units.
+func TestEnvelopeContributesOneLatencySamplePerProbe(t *testing.T) {
+	const runID = int64(1787938000000000000)
+	const n = 10
+	coll := newCollector(runID, 1, 1)
+
+	sendNanos := int64(1_000_000_000)
+	coll.recordSend(0, sendNanos)
+	coll.recordAck(0, time.Unix(0, sendNanos+300_000))
+
+	matched := sendNanos + 900_000
+	receipt := sendNanos + 1_400_000
+	observedAt := time.Unix(0, receipt+5_000_000)
+
+	// relay-probe emits one receipt line per fill, so N lines for one record,
+	// every one carrying the SAME receipt and matched stamps.
+	for k := 0; k < n; k++ {
+		id := aggressorIDAt(runID, 't', 0, k, sendNanos)
+		coll.onReceipt(id+":"+strconv.FormatInt(receipt, 10)+":"+strconv.FormatInt(matched, 10), observedAt)
+	}
+
+	if got := coll.timedReceipts.Load(); got != n {
+		t.Errorf("timedReceipts = %d, want %d (every order counts)", got, n)
+	}
+	if got := len(coll.totalLat); got != 1 {
+		t.Errorf("totalLat samples = %d, want 1 per envelope per probe", got)
+	}
+	if got := len(coll.relayLat); got != 1 {
+		t.Errorf("relayLat samples = %d, want 1 per envelope per probe", got)
+	}
+	if got := len(coll.matchLat); got != 1 {
+		t.Errorf("matchLat samples = %d, want 1", got)
+	}
+	// Dedupe is still per ORDER: N keys at one receipt each, not one key at N.
+	if got := len(coll.sampledSeen); got != n {
+		t.Errorf("sampledSeen keys = %d, want %d (one per order)", got, n)
+	}
+	for key, count := range coll.sampledSeen {
+		if count != 1 {
+			t.Errorf("order %+v seen %d times, want 1", key, count)
+		}
+	}
+}
+
+// A duplicate must still be visible per order, so a replay cannot hide behind
+// an envelope-wide count.
+func TestEnvelopeDuplicateIsVisiblePerOrder(t *testing.T) {
+	const runID = int64(1787938000000000000)
+	coll := newCollector(runID, 1, 1)
+	sendNanos := int64(1_000_000_000)
+	line := func(k int) string {
+		return aggressorIDAt(runID, 't', 0, k, sendNanos) + ":2000000000:1900000000"
+	}
+	observedAt := time.Unix(0, 3_000_000_000)
+	coll.onReceipt(line(0), observedAt)
+	coll.onReceipt(line(1), observedAt)
+	coll.onReceipt(line(1), observedAt) // order 1 replayed
+
+	if got := coll.sampledSeen[orderKey{Seq: 0, K: 1}]; got != 2 {
+		t.Errorf("order 1 seen %d times, want 2", got)
+	}
+	if got := coll.sampledSeen[orderKey{Seq: 0, K: 0}]; got != 1 {
+		t.Errorf("order 0 seen %d times, want 1", got)
+	}
+}
+
+// An envelope missing an order is invisible to any total-receipt
+// reconciliation, so the per-envelope index set is what has to catch it.
+func TestIncompleteEnvelopeIsDetectable(t *testing.T) {
+	const runID = int64(1787938000000000000)
+	coll := newCollector(runID, 1, 1)
+	sendNanos := int64(1_000_000_000)
+	observedAt := time.Unix(0, 3_000_000_000)
+
+	// Envelope 0: orders 0 and 2 arrive, order 1 never does.
+	for _, k := range []int{0, 2} {
+		coll.onReceipt(aggressorIDAt(runID, 't', 0, k, sendNanos)+":2000000000:1900000000", observedAt)
+	}
+	// Envelope 1: complete.
+	for _, k := range []int{0, 1, 2} {
+		coll.onReceipt(aggressorIDAt(runID, 't', 1, k, sendNanos)+":2000000000:1900000000", observedAt)
+	}
+
+	if got := len(coll.envelopeSeen[0]); got != 2 {
+		t.Errorf("envelope 0 covered %d orders, want 2", got)
+	}
+	if got := len(coll.envelopeSeen[1]); got != 3 {
+		t.Errorf("envelope 1 covered %d orders, want 3", got)
+	}
+	// Total receipts reconcile at 5 either way, which is exactly why this
+	// check exists: 2+3 and 1+4 are indistinguishable from the total alone.
+	if got := coll.timedReceipts.Load(); got != 5 {
+		t.Errorf("timedReceipts = %d, want 5", got)
+	}
+}
+
+// p99.99 is suppressed below the sample count at which it means anything,
+// rather than published as an interpolation through three points.
+func TestP9999SuppressedBelowSampleFloor(t *testing.T) {
+	small := make([]float64, 3000)
+	for i := range small {
+		small[i] = float64(i)
+	}
+	if got := newStageStats(small).P9999Micros; got != 0 {
+		t.Errorf("p9999 at 3000 samples = %v, want 0 (suppressed)", got)
+	}
+	big := make([]float64, 100000)
+	for i := range big {
+		big[i] = float64(i)
+	}
+	if got := newStageStats(big).P9999Micros; got == 0 {
+		t.Error("p9999 at 100000 samples = 0, want it computed")
+	}
+}
+
+func TestStddevMeasuresSpread(t *testing.T) {
+	flat := []float64{100, 100, 100, 100}
+	if got := newStageStats(flat).StddevMicros; got != 0 {
+		t.Errorf("stddev of a constant = %v, want 0", got)
+	}
+	// Two distributions with the same median and very different spread - the
+	// distinction a percentile alone cannot draw.
+	tight := []float64{99, 100, 100, 101}
+	wide := []float64{1, 100, 100, 199}
+	ts, ws := newStageStats(tight), newStageStats(wide)
+	if ts.P50Micros != ws.P50Micros {
+		t.Fatalf("medians differ (%v vs %v); the test no longer isolates spread", ts.P50Micros, ws.P50Micros)
+	}
+	if !(ws.StddevMicros > ts.StddevMicros*10) {
+		t.Errorf("stddev did not separate them: tight %v, wide %v", ts.StddevMicros, ws.StddevMicros)
+	}
+}
+
+// The preload is only worth anything if the orders actually REST. If any of
+// them crossed - against each other or against the measured traffic - the book
+// would drain and a depth sweep would silently measure an empty book at every
+// level, which looks exactly like "depth is free".
+func TestBookPreloadOrdersCannotCross(t *testing.T) {
+	const runID = int64(1787938000000000000)
+	const depth = 50
+	recs := encodeBookPreload(runID, depth)
+	if len(recs) != depth*2 {
+		t.Fatalf("got %d records, want %d (both sides)", len(recs), depth*2)
+	}
+
+	var bids, asks []wire.NewOrder
+	for _, r := range recs {
+		o, err := wire.DecodeNewOrder(r)
+		if err != nil {
+			t.Fatalf("preload record did not decode: %v", err)
+		}
+		if o.Side == 0 {
+			bids = append(bids, o)
+		} else {
+			asks = append(asks, o)
+		}
+	}
+	if len(bids) != depth || len(asks) != depth {
+		t.Fatalf("sides unbalanced: %d bids, %d asks", len(bids), len(asks))
+	}
+
+	// No preload bid may reach any preload ask.
+	maxBid, minAsk := int64(-1<<62), int64(1<<62)
+	for _, o := range bids {
+		if o.Price > maxBid {
+			maxBid = o.Price
+		}
+	}
+	for _, o := range asks {
+		if o.Price < minAsk {
+			minAsk = o.Price
+		}
+	}
+	if maxBid >= minAsk {
+		t.Errorf("preload crosses itself: best bid %d >= best ask %d", maxBid, minAsk)
+	}
+
+	// Nor may it cross the measured traffic, which sells at 100 and buys at 200.
+	const measuredSell, measuredBuy = int64(100), int64(200)
+	if maxBid >= measuredSell {
+		t.Errorf("preload bid %d would cross the measured sell at %d, consuming it",
+			maxBid, measuredSell)
+	}
+	if minAsk <= measuredBuy {
+		t.Errorf("preload ask %d would cross the measured buy at %d, consuming it",
+			minAsk, measuredBuy)
+	}
+
+	// Ids must not collide with measured traffic, or a preload fill would be
+	// counted as a measured receipt.
+	for _, o := range append(bids, asks...) {
+		if pid := parseAggressorID(o.OrderID); pid.ok && pid.phase != 'p' {
+			t.Errorf("preload id %q parses as measured traffic (phase %c)", o.OrderID, pid.phase)
+		}
+	}
 }

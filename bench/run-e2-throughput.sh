@@ -95,9 +95,19 @@ FANOUT_SHARD_BASE="${FANOUT_SHARD_BASE:-0}"
 #   external - N ordinary Kafka consumer groups outside it, and loadgen itself is
 #              the measured one, consuming the fills topic directly
 # Both arms measure `total` on loadgen's OWN clock (send -> receipt observed), so
-# the headline comparison is single-clock with no skew residual. Note the
-# inbroker arm's total carries an extra produce+fetch hop (probe -> probe_out ->
-# loadgen) that the external arm does not, so the comparison HANDICAPS in-broker.
+# the headline comparison is single-clock with no skew residual.
+#
+# CORRECTION (this claim used to read the other way round, and was wrong): the
+# inbroker arm does NOT carry a handicap from the probe -> probe_out -> loadgen
+# hop. relay-probe stamps receipt_nanos when IT receives the record, and that
+# stamp is what `total` ends on - the hop that carries the stamp back to loadgen
+# happens afterwards and is outside the measurement. So the comparison is not
+# handicapped in-broker's favour or against it on that account.
+#
+# The asymmetry that IS real runs the other way and must travel with any
+# quote: the in-broker figure ends when an in-broker consumer receives the
+# record, so it does not include a fetch back out to an external client, while
+# the external arm's figure does.
 CONSUMER_ARM="${CONSUMER_ARM:-inbroker}"
 # data_transforms_read_linger_us. Swept as a MODE rather than set out
 # of band so the value lands in the fingerprint and the summary table - an
@@ -107,6 +117,31 @@ CONSUMER_ARM="${CONSUMER_ARM:-inbroker}"
 # the 21% CPU benefit was captured by 1000us - so the entire useful range sat
 # inside one millisecond step and the knee could not be located.
 READ_LINGER_LEVELS="${READ_LINGER_LEVELS:-0 50 100 250 500 1000}"
+# Orders carried in ONE record, as an exchange mass-quote message does. The
+# customer whose bar this round is measured against inserts orders in
+# envelopes of 1, 15, 30 and 100, so our one-order-per-record traffic made
+# our orders/sec and theirs different units.
+#
+# It is also the throughput lever: the transform output-write path costs
+# ~25us of CPU per RECORD against ~3us of guest work, so N orders in one
+# record amortise that over N orders. Level 1 is the control and MUST be
+# included - it is what separates "envelopes help" from "this guest is
+# different", since the mass levels run a different module than the
+# published one.
+MASS_LEVELS="${MASS_LEVELS:-1 15 30 100}"
+ORDERS_PER_RECORD="${ORDERS_PER_RECORD:-1}"
+# Resting orders preloaded per side before the measured window. The default
+# traffic crosses immediately and leaves the book empty, so book depth has
+# never been measured here - and it is both the first thing an exchange
+# engineer asks about and the dimension the customer's own figures degrade on
+# (540k orders/sec empty, 332k at 1,000 resting).
+#
+# Read the result as a property of the REFERENCE GUEST, not of the engine: its
+# Book is a sorted Vec whose cancel path is a linear scan, so a steep curve
+# here says that structure is wrong for depth, which a production guest would
+# not share.
+BOOKDEPTH_LEVELS="${BOOKDEPTH_LEVELS:-0 100 1000 10000}"
+BOOK_DEPTH="${BOOK_DEPTH:-0}"
 READ_LINGER_US="${READ_LINGER_US:-0}"
 
 # Held fixed except in the mode that sweeps them.
@@ -190,7 +225,9 @@ case "$MODE" in
   partitions) SWEEP="$PARTITION_LEVELS" ;;
   fanout)     SWEEP="$FANOUT_LEVELS" ;;
   readlinger) SWEEP="$READ_LINGER_LEVELS" ;;
-  *) echo "MODE must be rate, payload, guest, partitions, fanout or readlinger (got $MODE)" >&2; exit 1 ;;
+  massquote)  SWEEP="$MASS_LEVELS" ;;
+  bookdepth)  SWEEP="$BOOKDEPTH_LEVELS" ;;
+  *) echo "MODE must be rate, payload, guest, partitions, fanout, readlinger, massquote or bookdepth (got $MODE)" >&2; exit 1 ;;
 esac
 
 case "$CONSUMER_ARM" in
@@ -369,6 +406,12 @@ deploy_producer() {
   case "$guest" in
     matcher)     wasm="$BIN/wasm-matcher.wasm" ;;
     passthrough) wasm="$BIN/passthrough.wasm" ;;
+    # Handles wire type 0 and type 2. Deliberately a separate module from
+    # wasm-matcher: that one's md5 is the published comparability anchor and
+    # rebuilding it with an envelope branch would mean no future run could be
+    # byte-compared to a published figure. See the clients repo's
+    # rust/testdata/published-modules/ and `make verify-published`.
+    mass-matcher) wasm="$BIN/mass-matcher.wasm" ;;
     *) echo "unknown guest $guest" >&2; return 1 ;;
   esac
   [ -f "$wasm" ] || { echo "ERROR: $wasm not found - run make build-wasm / make build-passthrough" >&2; return 1; }
@@ -566,9 +609,20 @@ EOF
   echo "# pin_node=$PIN_NODE probe_core=$PROBE_CORE num_shards=$NUM_SHARDS run_id=$RUN_ID read_linger_us=$READ_LINGER_US relay_stage_metrics=${RELAY_STAGE_METRICS:-unset} consumer_arm=$CONSUMER_ARM"
   echo "# fanout_shards=${FANOUT_SHARDS:-all($NUM_SHARDS)} fanout_shard_base=$FANOUT_SHARD_BASE"
   echo "# producer_acks=$ACKS"
+  echo "# orders_per_record=$ORDERS_PER_RECORD mass_levels=${MASS_LEVELS} book_depth=$BOOK_DEPTH bookdepth_levels=${BOOKDEPTH_LEVELS}"
   echo "# fresh_topics_per_level=$FRESH_TOPICS_PER_LEVEL settle=${SETTLE}s"
   echo "# admin_endpoints_scraped=$(echo "$ADMIN_URLS" | tr ',' '\n' | grep -c .)"
-  echo "level offered/s achieved/s cores relay_p50us relay_p99us total_p50us match_us/inv match_us/order probe_us/inv dropped clean"
+  # New columns are APPENDED, never inserted: a summary.txt from an earlier
+  # run is parsed positionally elsewhere, so inserting a column in the middle
+  # would silently reinterpret every old file.
+  #   opr          - orders per record (1 = the historical traffic)
+  #   records/s    - achieved RECORDS/sec, the unit the output-write path is
+  #                  charged in, and therefore what moves when opr changes
+  #   bytes/s      - offered input bytes/sec; an opr=100 envelope is ~7KB
+  #                  against the usual 650B payload, so the mass series is a
+  #                  record-size sweep too unless this is on the page
+  #   total_p999us - the tail figure this round exists to produce
+  echo "level offered/s achieved/s cores relay_p50us relay_p99us total_p50us match_us/inv match_us/order probe_us/inv dropped clean opr records/s bytes/s total_p999us"
 } > "$RESULTS_DIR/summary.txt"
 
 if [ "$MODE" = "fanout" ]; then
@@ -607,6 +661,7 @@ fi
 producer_name=""
 for level in $SWEEP; do
   this_rate="$RATE"; this_payload="$PAYLOAD"; this_guest="$GUEST"; this_fanout="$FANOUT"; this_read_linger="$READ_LINGER_US"
+  this_opr="$ORDERS_PER_RECORD"; this_sample_every="$SAMPLE_EVERY"; this_depth="$BOOK_DEPTH"
   case "$MODE" in
     rate)    this_rate="$level" ;;
     payload) this_payload="$level" ;;
@@ -616,10 +671,40 @@ for level in $SWEEP; do
       this_read_linger="$level"
       # needs_restart::no, so this takes effect live between levels.
       cfg_set data_transforms_read_linger_us "$level" ;;
+    massquote)
+      this_opr="$level"
+      # The envelope-capable guest handles wire type 0 as well as type 2, so
+      # one module serves the control level and the mass levels - which is
+      # what makes the N=1 level a control for the module rather than just a
+      # repeat of the published baseline.
+      this_guest="mass-matcher"
+      # A latency sample is one ENVELOPE, so the population SHRINKS by N: at
+      # 1,000 orders/sec with sample-every 10 and N=100 that is 30 samples in
+      # a 30s window, not 3,000. Scale the divisor down so the sample count
+      # stays comparable across levels, and pin it to 1 for any envelope.
+      if [ "$level" -gt 1 ]; then
+        this_sample_every=1
+      fi ;;
+    bookdepth)
+      this_depth="$level"
+      # The depth guest must be one that keeps a book at all - passthrough
+      # has none, so a depth sweep against it measures nothing.
+      this_guest="matcher" ;;
   esac
+  # Fail before the level runs, not after. A guest that cannot decode what
+  # loadgen sends drops every record and reports zero receipts, which costs a
+  # full level of cluster time to discover and reads like a broker problem
+  # rather than a configuration one. wasm-matcher handles wire type 0 only.
+  if [ "$this_opr" -gt 1 ] && [ "$this_guest" != "mass-matcher" ]; then
+    echo "ERROR: orders-per-record=$this_opr needs GUEST=mass-matcher (got '$this_guest')." >&2
+    echo "       wasm-matcher rejects wire type 2 outright, so this level would" >&2
+    echo "       drop every record and report zero receipts. Use MODE=massquote," >&2
+    echo "       which selects the right guest, or set GUEST=mass-matcher." >&2
+    exit 1
+  fi
   tag="${MODE}-${level}"
   echo ""
-  echo "############ $tag : rate=$this_rate payload=$this_payload guest=$this_guest fanout=$this_fanout read_linger_us=$this_read_linger ############"
+  echo "############ $tag : rate=$this_rate payload=$this_payload guest=$this_guest fanout=$this_fanout read_linger_us=$this_read_linger orders_per_record=$this_opr sample_every=$this_sample_every book_depth=$this_depth ############"
 
   # Guard against defect 19's class: a topic variable silently reassigned to
   # something that is not a topic name. Cheap, and it converts a four-hour
@@ -755,7 +840,7 @@ for level in $SWEEP; do
     echo "    -input-topic below matches $orders; producer input and relay ntp are" >&2
     echo "    node-co-located (the relay has no cross-node hop); both transforms" >&2
     echo "    report running. Skipping this level rather than recording noise." >&2
-    printf "%s %s PRECHECK-FAILED - - - - - - - - false\n" "$level" "$this_rate" >> "$RESULTS_DIR/summary.txt"
+    printf "%s %s PRECHECK-FAILED - - - - - - - - false %s - - -\n" "$level" "$this_rate" "$this_opr" >> "$RESULTS_DIR/summary.txt"
     sleep "$SETTLE"
     continue
   fi
@@ -763,13 +848,14 @@ for level in $SWEEP; do
 
   bash "$SCRAPE" snap "$ADMIN_URLS" "$RESULTS_DIR/${tag}.before.json"
 
-  echo "--- loadgen: arm=$CONSUMER_ARM -input-topic $orders ${recv_args[*]} -rate $this_rate -producers $PRODUCERS -linger-ms $LINGER_MS -acks $ACKS ---"
+  echo "--- loadgen: arm=$CONSUMER_ARM -input-topic $orders ${recv_args[*]} -rate $this_rate -orders-per-record $this_opr -producers $PRODUCERS -linger-ms $LINGER_MS -acks $ACKS ---"
   "$BIN/loadgen" \
     -clock-rms-micros "${CLOCK_RMS_MICROS:-0}" \
     -metrics-listen "${LOADGEN_METRICS_LISTEN:-}" \
     -brokers "$BROKERS" -input-topic "$orders" "${recv_args[@]}" \
     -num-probes 1 -rate "$this_rate" -duration "$DURATION" -warmup "$WARMUP" \
-    -pacing "$PACING" -payload-bytes "$this_payload" -sample-every "$SAMPLE_EVERY" \
+    -pacing "$PACING" -payload-bytes "$this_payload" -sample-every "$this_sample_every" \
+    -orders-per-record "$this_opr" -book-depth "$this_depth" \
     -linger-ms "$LINGER_MS" -acks "$ACKS" -producers "$PRODUCERS" \
     -drain "$DRAIN" -admin-url "$ADMIN_URLS" -transform-name "$want_producer" \
     -label "$tag" -out "$RESULTS_DIR/${tag}.json" || true
@@ -782,7 +868,7 @@ for level in $SWEEP; do
   # aborted sweep costs a whole cluster session to redo.
   if [ ! -s "$RESULTS_DIR/${tag}.json" ]; then
     echo "!!! level $tag produced no report; recording it as failed and continuing"
-    printf "%s %s FAILED - - - - - - - - false\n" "$level" "$this_rate" >> "$RESULTS_DIR/summary.txt"
+    printf "%s %s FAILED - - - - - - - - false %s - - -\n" "$level" "$this_rate" "$this_opr" >> "$RESULTS_DIR/summary.txt"
     sleep "$SETTLE"
     continue
   fi
@@ -879,8 +965,12 @@ for level in $SWEEP; do
        | (.replicas[] | select(.node_id==$l) | "\($l)/\(.core)")] | unique | length' 2>/dev/null)
   # 0 means the topic was not found, which is a bug, not a measurement.
   [ "${cores_used:-0}" = "0" ] && cores_used="?"
-  printf "%s %s %s %s %s %s %s %s %s %s %s %s\n" \
+  recps=$(jq -r '.rates.achieved_records_per_sec // "n/a"' "$RESULTS_DIR/${tag}.json")
+  byteps=$(jq -r '((.rates.offered_envelopes_per_sec // 0) * 2 * (.config.input_bytes_per_record // 0)) | if . > 0 then . else "n/a" end' "$RESULTS_DIR/${tag}.json")
+  tp999=$(jq -r '.total.p999_micros // "n/a"' "$RESULTS_DIR/${tag}.json")
+  printf "%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n" \
     "$level" "$this_rate" "$achieved" "${cores_used:-?}" "$rp50" "$rp99" "$tp50" "$minv" "$mord" "$pinv" "$dropped" "$clean" \
+    "$this_opr" "$recps" "$byteps" "$tp999" \
     >> "$RESULTS_DIR/summary.txt"
 
   if [ "$clean" != "true" ]; then

@@ -89,7 +89,17 @@ type stageStats struct {
 	P90Micros  float64 `json:"p90_micros"`
 	P99Micros  float64 `json:"p99_micros"`
 	P999Micros float64 `json:"p999_micros"`
-	MaxMicros  float64 `json:"max_micros"`
+	// p99.99 needs ~10^5 samples before it is anything but the top few
+	// samples restated, so it is emitted as 0 below that and the reader is
+	// told why rather than being handed an interpolation of three points.
+	// See LatencySampleUnit and the sample-count gate in judge().
+	P9999Micros float64 `json:"p9999_micros"`
+	MaxMicros   float64 `json:"max_micros"`
+	// Spread, not just position. A jitter claim is about the WIDTH of the
+	// distribution, and percentiles alone cannot distinguish a tight
+	// distribution with a few outliers from a uniformly noisy one - which
+	// is exactly the distinction a market maker notices.
+	StddevMicros float64 `json:"stddev_micros"`
 	// How many samples exceeded each threshold, in microseconds.
 	//
 	// A percentile answers "how bad was it for the unlucky few". During a
@@ -120,7 +130,14 @@ func newStageStats(xs []float64) stageStats {
 	s.P90Micros = percentile(xs, 0.90)
 	s.P99Micros = percentile(xs, 0.99)
 	s.P999Micros = percentile(xs, 0.999)
+	// Below ~10^5 samples p99.99 is the top handful of samples with an
+	// interpolation drawn through them, which reads as a measurement and
+	// is not one. Left at zero rather than published as noise.
+	if len(xs) >= 100000 {
+		s.P9999Micros = percentile(xs, 0.9999)
+	}
 	s.MaxMicros = xs[len(xs)-1]
+	s.StddevMicros = stddev(xs, s.MeanMicros)
 	// xs is sorted, so the first index at or above the threshold gives the
 	// count above it directly.
 	for _, t := range overThresholds {
@@ -139,7 +156,16 @@ type timelineBucket struct {
 	Samples   int     `json:"samples"`
 	P50Micros float64 `json:"p50_micros"`
 	P99Micros float64 `json:"p99_micros"`
-	MaxMicros float64 `json:"max_micros"`
+	// P999 per interval, so a tail excursion can be located in time rather
+	// than only seen in the whole-window aggregate. A p999 that is flat
+	// across every bucket and a p999 carried entirely by one bucket are the
+	// same number in the summary and completely different findings - which
+	// is the distinction a jitter claim turns on.
+	P999Micros float64 `json:"p999_micros"`
+	MaxMicros  float64 `json:"max_micros"`
+	// OverMicros per interval, same thresholds as stageStats, so "how many
+	// records were affected, and when" is answerable.
+	OverMicros map[string]int `json:"over_micros"`
 }
 
 // buildTimeline groups (sendNanos, latency) pairs into fixed intervals.
@@ -173,12 +199,19 @@ func buildTimeline(sendNanos []int64, lat []float64, intervalMs int64) []timelin
 	for _, k := range keys {
 		xs := byBucket[k]
 		sort.Float64s(xs)
+		over := map[string]int{}
+		for _, t := range overThresholds {
+			i := sort.SearchFloat64s(xs, t)
+			over[strconv.FormatFloat(t, 'f', 0, 64)] = len(xs) - i
+		}
 		out = append(out, timelineBucket{
-			OffsetMs:  k * intervalMs,
-			Samples:   len(xs),
-			P50Micros: percentile(xs, 0.50),
-			P99Micros: percentile(xs, 0.99),
-			MaxMicros: xs[len(xs)-1],
+			OffsetMs:   k * intervalMs,
+			Samples:    len(xs),
+			P50Micros:  percentile(xs, 0.50),
+			P99Micros:  percentile(xs, 0.99),
+			P999Micros: percentile(xs, 0.999),
+			MaxMicros:  xs[len(xs)-1],
+			OverMicros: over,
 		})
 	}
 	return out
@@ -190,6 +223,30 @@ func mean(xs []float64) float64 {
 		sum += x
 	}
 	return sum / float64(len(xs))
+}
+
+func ratePerSec(n int64, elapsed float64) float64 {
+	if elapsed <= 0 {
+		return 0
+	}
+	return float64(n) / elapsed
+}
+
+// stddev is the population standard deviation, taking the already-computed
+// mean so the caller doesn't pay for a second pass. Population rather than
+// sample: these are every sample collected for the stage, not a draw from a
+// larger set, and at the sample counts involved the distinction is well
+// below the measurement's own error bar anyway.
+func stddev(xs []float64, m float64) float64 {
+	if len(xs) < 2 {
+		return 0
+	}
+	var sum float64
+	for _, x := range xs {
+		d := x - m
+		sum += d * d
+	}
+	return math.Sqrt(sum / float64(len(xs)))
 }
 
 // percentile expects xs sorted ascending.
@@ -222,9 +279,32 @@ type configReport struct {
 	PayloadBytes int     `json:"payload_bytes"`
 	NumProbes    int     `json:"num_probes"`
 	SampleEvery  int     `json:"sample_every"`
-	MaxBuffered  int     `json:"max_buffered_records"`
-	KeyByPair    bool    `json:"key_by_pair"`
-	LingerMs     int     `json:"producer_linger_ms"`
+	// Orders carried in one record. 1 is the historical one-order-per-record
+	// traffic. Part of the run fingerprint because it changes what
+	// orders_per_sec and records_per_sec mean relative to each other, and
+	// because the mass arm necessarily puts all N orders of an envelope into
+	// ONE order book - realistic, but it must never later be read as
+	// evidence about partition scaling.
+	OrdersPerRecord int `json:"orders_per_record"`
+	// The unit of a latency sample, always "envelope". Spelled out because
+	// one record earns one send instant, one match stamp and one receipt, so
+	// under mass quotes a latency sample covers N orders and per-order
+	// latency does not exist. Without this field a reader cannot tell
+	// samples=3000 envelopes from samples=3000 orders.
+	LatencySampleUnit string `json:"latency_sample_unit"`
+	// InputBytesPerRecord is the actual encoded size of one input record,
+	// after -payload-bytes padding. Recorded because -payload-bytes pads to a
+	// MINIMUM, so it becomes a no-op once an envelope exceeds it (an
+	// orders_per_record=15 envelope already does at the usual 650B): past
+	// that point the mass series is also a record-size sweep, and without
+	// this field nothing on the page says so.
+	InputBytesPerRecord int `json:"input_bytes_per_record"`
+	// Resting orders preloaded per side before the measured window. 0 is the
+	// historical traffic, where every pair crosses and the book stays empty.
+	BookDepth   int  `json:"book_depth"`
+	MaxBuffered int  `json:"max_buffered_records"`
+	KeyByPair   bool `json:"key_by_pair"`
+	LingerMs    int  `json:"producer_linger_ms"`
 	// Acks is fingerprinted because it is the DOMINANT e2e term - a run at
 	// acks=leader is not comparable with one at acks=all, and the difference
 	// is a durability trade rather than a tuning choice.
@@ -285,8 +365,18 @@ func (e *errorTally) snapshot() map[string]int64 {
 }
 
 type ratesReport struct {
-	OfferedPerSec   float64 `json:"offered_orders_per_sec"`
-	AttemptedPerSec float64 `json:"attempted_orders_per_sec"`
+	OfferedPerSec float64 `json:"offered_orders_per_sec"`
+	// OfferedEnvelopesPerSec is offered_orders_per_sec / orders_per_record -
+	// the rate the pacing schedule actually runs at, since one slot is one
+	// envelope. Equal to the order rate at N=1.
+	OfferedEnvelopesPerSec float64 `json:"offered_envelopes_per_sec"`
+	AttemptedPerSec        float64 `json:"attempted_orders_per_sec"`
+	// AchievedRecordsPerSec is the figure to compare across envelope sizes:
+	// the output-write path that limits this benchmark is charged per
+	// record, so records/sec is what moves when N changes, while orders/sec
+	// is what a customer compares against. Reporting only one of the two is
+	// what made our rate figures incomparable to theirs.
+	AchievedRecordsPerSec float64 `json:"achieved_records_per_sec"`
 	// AchievedOrdersPerSec divides receipts by num_probes, putting it in the
 	// same unit as the offered rate so the two compare directly.
 	AchievedOrdersPerSec   float64          `json:"achieved_orders_per_sec"`
@@ -294,6 +384,7 @@ type ratesReport struct {
 	AttemptedRatio         float64          `json:"attempted_over_offered"`
 	AchievedRatio          float64          `json:"achieved_over_offered"`
 	OrdersSent             int64            `json:"orders_sent"`
+	EnvelopesSent          int64            `json:"envelopes_sent"`
 	RecordsSent            int64            `json:"records_sent"`
 	ProduceErrors          int64            `json:"produce_errors"`
 	ProduceErrorsByKind    map[string]int64 `json:"produce_errors_by_kind"`
@@ -345,13 +436,23 @@ type funcResource struct {
 	// CPUMicrosPerInvocation is the honest per-record figure: CPU over the
 	// guest's own invocation count.
 	CPUMicrosPerInvocation float64 `json:"cpu_micros_per_invocation"`
-	// CPUMicrosPerOrder is CPU over ORDERS offered. One order is a crossing
-	// pair, so it is two input records and two matcher invocations - making
-	// this roughly twice the per-invocation figure. Reported because -rate is
+	// CPUMicrosPerOrder is CPU over ORDERS offered. Reported because -rate is
 	// expressed in orders, so a capacity claim in orders/sec must use this.
+	//
+	// Its relationship to the per-invocation figure DEPENDS ON
+	// orders_per_record: one order is a crossing pair, so at N=1 it is two
+	// records and two invocations and this reads ~2x per-invocation, which
+	// is the identity METHODOLOGY #16 tells you to check. At N orders per
+	// record the ratio is 2/N instead, so #16's tripwire has to be read
+	// against the configured N rather than against a constant 2.
 	CPUMicrosPerOrder float64 `json:"cpu_micros_per_order"`
-	MemoryUsageEnd    float64 `json:"memory_usage_end_bytes"`
-	MaxMemoryEnd      float64 `json:"max_memory_end_bytes"`
+	// CPUMicrosPerRecord is CPU over input RECORDS. This is the figure that
+	// stays comparable across envelope sizes, because the output-write path
+	// this benchmark is rate-limited by is charged per record regardless of
+	// how many orders the record carried.
+	CPUMicrosPerRecord float64 `json:"cpu_micros_per_record"`
+	MemoryUsageEnd     float64 `json:"memory_usage_end_bytes"`
+	MaxMemoryEnd       float64 `json:"max_memory_end_bytes"`
 }
 
 type resourcesReport struct {
@@ -444,8 +545,12 @@ type report struct {
 	// the cause could not be distinguished from a short drain without it.
 	DuplicateReceipts      int64 `json:"duplicate_receipts_sampled"`
 	MaxReceiptsForAnyOrder int   `json:"max_receipts_for_any_sampled_order"`
-	MissingReceipts        int64 `json:"missing_receipts"`
-	WarmupReceipts         int64 `json:"warmup_receipts"`
+	// IncompleteEnvelopes counts sampled mass-quote envelopes that produced
+	// receipts for fewer than orders_per_record distinct orders. Always 0 at
+	// orders_per_record=1, where an envelope is one order by definition.
+	IncompleteEnvelopes int64 `json:"incomplete_envelopes_sampled"`
+	MissingReceipts     int64 `json:"missing_receipts"`
+	WarmupReceipts      int64 `json:"warmup_receipts"`
 	// ClientBound means the pace loop aborted early because the producer buffer
 	// saturated - the level is a statement about the load generator, not the
 	// broker.
@@ -471,39 +576,147 @@ type report struct {
 // order ids: the send timestamp rides in the id, so correlation needs no map
 // ---------------------------------------------------------------------------
 
-// Aggressor (buy) id layout: "<runID><phase>-b<seq>-<sendUnixNanos>".
-// Resting  (sell) id layout: "<runID><phase>-s<seq>-0".
+// Aggressor (buy) id layout: "<runID><phase>-b<seq>[q<k>]-<sendUnixNanos>".
+// Resting  (sell) id layout: "<runID><phase>-s<seq>[q<k>]-0".
 //
 // phase is 'w' (warmup, discarded) or 't' (timed). The run-id prefix keeps
 // ids unique across runs against a long-lived matcher, which METHODOLOGY.md
 // #8 records as a real failure that hangs the harness silently when missing.
+//
+// k is the order's index WITHIN its mass-quote envelope, and is omitted
+// entirely when the envelope holds one order. That omission is deliberate
+// and load-bearing: at -orders-per-record=1 every id is byte-identical to
+// what published runs used, so a baseline level is genuinely the same
+// traffic rather than a near-copy.
+//
+// seq stays the ENVELOPE's sequence, never a per-order counter. Everything
+// downstream is keyed on it - ackTimes, the seq%sampleEvery decision, the
+// disjoint per-producer sequence ranges - and making it per-order would
+// quietly break all three.
+// aggressorID keeps the original four-argument form so every existing call
+// site and test is untouched; it is exactly aggressorIDAt with k=0.
 func aggressorID(runID int64, phase byte, seq int64, sendNanos int64) string {
+	return aggressorIDAt(runID, phase, seq, 0, sendNanos)
+}
+
+func aggressorIDAt(runID int64, phase byte, seq int64, k int, sendNanos int64) string {
 	var b strings.Builder
-	b.Grow(48)
+	b.Grow(56)
 	b.WriteString(strconv.FormatInt(runID, 10))
 	b.WriteByte(phase)
 	b.WriteString("-b")
 	b.WriteString(strconv.FormatInt(seq, 10))
+	appendEnvelopeIndex(&b, k)
 	b.WriteByte('-')
 	b.WriteString(strconv.FormatInt(sendNanos, 10))
 	return b.String()
 }
 
+// restingID, same contract as aggressorID: the original signature, k=0.
 func restingID(runID int64, phase byte, seq int64) string {
+	return restingIDAt(runID, phase, seq, 0)
+}
+
+func restingIDAt(runID int64, phase byte, seq int64, k int) string {
 	var b strings.Builder
-	b.Grow(32)
+	b.Grow(40)
 	b.WriteString(strconv.FormatInt(runID, 10))
 	b.WriteByte(phase)
 	b.WriteString("-s")
 	b.WriteString(strconv.FormatInt(seq, 10))
+	appendEnvelopeIndex(&b, k)
 	b.WriteString("-0")
 	return b.String()
 }
 
+// appendEnvelopeIndex writes nothing for k==0, which is what keeps a
+// single-order id identical to the pre-envelope format.
+func appendEnvelopeIndex(b *strings.Builder, k int) {
+	if k == 0 {
+		return
+	}
+	b.WriteByte('q')
+	b.WriteString(strconv.Itoa(k))
+}
+
+// encodeEnvelopePair builds the two record VALUES for one crossing pair of
+// envelopes: n resting sells, then n aggressor buys that cross them.
+//
+// Pure, and deliberately not inline in sendOne's closure, so the bytes it
+// produces can be pinned by a golden test - which is the only way to keep
+// the n==1 path honest. At n==1 it emits exactly what the pre-envelope
+// loadgen emitted, down to the byte, including the single-order type byte
+// rather than a count=1 envelope.
+//
+// sendNanos is stamped into the aggressor ids only; pass 0 when building the
+// resting leg, whose ids carry a literal "-0" instead.
+func encodeEnvelopePair(runID int64, phase byte, seq int64, n int, sendNanos int64) (sell, buy []byte) {
+	if n <= 1 {
+		sell = wire.EncodeNewOrder(wire.NewOrder{
+			OrderID: restingID(runID, phase, seq), Participant: "seller", Side: 1, Price: 100, Qty: 1,
+		})
+		buy = wire.EncodeNewOrder(wire.NewOrder{
+			OrderID: aggressorID(runID, phase, seq, sendNanos), Participant: "buyer", Side: 0, Price: 200, Qty: 1,
+		})
+		return sell, buy
+	}
+	sells := make([]wire.NewOrder, n)
+	buys := make([]wire.NewOrder, n)
+	for k := 0; k < n; k++ {
+		sells[k] = wire.NewOrder{
+			OrderID: restingIDAt(runID, phase, seq, k), Participant: "seller", Side: 1, Price: 100, Qty: 1,
+		}
+		buys[k] = wire.NewOrder{
+			OrderID: aggressorIDAt(runID, phase, seq, k, sendNanos), Participant: "buyer", Side: 0, Price: 200, Qty: 1,
+		}
+	}
+	return wire.EncodeMassQuote(wire.MassQuote{Orders: sells}),
+		wire.EncodeMassQuote(wire.MassQuote{Orders: buys})
+}
+
+// encodeBookPreload builds records that REST rather than cross, so the
+// matcher's book carries a known depth before anything is measured.
+//
+// Prices step away from the crossing band the measured traffic uses (sells at
+// 100, buys at 200): preload sells sit far above 200 and preload buys far
+// below 100, so they can never match each other or the measured pairs, and
+// they stay resting for the whole run instead of being consumed by it.
+//
+// Ids use a negative sequence space so they cannot collide with measured
+// traffic, and phase 'p' so any receipt from one is discarded rather than
+// counted - the preload is setup, not measurement.
+func encodeBookPreload(runID int64, depth int) [][]byte {
+	out := make([][]byte, 0, depth*2)
+	for i := 0; i < depth; i++ {
+		seq := int64(-(i + 1))
+		out = append(out, wire.EncodeNewOrder(wire.NewOrder{
+			OrderID:     restingID(runID, 'p', seq),
+			Participant: "depth-seller",
+			Side:        1,
+			// Well above the measured buy at 200, so it never crosses.
+			Price: 100000 + int64(i),
+			Qty:   1,
+		}))
+		out = append(out, wire.EncodeNewOrder(wire.NewOrder{
+			OrderID:     restingID(runID, 'p', seq-int64(depth)),
+			Participant: "depth-buyer",
+			Side:        0,
+			// Well below the measured sell at 100, so it never crosses.
+			Price: 1 + int64(i),
+			Qty:   1,
+		}))
+	}
+	return out
+}
+
 type parsedID struct {
-	runID     int64
-	phase     byte
-	seq       int64
+	runID int64
+	phase byte
+	seq   int64
+	// k is the order's index within its envelope; 0 both for a
+	// single-order record and for the first order of an envelope, which is
+	// why k alone never identifies an order - the pair (seq, k) does.
+	k         int
 	sendNanos int64
 	ok        bool
 }
@@ -528,7 +741,20 @@ func parseAggressorID(id string) parsedID {
 	if dash < 0 {
 		return parsedID{}
 	}
-	seq, err := strconv.ParseInt(rest[:dash], 10, 64)
+	// The seq field carries an optional "q<k>" suffix for an order inside a
+	// mass-quote envelope. Absent means k=0, which is also a single-order
+	// record - the two are the same thing by construction.
+	seqField := rest[:dash]
+	k := 0
+	if q := strings.IndexByte(seqField, 'q'); q >= 0 {
+		parsed, err := strconv.Atoi(seqField[q+1:])
+		if err != nil {
+			return parsedID{}
+		}
+		k = parsed
+		seqField = seqField[:q]
+	}
+	seq, err := strconv.ParseInt(seqField, 10, 64)
 	if err != nil {
 		return parsedID{}
 	}
@@ -536,7 +762,7 @@ func parseAggressorID(id string) parsedID {
 	if err != nil {
 		return parsedID{}
 	}
-	return parsedID{runID: runID, phase: phase, seq: seq, sendNanos: sendNanos, ok: true}
+	return parsedID{runID: runID, phase: phase, seq: seq, k: k, sendNanos: sendNanos, ok: true}
 }
 
 // ---------------------------------------------------------------------------
@@ -792,22 +1018,42 @@ type collector struct {
 	// Send instant for each totalLat sample, same index. Kept so a window can
 	// be sliced in time; an aggregate cannot say when a stall began or how
 	// long it lasted, which for a leadership move are the diagnostic facts.
-	totalSend   []int64
-	matchLat    []float64
-	relayLat    []float64
-	skewEst     []float64
-	skewUnc     []float64
-	sampledSeen map[int64]int
-	sendNanos   map[int64]int64     // sampled timed orders only
-	ackTimes    map[int64]time.Time // sampled timed orders only
+	totalSend []int64
+	matchLat  []float64
+	relayLat  []float64
+	skewEst   []float64
+	skewUnc   []float64
+	// Keyed by (envelope seq, index within envelope), NOT by seq alone.
+	// Keeping the threshold at num_probes PER ORDER is what preserves the
+	// meaning of duplicate_receipts_sampled: a per-envelope count of
+	// N*num_probes cannot tell "order 3 arrived twice, order 7 never" from
+	// "all arrived once", and those have different causes - replay versus
+	// loss. Bounded by the sampled subset, same as before.
+	sampledSeen map[orderKey]int
+	// Distinct order indices seen per sampled envelope. Batching destroys
+	// the ability of a total-receipt reconciliation to notice a partial
+	// envelope (another envelope double-emitting can balance the books), so
+	// this is what replaces it.
+	envelopeSeen map[int64]map[int]struct{}
+	sendNanos    map[int64]int64     // sampled timed envelopes only
+	ackTimes     map[int64]time.Time // sampled timed envelopes only
+}
+
+// orderKey identifies one order inside one envelope. At
+// -orders-per-record=1 every key has K=0, so this behaves exactly as the
+// previous seq-keyed map did.
+type orderKey struct {
+	Seq int64
+	K   int
 }
 
 func newCollector(runID int64, numProbes, sampleEvery int) *collector {
 	return &collector{
 		runID: runID, numProbes: numProbes, sampleEvery: sampleEvery,
-		sampledSeen: map[int64]int{},
-		sendNanos:   map[int64]int64{},
-		ackTimes:    map[int64]time.Time{},
+		sampledSeen:  map[orderKey]int{},
+		envelopeSeen: map[int64]map[int]struct{}{},
+		sendNanos:    map[int64]int64{},
+		ackTimes:     map[int64]time.Time{},
 	}
 }
 
@@ -940,9 +1186,17 @@ func (c *collector) onFill(value []byte, observedAt time.Time) {
 		}
 		sendT := time.Unix(0, pid.sendNanos)
 		c.mu.Lock()
-		c.totalLat = append(c.totalLat, float64(observedAt.Sub(sendT).Nanoseconds())/1000)
-		c.totalSend = append(c.totalSend, sendT.UnixNano())
-		c.sampledSeen[pid.seq]++
+		// One latency sample per (envelope, probe), not per order: every
+		// order in an envelope shares one send instant and is observed in
+		// one fills record, so the other N-1 samples would be exact copies.
+		// Appending them would multiply Samples and OverMicros by N while
+		// adding nothing, and OverMicros' documented meaning is a count of
+		// affected units.
+		if pid.k == 0 {
+			c.totalLat = append(c.totalLat, float64(observedAt.Sub(sendT).Nanoseconds())/1000)
+			c.totalSend = append(c.totalSend, sendT.UnixNano())
+		}
+		c.noteOrderSeenLocked(pid)
 		c.mu.Unlock()
 	}
 }
@@ -987,15 +1241,23 @@ func (c *collector) onReceipt(value string, observedAt time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// total and relay_consume get one sample per (order, probe) pair - those
-	// are the two that scale with fan-out, so the full N-wide distribution is
-	// the point. match does not vary per probe (same order, same matcher
-	// run), so it is recorded once, on the first receipt seen for the order.
-	c.totalLat = append(c.totalLat, float64(receiptT.Sub(sendT).Nanoseconds())/1000)
-	c.totalSend = append(c.totalSend, sendT.UnixNano())
-	c.relayLat = append(c.relayLat, float64(receiptT.Sub(matchedT).Nanoseconds())/1000)
+	// total and relay_consume get one sample per (ENVELOPE, probe) pair.
+	// Per probe is the point - those two scale with fan-out, so the full
+	// probe-wide distribution matters. Per order is not: relay-probe reads
+	// its clock once per record, before the id loop, and the guest stamps
+	// matched_at_nanos once per record, so every order in an envelope
+	// carries byte-identical stamps against one send instant. The other N-1
+	// would be duplicates inflating Samples and OverMicros by N.
+	//
+	// match does not vary per probe either (same envelope, same matcher
+	// run), so it is recorded once, on the first receipt seen for it.
+	if pid.k == 0 {
+		c.totalLat = append(c.totalLat, float64(receiptT.Sub(sendT).Nanoseconds())/1000)
+		c.totalSend = append(c.totalSend, sendT.UnixNano())
+		c.relayLat = append(c.relayLat, float64(receiptT.Sub(matchedT).Nanoseconds())/1000)
+	}
 
-	if c.sampledSeen[pid.seq] == 0 {
+	if c.sampledSeen[orderKey{Seq: pid.seq}] == 0 && pid.k == 0 {
 		if ackT, ok := c.ackTimes[pid.seq]; ok {
 			c.matchLat = append(c.matchLat, float64(matchedT.Sub(ackT).Nanoseconds())/1000)
 		}
@@ -1009,7 +1271,18 @@ func (c *collector) onReceipt(value string, observedAt time.Time) {
 		c.skewEst = append(c.skewEst, float64(receiptT.Sub(mid).Nanoseconds())/1000)
 		c.skewUnc = append(c.skewUnc, float64(observedAt.Sub(sendT).Nanoseconds())/2000)
 	}
-	c.sampledSeen[pid.seq]++
+	c.noteOrderSeenLocked(pid)
+}
+
+// noteOrderSeenLocked records one receipt for one order. Caller holds c.mu.
+func (c *collector) noteOrderSeenLocked(pid parsedID) {
+	c.sampledSeen[orderKey{Seq: pid.seq, K: pid.k}]++
+	seen := c.envelopeSeen[pid.seq]
+	if seen == nil {
+		seen = map[int]struct{}{}
+		c.envelopeSeen[pid.seq] = seen
+	}
+	seen[pid.k] = struct{}{}
 }
 
 func main() {
@@ -1059,7 +1332,24 @@ func main() {
 		warmup   = flag.Duration("warmup", 5*time.Second, "length of the warmup window; its records are produced and its receipts discarded, absorbing VM cold start and connection/metadata setup")
 		pacing   = flag.String("pacing", "fixed", "inter-arrival pacing: fixed (constant interval) or poisson (exponential, bursty - closer to a real arrival process and harder on queues)")
 
-		payloadBytes  = flag.Int("payload-bytes", 0, "pad each order's value to at least this many bytes with filler. Both wire decoders stop at the fixed layout and ignore trailing bytes, so this changes record size without changing semantics. 0 leaves orders at their natural size")
+		payloadBytes = flag.Int("payload-bytes", 0, "pad each order's value to at least this many bytes with filler. Both wire decoders stop at the fixed layout and ignore trailing bytes, so this changes record size without changing semantics. 0 leaves orders at their natural size")
+		bookDepth    = flag.Int("book-depth", 0,
+			"resting orders to preload into the matcher's book before the measured window, per side.\n"+
+				"\t0 (the default) is the historical traffic, in which EVERY pair crosses immediately and the book\n"+
+				"\ttherefore never grows - which is why book depth has never been measured here despite being the\n"+
+				"\tfirst thing an exchange engineer asks about. The preload uses non-crossing prices, so the orders\n"+
+				"\tsit in the book for the whole run and every measured order matches against a book of this depth.\n"+
+				"\tExpect the reference guest to degrade super-linearly: its Book is a sorted Vec with a linear-scan\n"+
+				"\tcancel, so this measures THAT guest's data structure, not an engine limit")
+		ordersPerRecord = flag.Int("orders-per-record", 1,
+			"orders carried in ONE record, as an exchange mass-quote message does.\n"+
+				"\t1 (the default) emits the historical one-order-per-record traffic, byte-identical to published runs.\n"+
+				"\tAbove 1 the records become wire type 2 envelopes and -rate still means ORDERS per second, so the\n"+
+				"\tenvelope rate is rate/N and the record rate is 2*rate/N. This is the knob that separates orders/sec\n"+
+				"\tfrom records/sec: the transform output-write path costs ~25us of CPU per RECORD against ~3us of guest\n"+
+				"\twork, so N orders in one record amortise that over N orders instead of paying it once each.\n"+
+				"\tNote the latency sample population SHRINKS by N - one record earns one send instant, one match stamp\n"+
+				"\tand one receipt - so per-order latency does not exist here and -sample-every must come down to match")
 		sampleEvery   = flag.Int("sample-every", 1, "compute per-record latency for 1 in N orders. Receipt counts and rates always cover every order; this only bounds the memory the latency distributions take at high rates")
 		maxBuffered   = flag.Int("max-buffered", 200000, "franz-go producer buffer ceiling. Hitting it makes Produce block, which surfaces as send_lateness instead of being silently absorbed")
 		metricsListen = flag.String("metrics-listen", "", "serve live Prometheus metrics on this address (\":9110\" or just \"9110\"). Off when empty, which is the default - the published numbers come from this report, not from a scrape, so the endpoint is purely for watching a run in flight. Costs one bool check per sample when off")
@@ -1210,6 +1500,16 @@ func main() {
 		}
 		return b
 	}
+	// The real on-the-wire size of one input record, measured rather than
+	// assumed: -payload-bytes pads to a MINIMUM, so once an envelope exceeds
+	// it the padding stops applying and the record size is whatever the
+	// envelope encodes to. Built from a representative pair so the figure in
+	// the report is the one actually sent.
+	inputBytesPerRecord := 0
+	{
+		_, probe := encodeEnvelopePair(runID, 't', 0, *ordersPerRecord, time.Now().UnixNano())
+		inputBytesPerRecord = len(pad(probe))
+	}
 
 	// ----- receipt collector -----
 	collectCtx, stopCollect := context.WithCancel(context.Background())
@@ -1304,9 +1604,8 @@ func main() {
 		if *keyByPair {
 			pairKey = []byte(strconv.FormatInt(seq, 10))
 		}
-		sell := pad(wire.EncodeNewOrder(wire.NewOrder{
-			OrderID: restingID(runID, phase, seq), Participant: "seller", Side: 1, Price: 100, Qty: 1,
-		}))
+		sellRaw, buyRaw := encodeEnvelopePair(runID, phase, seq, *ordersPerRecord, 0)
+		sell := pad(sellRaw)
 		pc.Produce(context.Background(), &kgo.Record{Topic: *inputTopic, Key: pairKey, Value: sell}, func(_ *kgo.Record, err error) {
 			if err != nil {
 				produceErrors.Add(1)
@@ -1314,10 +1613,12 @@ func main() {
 			}
 		})
 
+		// Read the clock as late as possible: the aggressor ids carry it,
+		// so it has to be the moment before this record is handed to the
+		// producer, not before the resting leg was built.
 		sendNanos := time.Now().UnixNano()
-		buy := pad(wire.EncodeNewOrder(wire.NewOrder{
-			OrderID: aggressorID(runID, phase, seq, sendNanos), Participant: "buyer", Side: 0, Price: 200, Qty: 1,
-		}))
+		_, buyRaw = encodeEnvelopePair(runID, phase, seq, *ordersPerRecord, sendNanos)
+		buy := pad(buyRaw)
 		timedSample := phase == 't' && sampled
 		if timedSample {
 			coll.recordSend(seq, sendNanos)
@@ -1334,8 +1635,15 @@ func main() {
 				coll.recordAck(seq, time.Now())
 			}
 		})
+		// Two RECORDS per envelope pair regardless of how many orders they
+		// carry: this counter feeds WindowCoverage against transform
+		// invocations, which are per record.
 		recordsSent.Add(2)
-		live.ordersSent.Add(1)
+		// ...and N ORDERS, which is the unit -rate is expressed in and the
+		// unit a customer compares against. Keeping both is the whole point
+		// of this work; collapsing them is what made our numbers
+		// incomparable to theirs.
+		live.ordersSent.Add(int64(*ordersPerRecord))
 	}
 
 	// pace runs the send loop against an absolute schedule anchored at the
@@ -1355,7 +1663,12 @@ func main() {
 	paceOne := func(idx int, phase byte, window time.Duration, start time.Time) int64 {
 		pc := producers[idx]
 		n := int64(*numProducers)
+		// myRate is this producer's share of the OFFERED ORDER RATE; the loop
+		// below sends one ENVELOPE per iteration, carrying N orders. Pacing
+		// on the order rate would offer N times the requested orders/sec, so
+		// the schedule has to run on envelopes.
 		myRate := *rate / float64(*numProducers)
+		myEnvelopeRate := myRate / float64(*ordersPerRecord)
 		rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(idx)))
 		deadline := start.Add(window)
 		var count int64
@@ -1375,9 +1688,12 @@ func main() {
 			if now.After(deadline) {
 				return count
 			}
-			if phase == 't' && myRate > 0 {
+			if phase == 't' && myEnvelopeRate > 0 {
 				if elapsed := now.Sub(start); elapsed > bailAfter {
-					if achieved := float64(count) / elapsed.Seconds(); achieved < myRate*bailBelow {
+					// count is ENVELOPES, so it has to be compared against
+					// the envelope rate. Against the order rate every N>1
+					// level reads as client-bound and aborts in seconds.
+					if achieved := float64(count) / elapsed.Seconds(); achieved < myEnvelopeRate*bailBelow {
 						clientBoundMu.Lock()
 						first := !clientBound
 						clientBound = true
@@ -1390,11 +1706,11 @@ func main() {
 					}
 				}
 			}
-			if myRate > 0 {
+			if myEnvelopeRate > 0 {
 				if *pacing == "poisson" {
-					offset += time.Duration(rng.ExpFloat64() / myRate * float64(time.Second))
+					offset += time.Duration(rng.ExpFloat64() / myEnvelopeRate * float64(time.Second))
 				} else {
-					offset += time.Duration(float64(time.Second) / myRate)
+					offset += time.Duration(float64(time.Second) / myEnvelopeRate)
 				}
 				target := start.Add(offset)
 				waitUntil(target)
@@ -1439,6 +1755,41 @@ func main() {
 			total += c
 		}
 		return total
+	}
+
+	// Book depth, before anything else touches the matcher. These rest and
+	// are never consumed, so every warmup and timed order afterwards matches
+	// against a book of this depth - which is the point, since the default
+	// traffic crosses immediately and leaves the book empty.
+	//
+	// Sent through producer 0 with the same pair key as the measured traffic
+	// so they land on the same partition, and therefore in the same book:
+	// preload on a different partition would be a book nobody matches against.
+	if *bookDepth > 0 {
+		preload := encodeBookPreload(runID, *bookDepth)
+		log.Printf("loadgen: preloading %d resting orders per side (%d records) before warmup",
+			*bookDepth, len(preload))
+		var preloadErrs atomic.Int64
+		for _, rec := range preload {
+			var k []byte
+			if *keyByPair {
+				k = []byte(strconv.FormatInt(0, 10))
+			}
+			producers[0].Produce(context.Background(),
+				&kgo.Record{Topic: *inputTopic, Key: k, Value: pad(rec)},
+				func(_ *kgo.Record, err error) {
+					if err != nil {
+						preloadErrs.Add(1)
+					}
+				})
+		}
+		flushAll()
+		if n := preloadErrs.Load(); n > 0 {
+			log.Fatalf("loadgen: %d of %d book-preload records failed to produce; the measured window would run against an unknown book depth", n, len(preload))
+		}
+		// Give the matcher time to actually ingest them, or the first
+		// measured orders see a partially-built book.
+		time.Sleep(3 * time.Second)
 	}
 
 	log.Printf("loadgen: warmup %s at %.0f orders/sec across %d producer(s) (%s pacing, linger %dms)",
@@ -1505,7 +1856,17 @@ func main() {
 
 	elapsed := sendElapsed.Seconds()
 	received := coll.timedReceipts.Load()
-	expected := sent * int64(*numProbes)
+	// `sent` counts ENVELOPES, which at the historical N=1 was also the order
+	// count - hence the three units below, all of which were one number
+	// before mass quotes and diverge by exactly N now.
+	envelopesSent := sent
+	ordersSent := sent * int64(*ordersPerRecord)
+	// Two records per envelope pair: one resting leg, one aggressor leg.
+	recordsSentDerived := envelopesSent * 2
+	// One receipt per ORDER per probe - an envelope of N orders yields one
+	// output record carrying N fills, and relay-probe emits one receipt line
+	// per fill, so the count scales with orders rather than with records.
+	expected := ordersSent * int64(*numProbes)
 
 	// Which stages mix clocks depends on WHERE the receipt timestamp comes from,
 	// so this cannot be a static list. It was one, and that mislabelled every
@@ -1532,6 +1893,8 @@ func main() {
 			OfferedRate: *rate, Duration: duration.String(), Warmup: warmup.String(),
 			Pacing: *pacing, PayloadBytes: *payloadBytes, NumProbes: *numProbes,
 			SampleEvery: *sampleEvery, MaxBuffered: *maxBuffered, KeyByPair: *keyByPair, LingerMs: *lingerMs, Acks: *acksMode, Producers: *numProducers,
+			OrdersPerRecord: *ordersPerRecord, LatencySampleUnit: "envelope",
+			InputBytesPerRecord: inputBytesPerRecord, BookDepth: *bookDepth,
 			MetadataMinAge: metadataMinAge.String(), RetryBackoffMax: retryBackoffMax.String(),
 			InputTopic: *inputTopic, ProbeTopic: *probeTopic, TransformName: *transformName,
 		},
@@ -1542,12 +1905,15 @@ func main() {
 			SkewSamples:       len(skewEstCopy),
 		},
 		Rates: ratesReport{
-			OfferedPerSec:       *rate,
-			OrdersSent:          sent,
-			RecordsSent:         recordsSent.Load(),
-			ProduceErrors:       produceErrors.Load(),
-			ProduceErrorsByKind: errTally.snapshot(),
-			ElapsedSeconds:      elapsed,
+			OfferedPerSec:          *rate,
+			OfferedEnvelopesPerSec: *rate / float64(*ordersPerRecord),
+			OrdersSent:             ordersSent,
+			EnvelopesSent:          envelopesSent,
+			RecordsSent:            recordsSent.Load(),
+			AchievedRecordsPerSec:  ratePerSec(recordsSentDerived, elapsed),
+			ProduceErrors:          produceErrors.Load(),
+			ProduceErrorsByKind:    errTally.snapshot(),
+			ElapsedSeconds:         elapsed,
 		},
 		ExpectedReceipts: expected,
 		ReceivedReceipts: received,
@@ -1579,7 +1945,11 @@ func main() {
 		rep.Clock.NegativeMatchNote = note
 	}
 	if elapsed > 0 {
-		rep.Rates.AttemptedPerSec = float64(sent) / elapsed
+		// Attempted is in ORDERS, to compare directly against the offered
+		// order rate. `sent` is envelopes, so it needs the N factor;
+		// AchievedOrdersPerSec below already lands in orders because
+		// receipts are per order.
+		rep.Rates.AttemptedPerSec = float64(ordersSent) / elapsed
 		rep.Rates.AchievedReceiptsPerSec = float64(received) / elapsed
 		rep.Rates.AchievedOrdersPerSec = float64(received) / float64(*numProbes) / elapsed
 		if *rate > 0 {
@@ -1588,6 +1958,18 @@ func main() {
 		}
 	}
 	coll.mu.Lock()
+	// Partial envelopes: an envelope whose sampled receipts cover fewer than
+	// N distinct order indices lost orders somewhere in the matcher or the
+	// relay. Nothing else in this report can see it - total receipts can
+	// still reconcile if a different envelope double-emitted - so this is
+	// what replaces the reconciliation batching took away.
+	if *ordersPerRecord > 1 {
+		for _, seen := range coll.envelopeSeen {
+			if len(seen) < *ordersPerRecord {
+				rep.IncompleteEnvelopes++
+			}
+		}
+	}
 	for _, n := range coll.sampledSeen {
 		if n > *numProbes {
 			rep.DuplicateReceipts += int64(n - *numProbes)
@@ -1618,7 +2000,12 @@ func main() {
 		// 1000 keeps very low rates from tripping on a handful of records.
 		threshold := 1000.0
 		if *rate > 0 {
-			if q := *rate * 2 * 0.25; q > threshold {
+			// Offered RECORDS/sec, which is two per envelope and therefore
+			// 2*rate/N, not 2*rate. Left as 2*rate this gate goes N times
+			// too lenient at N>1 and a saturated level reports CLEAN with
+			// latency percentiles that are really queue depths - the one
+			// failure in this file that is both silent and flattering.
+			if q := *rate * 2 / float64(*ordersPerRecord) * 0.25; q > threshold {
 				threshold = q
 			}
 		}
@@ -1627,7 +2014,7 @@ func main() {
 			rep.Lag.FinalLag > threshold
 		rep.Lag.PeakedAboveThreshold = rep.Lag.MaxLag > threshold
 	}
-	rep.Resources = buildResources(before, after, sent, *transformName)
+	rep.Resources = buildResources(before, after, ordersSent, recordsSentDerived, *transformName)
 	rep.Clean, rep.UncleanReasons = judge(&rep)
 
 	enc, err := json.MarshalIndent(rep, "", "  ")
@@ -1662,7 +2049,11 @@ func main() {
 // redpanda_transform_execution_latency_sec_count rather than derived from
 // anything the client counted. Both figures are reported: per invocation (the
 // real per-record cost) and per order (what a claim in orders/sec needs).
-func buildResources(before, after *snapshot, orders int64, transformName string) resourcesReport {
+// orders and records are deliberately separate parameters. They were one
+// before mass quotes, and at N>1 they diverge: CPU-per-order divides by
+// orders, while a relay logical push is per RECORD. Passing one value for
+// both silently scales one of them by 1/N.
+func buildResources(before, after *snapshot, orders, records int64, transformName string) resourcesReport {
 	r := resourcesReport{PerFunction: map[string]funcResource{}}
 	if before == nil || after == nil {
 		return r
@@ -1692,6 +2083,9 @@ func buildResources(before, after *snapshot, orders int64, transformName string)
 		}
 		if orders > 0 {
 			fr.CPUMicrosPerOrder = d * 1e6 / float64(orders)
+			if records > 0 {
+				fr.CPUMicrosPerRecord = d * 1e6 / float64(records)
+			}
 		}
 		r.PerFunction[name] = fr
 	}
@@ -1717,7 +2111,9 @@ func buildResources(before, after *snapshot, orders int64, transformName string)
 	if r.RelayPushesDelta > 0 {
 		r.RelayDeliveredPerShardPass = r.RelayDeliveredDelta / r.RelayPushesDelta
 	}
-	if logical := float64(orders) * 2; logical > 0 {
+	// A logical push is one output RECORD, which is two per envelope pair -
+	// not two per order. At N>1 these differ by exactly N.
+	if logical := float64(records); logical > 0 {
 		r.RelayDeliveredPerLogicalPush = r.RelayDeliveredDelta / logical
 	}
 	return r
@@ -1928,6 +2324,10 @@ func judge(rep *report) (bool, []string) {
 			rep.Resources.WindowCoverage = coverage
 		}
 	}
+	if rep.IncompleteEnvelopes > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d sampled envelope(s) produced receipts for fewer than %d orders: orders were lost inside an envelope, in the matcher or the relay. Total receipt counts can still reconcile when this happens - another envelope emitting twice balances them - so this is the only check that sees it",
+			rep.IncompleteEnvelopes, rep.Config.OrdersPerRecord))
+	}
 	if rep.DuplicateReceipts > 0 {
 		reasons = append(reasons, fmt.Sprintf("%d duplicate receipts on the sampled subset (max %d for one order, expected %d): the record was processed more than once, which is what a processor restart does - it resumes from the last committed offset and replays up to data_transforms_commit_interval_ms of work. Counts and latencies both include the replay",
 			rep.DuplicateReceipts, rep.MaxReceiptsForAnyOrder, rep.Config.NumProbes))
@@ -1973,7 +2373,14 @@ func judge(rep *report) (bool, []string) {
 	// Fixed pacing only: under -pacing burst or open-loop there is no
 	// per-order schedule to be late against.
 	if rep.Config.Pacing == "fixed" && rep.Config.OfferedRate > 0 && rep.SendLateness.Samples > 0 {
-		intervalMicros := 1e6 / rep.Config.OfferedRate
+		// One pacing slot is one ENVELOPE, so the interval is 1e6*N/rate.
+		// Against the bare order rate every N>1 level reports "pacing not
+		// held" - N times too strict, and loudly wrong on every level.
+		n := rep.Config.OrdersPerRecord
+		if n < 1 {
+			n = 1
+		}
+		intervalMicros := 1e6 * float64(n) / rep.Config.OfferedRate
 		if rep.SendLateness.P99Micros > intervalMicros {
 			reasons = append(reasons, fmt.Sprintf(
 				"pacing not held: send_lateness p99 %.0fus exceeds the %.0fus pacing interval "+

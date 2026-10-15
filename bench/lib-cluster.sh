@@ -209,27 +209,90 @@ transfer_leadership_to_node() {
   return 1
 }
 
-# Co-locate one topic's leadership onto whichever node already leads the
-# reference topic's matching partition.
+# Every node id holding a replica of one partition, space separated.
+partition_replicas() {
+  curl -sf "$ADMIN_URL/v1/cluster/partitions" | \
+    jq -r --arg t "$1" --argjson p "$2" \
+      '.[] | select(.topic==$t and .partition_id==$p)
+        | [.replicas[].node_id] | sort | join(" ")' 2>/dev/null
+}
+
+# Move one partition's replicas onto an exact node set and wait until the
+# cluster reports that set. Only meant for an EMPTY partition (just created):
+# on a partition carrying data this would trigger a real rebalance.
+realign_replicas() {
+  local topic="$1" partition="$2" nodes="$3"
+  local want; want="$(printf '%s\n' $nodes | sort | tr '\n' ' ' | sed 's/ $//')"
+  rpkc cluster partitions move "$topic" -p "$partition:$(printf '%s\n' $nodes | paste -sd,)" >/dev/null 2>&1 || return 1
+  for _ in $(seq 1 60); do
+    [ "$(partition_replicas "$topic" "$partition")" = "$want" ] && return 0
+    sleep 2
+  done
+  return 1
+}
+
+# Co-locate one topic's leadership with the reference topic's, per partition.
 #
 # This is the actual requirement - the relay has no cross-node hop, so the
-# producer's input topic and the relay ntp must share a node per partition - and
-# it is strictly easier to satisfy than forcing both onto a chosen node: one
-# transfer instead of two, and it never fights the balancer over which node
-# "should" lead. Which node wins does not matter for these experiments; that
-# they match does.
+# producer's input topic and the relay ntp must share a node per partition.
+# Which node wins does not matter for these experiments; that they match does.
+#
+# It used to simply transfer $topic's leadership onto whoever led $reference,
+# on the stated assumption that "at RF>1 the replicas already exist on every
+# node". That is true only while broker_count == RF, which was the case for
+# every run before 2026-10-14. On a SIX broker cluster at RF=3 the two topics
+# get different three-node replica sets, leadership cannot be transferred to a
+# node that holds no replica, and the whole sweep aborted with "leadership
+# never moved to node 3".
+#
+# So: intersect the two replica sets and move BOTH topics onto a node in the
+# intersection. Prefer a node that already leads one of them, which keeps this
+# to a single transfer in the common case and avoids fighting the balancer.
 colocate_leadership() {
   local topic="$1" reference="$2" nparts="$3"
   echo "  co-locating $topic leadership with $reference ($nparts partitions)"
   local failed=0
   for i in $(seq 0 $((nparts - 1))); do
-    local ref_node
+    local ref_node top_node ref_reps top_reps common target
     read -r ref_node _ <<< "$(partition_placement "$reference" "$i")"
-    if [ -z "$ref_node" ]; then
-      echo "    WARNING: could not read $reference/$i leader" >&2
+    read -r top_node _ <<< "$(partition_placement "$topic" "$i")"
+    ref_reps="$(partition_replicas "$reference" "$i")"
+    top_reps="$(partition_replicas "$topic" "$i")"
+    if [ -z "$ref_reps" ] || [ -z "$top_reps" ]; then
+      echo "    WARNING: could not read replica sets for $reference/$i or $topic/$i" >&2
       failed=$((failed + 1)); continue
     fi
-    transfer_leadership_to_node "$topic" "$i" "$ref_node" || failed=$((failed + 1))
+    # Nodes holding a replica of BOTH partitions.
+    common="$(comm -12 <(printf '%s\n' $ref_reps | sort) <(printf '%s\n' $top_reps | sort) | tr '\n' ' ')"
+    if [ -z "${common// /}" ]; then
+      # Disjoint replica sets: no leadership transfer can help, so move
+      # $topic's REPLICAS onto $reference's nodes instead. With broker_count >
+      # RF this happens on roughly 1 run in C(brokers,RF) - 1 in 20 at six
+      # brokers and RF=3 - and before this branch existed it aborted the
+      # whole sweep. Safe here because colocation runs right after topic
+      # creation, before anything is produced, so the move carries no data
+      # and completes in seconds.
+      echo "    $reference/$i (nodes: $ref_reps) and $topic/$i (nodes: $top_reps) share no node;"
+      echo "    moving $topic/$i replicas onto $ref_reps"
+      if ! realign_replicas "$topic" "$i" "$ref_reps"; then
+        echo "    ERROR: could not move $topic/$i replicas onto $ref_reps" >&2
+        failed=$((failed + 1)); continue
+      fi
+      top_reps="$(partition_replicas "$topic" "$i")"
+      read -r top_node _ <<< "$(partition_placement "$topic" "$i")"
+      common="$ref_reps"
+    fi
+    # Fewest transfers: if a current leader is already in the intersection,
+    # keep it and move only the other topic.
+    if [[ " $common " == *" $ref_node "* ]]; then
+      target="$ref_node"
+    elif [[ " $common " == *" $top_node "* ]]; then
+      target="$top_node"
+    else
+      target="$(printf '%s\n' $common | head -1)"
+    fi
+    transfer_leadership_to_node "$reference" "$i" "$target" || { failed=$((failed + 1)); continue; }
+    transfer_leadership_to_node "$topic" "$i" "$target" || { failed=$((failed + 1)); continue; }
   done
   if [ "$failed" -gt 0 ]; then
     echo "    ERROR: $failed partition(s) not co-located - the relay would deliver NOTHING" >&2

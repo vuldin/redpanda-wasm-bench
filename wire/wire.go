@@ -25,6 +25,21 @@ type MessageType uint8
 const (
 	MessageNewOrder MessageType = 0
 	MessageCancel   MessageType = 1
+	// MessageMassQuote carries several orders in one record, the way an
+	// exchange's mass-quote message does. It exists so orders/sec and
+	// records/sec can be driven independently: the per-record cost of the
+	// transform output-write path is what sets the rate ceiling, so N orders
+	// in one record amortise that cost over N orders instead of paying it
+	// once per order.
+	//
+	// A distinct type byte, rather than "if bytes remain, parse another
+	// order" bolted onto MessageNewOrder, is deliberate. Trailing bytes after
+	// the fixed layout are filler that every decoder must ignore (loadgen's
+	// -payload-bytes relies on it, and the guests test for it), so an
+	// extension of type 0 would make a padded single-order record from a
+	// published run decode as a mass quote full of garbage. With a new type
+	// byte every existing decoder fails loudly instead.
+	MessageMassQuote MessageType = 2
 )
 
 // ErrShortBuffer is returned by the Decode functions when buf is too
@@ -49,6 +64,15 @@ type Cancel struct {
 	OrderID string
 }
 
+// MassQuote is the decoded form of a MessageMassQuote input record: a
+// single record carrying Orders in sequence. Each order keeps its own
+// OrderID, so per-order delivery accounting survives the batching; what
+// does NOT survive is per-order timing, since one record has exactly one
+// send instant and earns exactly one match stamp and one receipt.
+type MassQuote struct {
+	Orders []NewOrder
+}
+
 // Fill is the wire form of a single match, as reported in an output
 // record. One output record may carry several Fills (all the fills one
 // input order generated), so trades aren't split across a batch flush the
@@ -65,14 +89,25 @@ type Fill struct {
 
 // layout: [type:1][len(orderID):2][orderID][len(participant):2][participant][side:1][price:8][qty:8]
 func EncodeNewOrder(o NewOrder) []byte {
-	buf := make([]byte, 0, 1+2+len(o.OrderID)+2+len(o.Participant)+1+8+8)
+	buf := make([]byte, 0, 1+newOrderBodySize(o))
 	buf = append(buf, byte(MessageNewOrder))
+	return appendNewOrderBody(buf, o)
+}
+
+// appendNewOrderBody writes the type-byte-less body of a NewOrder. It is
+// the single definition of that field layout, shared by EncodeNewOrder and
+// EncodeMassQuote, so the two can never drift apart.
+func appendNewOrderBody(buf []byte, o NewOrder) []byte {
 	buf = appendString(buf, o.OrderID)
 	buf = appendString(buf, o.Participant)
 	buf = append(buf, o.Side)
 	buf = appendInt64(buf, o.Price)
 	buf = appendInt64(buf, o.Qty)
 	return buf
+}
+
+func newOrderBodySize(o NewOrder) int {
+	return 2 + len(o.OrderID) + 2 + len(o.Participant) + 1 + 8 + 8
 }
 
 // layout: [type:1][len(orderID):2][orderID]
@@ -97,30 +132,40 @@ func DecodeNewOrder(buf []byte) (NewOrder, error) {
 	if len(buf) < 1 || MessageType(buf[0]) != MessageNewOrder {
 		return NewOrder{}, ErrUnknownMessageType
 	}
-	rest := buf[1:]
-	orderID, rest, err := readString(rest)
+	// Trailing bytes after the body are filler and are ignored, which is
+	// what makes -payload-bytes padding work.
+	o, _, err := readNewOrderBody(buf[1:])
+	return o, err
+}
+
+// readNewOrderBody decodes the type-byte-less body of a NewOrder and
+// returns whatever follows it. Single definition of the field layout on
+// the decode side, shared by DecodeNewOrder and DecodeMassQuote.
+func readNewOrderBody(buf []byte) (NewOrder, []byte, error) {
+	orderID, rest, err := readString(buf)
 	if err != nil {
-		return NewOrder{}, err
+		return NewOrder{}, nil, err
 	}
 	participant, rest, err := readString(rest)
 	if err != nil {
-		return NewOrder{}, err
+		return NewOrder{}, nil, err
 	}
 	if len(rest) < 1+8+8 {
-		return NewOrder{}, ErrShortBuffer
+		return NewOrder{}, nil, ErrShortBuffer
 	}
 	side := rest[0]
 	rest = rest[1:]
 	price := int64(binary.BigEndian.Uint64(rest))
 	rest = rest[8:]
 	qty := int64(binary.BigEndian.Uint64(rest))
+	rest = rest[8:]
 	return NewOrder{
 		OrderID:     orderID,
 		Participant: participant,
 		Side:        side,
 		Price:       price,
 		Qty:         qty,
-	}, nil
+	}, rest, nil
 }
 
 func DecodeCancel(buf []byte) (Cancel, error) {
@@ -132,6 +177,56 @@ func DecodeCancel(buf []byte) (Cancel, error) {
 		return Cancel{}, err
 	}
 	return Cancel{OrderID: orderID}, nil
+}
+
+// EncodeMassQuote writes one record carrying every order in m.
+//
+// layout: [type:1][count:2] then, per order, the same type-byte-less body
+// EncodeNewOrder writes: [len(orderID):2][orderID][len(participant):2][participant][side:1][price:8][qty:8]
+//
+// count is u16 to match EncodeFills' own count width; the largest envelope
+// this benchmark drives is 100.
+func EncodeMassQuote(m MassQuote) []byte {
+	size := 1 + 2
+	for _, o := range m.Orders {
+		size += newOrderBodySize(o)
+	}
+	buf := make([]byte, 0, size)
+	buf = append(buf, byte(MessageMassQuote))
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(m.Orders)))
+	for _, o := range m.Orders {
+		buf = appendNewOrderBody(buf, o)
+	}
+	return buf
+}
+
+// DecodeMassQuote decodes a MessageMassQuote record. A count of zero is
+// legal and yields no orders. A count larger than the bytes supplied is
+// ErrShortBuffer rather than a partial result, so a truncated record can
+// never be silently processed as a shorter envelope. Trailing bytes after
+// the last order are filler and ignored, same as DecodeNewOrder.
+func DecodeMassQuote(buf []byte) (MassQuote, error) {
+	if len(buf) < 1 || MessageType(buf[0]) != MessageMassQuote {
+		return MassQuote{}, ErrUnknownMessageType
+	}
+	if len(buf) < 1+2 {
+		return MassQuote{}, ErrShortBuffer
+	}
+	count := binary.BigEndian.Uint16(buf[1:])
+	rest := buf[3:]
+	orders := make([]NewOrder, 0, count)
+	for i := uint16(0); i < count; i++ {
+		var (
+			o   NewOrder
+			err error
+		)
+		o, rest, err = readNewOrderBody(rest)
+		if err != nil {
+			return MassQuote{}, err
+		}
+		orders = append(orders, o)
+	}
+	return MassQuote{Orders: orders}, nil
 }
 
 // layout: [count:2] then, per fill: [len(aggressorID):2][aggressorID][len(restingID):2][restingID][len(aggressorParty):2][aggressorParty][len(restingParty):2][restingParty][price:8][qty:8]

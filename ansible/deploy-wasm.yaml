@@ -265,10 +265,59 @@
       register: smt
     - debug: { var: smt.stdout_lines }
 
+    # Moved off dl.redpanda.com on 2026-10-14, because that host stopped
+    # serving: the tokenised URL this used to call started returning
+    # HTTP 400 "Download Restricted: TOKEN_NOT_ACTIVE", and every broker
+    # failed the next task with "No package matching 'redpanda' is
+    # available" after the cluster was already provisioned and billing.
+    # This was announced: TSB-2026-38, "Redpanda Linux deb/rpm package
+    # repositories are moving from dl.redpanda.com to linux.pkg.redpanda.com"
+    # (Cloudsmith -> GCP Artifact Registry/Cloudflare). New packages were
+    # dual-published to both repos from 2026-06-01, and the legacy one was
+    # shut off on Monday 2026-09-28 - eleven days after this playbook's last
+    # successful run on 2026-09-17, which is why it worked then and not now.
+    # So the break was an announced external shutdown rather than a change
+    # here, and nothing in this file would have predicted it.
+    #
+    # The replacement is tokenless and backed by GCP Artifact Registry. Note
+    # it writes a DIFFERENT list file - redpanda.list, where the old one
+    # wrote redpanda-redpanda.list - so the creates: guard had to move with
+    # it. Left pointing at the old filename, this task would re-run on every
+    # deploy, and on a host carrying a stale redpanda-redpanda.list it would
+    # skip and leave apt with no usable repo at all.
     - name: Add the public Redpanda apt repository
       shell: |
-        curl -1sLf 'https://dl.redpanda.com/nzc4ZYQK3WRGd9sy/redpanda/cfg/setup/bash.deb.sh' | sudo -E bash
-      args: { creates: /etc/apt/sources.list.d/redpanda-redpanda.list }
+        curl -1sLf 'https://linux.pkg.redpanda.com/setup-redpanda.deb.sh' | sudo -E bash
+      args: { creates: /etc/apt/sources.list.d/redpanda.list }
+
+    # Fail here, with the reason, rather than three tasks later with
+    # "No package matching 'redpanda' is available" - which says nothing
+    # about WHY and sent the 2026-10-14 debug off to look at networking and
+    # apt config before the repo URL.
+    - name: Verify the repository actually resolves the package
+      # Capture once into a variable and match on that. The obvious version -
+      # `apt-cache policy redpanda | grep -q ...` under `set -o pipefail` -
+      # is wrong and failed every broker on its first outing: grep -q exits
+      # on the first match, apt-cache then takes SIGPIPE and exits 141, and
+      # pipefail turns that into a failed task even though the package was
+      # found. No pipe, no SIGPIPE.
+      shell: |
+        apt-get update -qq >/dev/null 2>&1 || true
+        policy=$(apt-cache policy redpanda 2>/dev/null)
+        echo "$policy" | head -5
+        case "$policy" in
+          *"Candidate: "[0-9]*) ;;
+          *)
+            echo "ERROR: the redpanda apt repository is configured but offers no installable version."
+            echo "       Check https://docs.redpanda.com for the current repository URL - the one"
+            echo "       in this playbook has been retired before (dl.redpanda.com, shut off"
+            echo "       2026-09-28, TSB-2026-38)."
+            exit 1
+            ;;
+        esac
+      args: { executable: /bin/bash }
+      register: rp_pkg
+    - debug: { var: rp_pkg.stdout_lines }
 
     - name: Install Redpanda (package only - gives us the redpanda user/group,
         systemd units, config skeleton, and rpk CLI; the actual redpanda
@@ -679,6 +728,37 @@
                    | map(attribute='b2b_pairs') | list | flatten(levels=1)
           } | to_nice_json }}"
 
+# The co-located-matcher arm (MATCHER_PLACEMENT=loopback in
+# bench/run-traditional-sharded.sh) runs cmd/wasm-client ON a broker, pointed
+# at 127.0.0.1. Without this play there is nothing to exec there and the arm
+# dies with "./wasm-client: No such file or directory" after the cluster is
+# already billing.
+#
+# Only the two files that arm needs, and nothing is started here - the play
+# stages, the runner launches. On a run that never uses the loopback arm these
+# files simply sit unused, which costs a few MB of instance storage.
+- name: Stage the external matcher on brokers, for the co-located arm
+  hosts: broker
+  become: true
+  vars:
+    local_artifacts_dir: /tmp/cloud-deploy
+  tasks:
+    - name: Create the tool directory
+      file: { path: /opt/wasm-bench, state: directory, owner: ubuntu, group: ubuntu, mode: "0755" }
+
+    - name: Ship the external wasm host
+      copy:
+        src: "{{ local_artifacts_dir }}/bin/wasm-client"
+        dest: /opt/wasm-bench/wasm-client
+        mode: "0755"
+
+    - name: Ship the matcher modules it can host
+      copy:
+        src: "{{ local_artifacts_dir }}/{{ item }}"
+        dest: "/opt/wasm-bench/{{ item }}"
+        mode: "0644"
+      loop: [wasm-matcher.wasm, mass-matcher.wasm]
+
 - name: Set up the load client with this project's own tools
   hosts: client
   become: true
@@ -714,7 +794,12 @@
       # wasm-matcher-push.wasm removed with the push-relay stub. relay-probe is
       # the in-broker relay consumer every relay measurement needs; passthrough
       # is E2.3's zero-work control.
-      loop: [wasm-matcher.wasm, relay-probe.wasm, relay-sink.wasm, passthrough.wasm]
+      # mass-matcher is the envelope-capable matcher (wire type 2); it also
+      # handles type 0, so the same module runs the single-order control.
+      # position-tracker was required by scripts/wb's preflight but never
+      # shipped here, so it could not actually be deployed - now it can.
+      loop: [wasm-matcher.wasm, relay-probe.wasm, relay-sink.wasm, passthrough.wasm,
+             position-tracker.wasm, mass-matcher.wasm]
 
     # The push-relay systemd unit that used to live here is gone along with the
     # external Go relay stub it ran: the relay is part of the broker binary now

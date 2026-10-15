@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"os"
@@ -28,6 +29,58 @@ func loadFixture(t *testing.T) []byte {
 		t.Fatalf("decoding fixture hex: %v", err)
 	}
 	return b
+}
+
+// The mass-quote fixture is the input-direction counterpart, and it closes a
+// real gap: until it existed only the Rust-to-Go fills direction was pinned,
+// so the harness could encode an input the guests could not read and both
+// test suites would still pass. The bytes are produced by rust/src/wire.rs -
+// REGEN_WIRE_FIXTURES=1 cargo test emit_mass_quote_fixture - and copied here.
+func loadMassQuoteFixture(t *testing.T) []byte {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/mass-quote-from-rust-guest.hex")
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	b, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("decoding fixture hex: %v", err)
+	}
+	return b
+}
+
+func TestDecodesRustGuestMassQuote(t *testing.T) {
+	m, err := DecodeMassQuote(loadMassQuoteFixture(t))
+	if err != nil {
+		t.Fatalf("DecodeMassQuote on a real guest payload: %v", err)
+	}
+	want := []NewOrder{
+		{OrderID: "a-1", Participant: "alice", Side: 0, Price: 10150, Qty: 7},
+		{OrderID: "a-2", Participant: "alice", Side: 1, Price: -42, Qty: 1},
+		{OrderID: "a-3", Participant: "alice", Side: 0, Price: 100, Qty: 3},
+	}
+	if len(m.Orders) != len(want) {
+		t.Fatalf("got %d orders, want %d", len(m.Orders), len(want))
+	}
+	for i := range want {
+		if m.Orders[i] != want[i] {
+			t.Errorf("order %d:\n got %+v\nwant %+v", i, m.Orders[i], want[i])
+		}
+	}
+}
+
+// Go must also produce bytes Rust can read, so pin this direction against the
+// same fixture: the harness is the encoder in production, and an encoder bug
+// is exactly what a decode-only test cannot see.
+func TestEncodesMassQuoteByteIdenticalToRustGuest(t *testing.T) {
+	got := EncodeMassQuote(MassQuote{Orders: []NewOrder{
+		{OrderID: "a-1", Participant: "alice", Side: 0, Price: 10150, Qty: 7},
+		{OrderID: "a-2", Participant: "alice", Side: 1, Price: -42, Qty: 1},
+		{OrderID: "a-3", Participant: "alice", Side: 0, Price: 100, Qty: 3},
+	}})
+	if want := loadMassQuoteFixture(t); !bytes.Equal(got, want) {
+		t.Errorf("encoder disagrees with the Rust guest:\n got %x\nwant %x", got, want)
+	}
 }
 
 func TestDecodesRustGuestFills(t *testing.T) {

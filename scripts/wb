@@ -325,7 +325,7 @@ cmd_doctor() {
   # cluster exists rather than after it has been billing for a few minutes.
   _missing_wasm=""
   for _w in wasm-matcher.wasm passthrough.wasm relay-probe.wasm relay-sink.wasm \
-            position-tracker.wasm; do
+            position-tracker.wasm mass-matcher.wasm; do
     [ -f "$WASM_DIR/$_w" ] || _missing_wasm="$_missing_wasm $_w"
   done
   [ -x "$WASM_DIR/wasm-client" ] || _missing_wasm="$_missing_wasm wasm-client"
@@ -338,6 +338,44 @@ cmd_doctor() {
     bad=1
   else
     note "OK   guests + host in $WASM_DIR"
+    # The deployed single-order matcher must be the published module, or a
+    # baseline measured with it is a different experiment under the published
+    # name. Free to check here; expensive to discover from a results table.
+    _mmd5=$(md5sum "$WASM_DIR/wasm-matcher.wasm" 2>/dev/null | cut -d' ' -f1)
+    if [ "$_mmd5" = "94c3d0177a754b9f0c1df80c10dea298" ]; then
+      note "OK   wasm-matcher.wasm is the published module (94c3d017)"
+    else
+      note "WARN wasm-matcher.wasm is ${_mmd5:-missing}, NOT the published 94c3d017"
+      note "     restore: cd $WASM_CLIENTS_SRC && make restore-published"
+      note "     (fine only if you are deliberately measuring a matcher change)"
+    fi
+  fi
+  # The broker package repo, checked here because it is free and `wb up` is
+  # not. On 2026-10-14 this exact dependency failed AFTER a 15-instance fleet
+  # was provisioned: Redpanda shut off the legacy dl.redpanda.com repo on
+  # 2026-09-28 (TSB-2026-38), the tokenised URL started returning
+  # "TOKEN_NOT_ACTIVE", and every broker failed its apt install with "No
+  # package matching 'redpanda' is available" - about 20 minutes of billed
+  # cluster time to learn something a single curl would have said for nothing.
+  echo "=== broker package repo ==="
+  _repo_url=$(grep -oE "https://[^']+setup-redpanda\.deb\.sh" "$ROOT/ansible/deploy-wasm.yaml" | head -1)
+  if [ -z "$_repo_url" ]; then
+    note "WARN could not find the repo URL in ansible/deploy-wasm.yaml to check"
+  else
+    _repo_code=$(curl -1sL -o /dev/null -w '%{http_code}' --max-time 20 "$_repo_url" 2>/dev/null || echo 000)
+    # 200 alone is not enough: the retired host answered 200 with an HTML
+    # error page for some paths. Require it to actually look like the script.
+    if [ "$_repo_code" = "200" ] && curl -1sL --max-time 20 "$_repo_url" 2>/dev/null | head -1 | grep -q '^#!'; then
+      note "OK   $_repo_url"
+    else
+      note "MISS $_repo_url (HTTP $_repo_code, or not a script)"
+      note "     The broker apt repo is unreachable, so 'wb deploy' WILL fail"
+      note "     on every broker after 'wb up' has already provisioned and"
+      note "     started billing. Check the current URL before provisioning -"
+      note "     this endpoint has been retired once already (dl.redpanda.com,"
+      note "     shut off 2026-09-28, TSB-2026-38)."
+      bad=1
+    fi
   fi
   echo "=== monitoring ==="
   if cluster_in_state; then
@@ -402,7 +440,7 @@ export_aws_creds() {
 }
 
 cmd_up() {
-  local topo="${1:-single-az}"   # single-az | multi-az | highcore
+  local topo="${1:-single-az}"   # single-az | multi-az | six-broker | highcore
   command -v terraform >/dev/null || die "terraform not installed"
   aws sts get-caller-identity >/dev/null 2>&1 || die "AWS session expired - run: aws sso login --profile $AWS_PROFILE"
   export_aws_creds

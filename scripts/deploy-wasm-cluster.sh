@@ -49,7 +49,8 @@ for t in loadgen fanout-load; do
 done
 
 echo "--- wasm guests + external host (from $WASM_DIR) ---"
-for w in wasm-matcher.wasm relay-probe.wasm relay-sink.wasm passthrough.wasm; do
+for w in wasm-matcher.wasm relay-probe.wasm relay-sink.wasm passthrough.wasm \
+         position-tracker.wasm mass-matcher.wasm; do
   [ -f "$WASM_DIR/$w" ] || { echo "FAIL: missing $WASM_DIR/$w - run 'make build-wasm' in redpanda-wasm-clients" >&2; exit 1; }
   cp "$WASM_DIR/$w" "$STAGE_DIR/"
 done
