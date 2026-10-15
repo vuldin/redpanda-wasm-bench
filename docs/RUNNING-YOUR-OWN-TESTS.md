@@ -142,7 +142,7 @@ refer to `$RUN_DIR`.
 | `RESERVE_MIN` (25) | time held back for fetch, archive, teardown, verify |
 | `KEEP_CLUSTER=1` | skip the end-of-run teardown to keep iterating; the watchdog still tears down at the deadline |
 | `EXPORT_RESERVE_S` (900), `EXPORT_MIN_S` (600), `EXPORT_MAX_S` (3600) | the end-of-run metrics export gets the time left before the deadline less `EXPORT_RESERVE_S`, clamped to [min, max]; a full-scope dump runs ~50s per measured window |
-| `RUN_DIR`, `ARCHIVE_DIR` | where results go; ARCHIVE_DIR also gets a sha256-checked tarball |
+| `RUN_DIR`, `ARCHIVE_DIR` | where results go; ARCHIVE_DIR also gets a sha256-checked tarball. Set ARCHIVE_DIR once in `wb.local.env` to archive every run |
 
 Credentials: the run exports your role credentials once at start, so it
 survives the SSO token expiring; the role credentials' own expiry (often 8-12h

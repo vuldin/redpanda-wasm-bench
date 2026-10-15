@@ -43,6 +43,10 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
+# Your per-machine settings (gitignored; see wb.local.env.example), read here
+# as well as by wb so that autorun's own settings - ARCHIVE_DIR above all -
+# can live there instead of on every command line. The environment still wins.
+[ -f "$ROOT/wb.local.env" ] && . "$ROOT/wb.local.env"
 WB="${WB:-$ROOT/scripts/wb}"
 RESERVE_MIN="${RESERVE_MIN:-25}"
 GATE_FILE="${GATE_FILE:-$ROOT/results/GATE-PASSED}"
