@@ -15,6 +15,10 @@ against 13,414 us for the same work done externally, so roughly an order of
 magnitude. Full tables and the commands that produced them are in
 [REPRODUCE.md](REPRODUCE.md).
 
+**Testing your own changes or guests on the branch?** Start with
+[docs/RUNNING-YOUR-OWN-TESTS.md](docs/RUNNING-YOUR-OWN-TESTS.md): local
+settings, the offline gate, and unattended plan runs that tear themselves down.
+
 ## Cost
 
 A full reproduction provisions 3 brokers, 8 client instances and a
@@ -28,7 +32,9 @@ monitoring host:
 | | | | ~$40/hr |
 
 A full run takes 1-2 hours including provisioning and teardown, so budget
-$40-80. Teardown is not automatic. See [Teardown](#teardown).
+$40-80. Teardown is not automatic for `wb reproduce` - see
+[Teardown](#teardown). Plan runs through `scripts/autorun.sh` do tear down
+(and verify) on their own, with a watchdog at a hard deadline.
 
 The monitoring host is about 1% of the bill. If you want it gone anyway, set
 `monitor_count = 0` and nothing else changes.
@@ -349,7 +355,11 @@ means a long-running cluster is on a clock you don't control.
 ## Repo layout
 
 ```
-scripts/    wb (entry point), select-region.sh, size-clients.sh,
+plans/      test plans for scripts/autorun.sh (smoke, book-durability)
+scripts/    wb (entry point), autorun.sh (unattended plan runs + watchdog),
+            offline-gate.sh (every free check; autorun requires it),
+            deploy-transform.sh (admin-API deploy with state options and the
+            trusted-module grant), select-region.sh, size-clients.sh,
             lib-capacity.sh, switch-topology.sh, deploy-wasm-cluster.sh,
             verify-each-commit.sh (verifies the redpanda branch commit by commit),
             make-dashboards.py and check-dashboards.py (the Grafana panels and
@@ -363,11 +373,14 @@ ansible/    broker install and client tool deployment, plus monitoring.yaml
             (prometheus + grafana, node_exporter everywhere) and the
             dashboards it ships
 bench/      the measurement scripts both arms run, plus run-resilience.sh
-            (the optional maintenance/leadership-move series)
+            (the optional maintenance/leadership-move series),
+            run-durability.sh (does a stateful guest's book survive moves and
+            kills) and local-rehearsal.sh (the same on one local broker)
 cmd/        loadgen (rate-paced generator, source of every published number),
-            fanout-load (background consumer groups)
+            fanout-load (background consumer groups), statecheck (sentinel
+            orders that read a matcher's book back after an event)
 wire/       Go fill decoder plus a conformance test against a Rust-generated fixture
-docs/       METHODOLOGY.md, RELAY-LATENCY-STAGES.md, TESTS.md,
+docs/       RUNNING-YOUR-OWN-TESTS.md, METHODOLOGY.md, RELAY-LATENCY-STAGES.md, TESTS.md,
             RESILIENCE.md (latency during leadership movement),
             MONITORING.md (the dashboards and what they read)
 ```

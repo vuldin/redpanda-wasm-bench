@@ -1,0 +1,18 @@
+# A first run: proves your build, keys and account work end to end in ~1h
+# wall clock (~25 min of phases), before you spend on a full plan.
+#
+#   scripts/autorun.sh check plans/smoke.plan
+#   scripts/autorun.sh start plans/smoke.plan
+#
+# Three brokers in one AZ. Expect roughly $30-40 all in.
+
+TOPOLOGY=single-az
+DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
+
+E2=(ORDERS_PER_RECORD=15 RATE=30000 FANOUT=20 PAYLOAD=650 ACKS=all RF=3
+    DURATION=30s WARMUP=10s DRAIN=30s WRITE_CACHING=true LINGER_MS=0 SAMPLE_EVERY=10
+    PRODUCERS=1 MODE=bookdepth GUEST=book-matcher CANCEL_FRACTION=0.3)
+
+phase smoke-depth 6 run e2 "${E2[@]}" STATE=off 'BOOKDEPTH_LEVELS=0 1000'
+phase smoke-graceful-transfer 8 run durability ACTIONS=transfer DEPTHS=1000 TRIALS=1 GRACEFUL_MS=5000 OUT=@RUN_DIR@/smoke-transfer
+phase smoke-kill 8 run durability ACTIONS=kill DEPTHS=1000 TRIALS=1 OUT=@RUN_DIR@/smoke-kill

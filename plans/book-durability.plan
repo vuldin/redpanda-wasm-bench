@@ -1,0 +1,40 @@
+# Book depth + durable state for the book-matcher guest, as run on 2026-10-15
+# (results/run-2026-10-15c-book-durability, corrected phase order).
+#
+#   scripts/autorun.sh check plans/book-durability.plan
+#   scripts/autorun.sh start plans/book-durability.plan
+#
+# ~3h of phases plus ~35 min provisioning. Six brokers + clients bill roughly
+# $45-50/hr; the watchdog caps the run at CAP_HOURS (default 5).
+#
+# Format: `phase NAME EST_MINUTES <wb args...>`. Each phase is one `wb`
+# invocation; quote a KEY=VALUE whose value contains spaces.
+
+TOPOLOGY=six-broker
+# 16 MiB guests (the snapshot region is 4 MiB of it), fewer instances per
+# core to keep the per-core reservation sane, 16 MiB snapshot cap.
+DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
+
+# Shared e2 settings: 30k orders/sec in N=15 envelopes, fanout 20, RF=3.
+E2=(ORDERS_PER_RECORD=15 RATE=30000 FANOUT=20 PAYLOAD=650 ACKS=all RF=3
+    DURATION=30s WARMUP=10s DRAIN=30s RELAY_STAGE_METRICS=true WRITE_CACHING=true
+    LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=1 MODE=bookdepth)
+
+# 1. Depth with the new book, under insert+cancel load (30% of records are cancels).
+for t in 1 2 3; do
+  phase "P1-depth-cancel-t$t" 10 run e2 "${E2[@]}" GUEST=book-matcher STATE=off CANCEL_FRACTION=0.3 'BOOKDEPTH_LEVELS=0 100 1000 10000'
+done
+# 2. The same with snapshots on: what persistence costs the tail.
+for t in 1 2; do
+  phase "P1-depth-snapshot-t$t" 6 run e2 "${E2[@]}" GUEST=book-matcher STATE=snapshot CANCEL_FRACTION=0.3 'BOOKDEPTH_LEVELS=1000 10000'
+done
+# 3. Planned moves with the broker default (no drain on a leadership move).
+phase P2-planned-default 30 run durability 'ACTIONS=maintenance transfer' 'DEPTHS=1000 10000' TRIALS=2 OUT=@RUN_DIR@/p2-planned-default
+# 4. Planned moves with graceful transfer, plus the replay arm after each transfer.
+phase P2-planned-graceful 45 run durability 'ACTIONS=maintenance transfer' 'DEPTHS=1000 10000' TRIALS=3 GRACEFUL_MS=5000 REPLAY=1 REPLAY_ACTION=transfer OUT=@RUN_DIR@/p2-planned-graceful
+# 5. Unplanned failure: SIGKILL the input partition's leader.
+phase P3-kill 35 run durability ACTIONS=kill 'DEPTHS=1000 10000' TRIALS=3 OUT=@RUN_DIR@/p3-kill
+# 6. The no-durability control: same binary, no snapshot.
+phase P3-kill-nostate 10 run durability ACTIONS=kill 'DEPTHS=1000 10000' TRIALS=1 STATE=off OUT=@RUN_DIR@/p3-kill-nostate
+# 7. The reference guest under the same cancel traffic (it saturates at 1,000).
+phase P5-reference-cancel 9 run e2 "${E2[@]}" GUEST=mass-matcher CANCEL_FRACTION=0.3 'BOOKDEPTH_LEVELS=0 100 1000'

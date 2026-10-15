@@ -65,6 +65,12 @@ HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 TF="$ROOT/terraform"
 
+# --- local settings ----------------------------------------------------------
+# Your account, keys and checkout paths go in wb.local.env (gitignored; copy
+# wb.local.env.example). Read first, so anything set there - or in the
+# environment - wins over the defaults below.
+[ -f "$ROOT/wb.local.env" ] && . "$ROOT/wb.local.env"
+
 # --- defaults that were correct for this project, overridable ---------------
 export AWS_PROFILE="${AWS_PROFILE:-sandbox-cse}"
 BENCH_PUB_KEY="${BENCH_PUB_KEY:-$HOME/.ssh/jlp-aws-iceberg.pub}"
