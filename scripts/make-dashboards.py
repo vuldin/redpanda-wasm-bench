@@ -65,6 +65,20 @@ def hist_quantile(metric, q, extra=""):
             f"(rate({metric}_bucket{sel}[$__rate_interval])))")
 
 
+def event_quantile(metric, q, window="10m"):
+    """A quantile over a histogram of rare events (a processor starting, a
+    snapshot being restored), over a fixed trailing window.
+
+    hist_quantile's rate over $__rate_interval is right for a steady stream
+    and wrong here: these get a handful of samples per leadership move, so a
+    rate over a few scrape intervals is empty everywhere except the seconds
+    right after a move - the panel looks broken. increase() over a fixed
+    window keeps each event visible for that long instead.
+    """
+    return (f"histogram_quantile({q}, sum by (le) "
+            f"(increase({metric}_bucket[{window}])))")
+
+
 def panel(pid, title, x, y, w, h, targets, unit=None, desc=None,
           kind="timeseries", opts=None, thresholds=None, legend_table=False):
     custom = {
@@ -318,7 +332,7 @@ def overview():
     ))
     p.append(panel(
         52, "processor create latency (fetch + compile)", 16, y, 8, 6,
-        [(hist_quantile("redpanda_transform_processor_create_latency_seconds", q), lab)
+        [(event_quantile("redpanda_transform_processor_create_latency_seconds", q), lab)
          for q, lab in QUANTILES],
         unit="s", legend_table=True,
         desc=("Fetching the wasm binary from the cluster and compiling it. "
@@ -345,10 +359,12 @@ def overview():
     ))
     p.append(panel(
         61, "snapshot restore latency", 4, y, 7, 6,
-        [(hist_quantile("redpanda_transform_state_restore_latency_seconds", q), lab)
+        [(event_quantile("redpanda_transform_state_restore_latency_seconds", q), lab)
          for q, lab in QUANTILES],
         unit="s", legend_table=True,
-        desc=("Writing the persisted snapshot back into the guest's region on "
+        desc=("Over the trailing 10 minutes (these are rare events, so a "
+              "short rate window would be empty between moves). "
+              "Writing the persisted snapshot back into the guest's region on "
               "start. Scales with the region size, not the book: the broker "
               "copies the whole registered region. ~1ms for a 4 MiB region; "
               "the guest's own decode (its `STATE restored restore_us=`) comes "
@@ -356,19 +372,20 @@ def overview():
     ))
     p.append(panel(
         62, "transform dark time (startup)", 11, y, 7, 6,
-        [(hist_quantile("redpanda_transform_startup_latency_seconds", q), lab)
+        [(event_quantile("redpanda_transform_startup_latency_seconds", q), lab)
          for q, lab in QUANTILES],
         unit="s", legend_table=True,
-        desc=("From the broker beginning to bring the partition's transform up "
+        desc=("Over the trailing 10 minutes, like the restore panel. "
+              "From the broker beginning to bring the partition's transform up "
               "to it running: paid on every leadership change. Read it next to "
               "the durability runner's failover figure, which also includes "
               "the raft election before this starts."),
     ))
     p.append(panel(
         63, "startup phases", 18, y, 6, 6,
-        [(hist_quantile("redpanda_transform_engine_start_latency_seconds", 0.99), "engine start p99"),
-         (hist_quantile("redpanda_transform_offset_load_latency_seconds", 0.99), "offset load p99"),
-         (hist_quantile("redpanda_transform_state_restore_latency_seconds", 0.99), "state restore p99")],
+        [(event_quantile("redpanda_transform_engine_start_latency_seconds", 0.99), "engine start p99"),
+         (event_quantile("redpanda_transform_offset_load_latency_seconds", 0.99), "offset load p99"),
+         (event_quantile("redpanda_transform_state_restore_latency_seconds", 0.99), "state restore p99")],
         unit="s", legend_table=True,
         desc=("Where the dark time goes. Offset load is the phase that cannot "
               "start before the broker leads the partition, so it is the floor."),

@@ -1047,7 +1047,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(redpanda_transform_processor_create_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (increase(redpanda_transform_processor_create_latency_seconds_bucket[10m])))",
           "legendFormat": "p50",
           "refId": "A",
           "editorMode": "code",
@@ -1058,7 +1058,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(redpanda_transform_processor_create_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (increase(redpanda_transform_processor_create_latency_seconds_bucket[10m])))",
           "legendFormat": "p95",
           "refId": "B",
           "editorMode": "code",
@@ -1069,7 +1069,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(redpanda_transform_processor_create_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (increase(redpanda_transform_processor_create_latency_seconds_bucket[10m])))",
           "legendFormat": "p99",
           "refId": "C",
           "editorMode": "code",
@@ -1216,7 +1216,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(redpanda_transform_state_restore_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (increase(redpanda_transform_state_restore_latency_seconds_bucket[10m])))",
           "legendFormat": "p50",
           "refId": "A",
           "editorMode": "code",
@@ -1227,7 +1227,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(redpanda_transform_state_restore_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (increase(redpanda_transform_state_restore_latency_seconds_bucket[10m])))",
           "legendFormat": "p95",
           "refId": "B",
           "editorMode": "code",
@@ -1238,14 +1238,14 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(redpanda_transform_state_restore_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (increase(redpanda_transform_state_restore_latency_seconds_bucket[10m])))",
           "legendFormat": "p99",
           "refId": "C",
           "editorMode": "code",
           "range": true
         }
       ],
-      "description": "Writing the persisted snapshot back into the guest's region on start. Scales with the region size, not the book: the broker copies the whole registered region. ~1ms for a 4 MiB region; the guest's own decode (its `STATE restored restore_us=`) comes on top.",
+      "description": "Over the trailing 10 minutes (these are rare events, so a short rate window would be empty between moves). Writing the persisted snapshot back into the guest's region on start. Scales with the region size, not the book: the broker copies the whole registered region. ~1ms for a 4 MiB region; the guest's own decode (its `STATE restored restore_us=`) comes on top.",
       "options": {
         "legend": {
           "displayMode": "table",
@@ -1298,7 +1298,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(redpanda_transform_startup_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (increase(redpanda_transform_startup_latency_seconds_bucket[10m])))",
           "legendFormat": "p50",
           "refId": "A",
           "editorMode": "code",
@@ -1309,7 +1309,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(redpanda_transform_startup_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (increase(redpanda_transform_startup_latency_seconds_bucket[10m])))",
           "legendFormat": "p95",
           "refId": "B",
           "editorMode": "code",
@@ -1320,14 +1320,14 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(redpanda_transform_startup_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (increase(redpanda_transform_startup_latency_seconds_bucket[10m])))",
           "legendFormat": "p99",
           "refId": "C",
           "editorMode": "code",
           "range": true
         }
       ],
-      "description": "From the broker beginning to bring the partition's transform up to it running: paid on every leadership change. Read it next to the durability runner's failover figure, which also includes the raft election before this starts.",
+      "description": "Over the trailing 10 minutes, like the restore panel. From the broker beginning to bring the partition's transform up to it running: paid on every leadership change. Read it next to the durability runner's failover figure, which also includes the raft election before this starts.",
       "options": {
         "legend": {
           "displayMode": "table",
@@ -1380,7 +1380,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(redpanda_transform_engine_start_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (increase(redpanda_transform_engine_start_latency_seconds_bucket[10m])))",
           "legendFormat": "engine start p99",
           "refId": "A",
           "editorMode": "code",
@@ -1391,7 +1391,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(redpanda_transform_offset_load_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (increase(redpanda_transform_offset_load_latency_seconds_bucket[10m])))",
           "legendFormat": "offset load p99",
           "refId": "B",
           "editorMode": "code",
@@ -1402,7 +1402,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(redpanda_transform_state_restore_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (increase(redpanda_transform_state_restore_latency_seconds_bucket[10m])))",
           "legendFormat": "state restore p99",
           "refId": "C",
           "editorMode": "code",

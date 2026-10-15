@@ -141,6 +141,14 @@ The last row, **stateful transforms**, is for guests that persist state
 - transform lag per function shows a replay (the durability runner's
   `REPLAY=1`) as a spike draining to zero.
 
+The latency panels in this row (and "processor create latency") are quantiles
+over the trailing 10 minutes, `increase(..._bucket[10m])`, not over
+`$__rate_interval` like the rest of the dashboard. They record rare events - a
+handful of samples per leadership move - and a rate over a few scrape
+intervals is empty everywhere but the seconds after a move, which reads as a
+broken panel. `wb monitor check` reports them `empty (expected)` until the
+first move of a run.
+
 ### relay stages
 
 One row per stage, in the order a record traverses them, each with its own
