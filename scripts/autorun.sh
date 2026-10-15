@@ -67,11 +67,15 @@ phase() {
 load_plan() {
   local plan="$1"
   [ -f "$plan" ] || die "no such plan: $plan"
-  # Plans may refer to RUN_DIR (e.g. for a runner's own output directory);
-  # `check` has none yet, so give it a placeholder rather than tripping set -u.
-  : "${RUN_DIR:=<run-dir>}"
+  # Plans may refer to RUN_DIR (e.g. for a runner's own output directory).
+  # `check` and `start` load the plan before a run directory exists, so give
+  # the plan a placeholder for that one source - and take it away again, or
+  # the placeholder becomes the run directory (it did, once).
+  local had_rd=0; [ -n "${RUN_DIR+x}" ] && had_rd=1
+  [ "$had_rd" = 1 ] || RUN_DIR="<run-dir>"
   # shellcheck disable=SC1090
   source "$plan"
+  [ "$had_rd" = 1 ] || unset RUN_DIR
   [ "${#PHASE_NAMES[@]}" -gt 0 ] || die "plan $plan defines no phases"
   local n; for n in "${PHASE_NAMES[@]}"; do
     case "$n" in *[!A-Za-z0-9._-]*) die "plan: phase name '$n' must be [A-Za-z0-9._-]" ;; esac

@@ -104,5 +104,17 @@ check "watchdog: metrics exported before its teardown" "awk '/ monitor export /{
 check "watchdog: exactly one teardown" "[ \"\$(wc -l < '$T/s5.teardowns' 2>/dev/null)\" = 1 ]"
 check "watchdog: run process is gone" "! kill -0 \$(cat '$R5/autorun.pid') 2>/dev/null"
 
+# 8: start without RUN_DIR picks results/run-<date>-<plan>, never the
+# placeholder plans see while loading (it once became the run directory).
+cp "$T/test.plan" "$T/autorun-selftest.plan"
+before="$(ls -d "$HERE"/../../results/run-*-autorun-selftest 2>/dev/null)"
+( unset RUN_DIR; cd "$T" && env DRY_RUN=1 EST_UNIT_S=0 WB="$T/wb" STUB_LOG="$T/s9" RESERVE_MIN=0 \
+    HARD_DEADLINE_EPOCH=$(( $(date +%s) + 120 )) bash "$AUTORUN" start "$T/autorun-selftest.plan" >/dev/null 2>&1 )
+R9="$(ls -d "$HERE"/../../results/run-*-autorun-selftest 2>/dev/null | grep -vxF "$before" | head -1)"
+for _ in $(seq 1 60); do [ -n "$R9" ] && [ -f "$R9/DONE" ] && break; sleep 1; done
+check "start: default RUN_DIR is results/run-<date>-<plan>" "[ -n '$R9' ] && [ -f '$R9/DONE' ]"
+check "start: no placeholder directory created" "[ ! -e '$T/<run-dir>' ]"
+[ -n "$R9" ] && [ -f "$R9/DONE" ] && case "$R9" in */results/run-*-autorun-selftest) rm -rf -- "$R9" ;; esac
+
 echo "$pass passed, $fail failed  (scratch: $T)"
 [ "$fail" -eq 0 ]
