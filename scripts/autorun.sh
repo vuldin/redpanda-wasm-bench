@@ -289,6 +289,23 @@ resume() {
   finish "resumed phases attempted"
 }
 
+# Second continuation (2026-10-15c): the graceful-transfer trials in P2g were
+# mostly no-ops (the transfer request never moved leadership), so redo the
+# transfer arm with the fixed harness before the last phase.
+resume2() {
+  echo $$ > "$RUN_DIR/autorun.pid"
+  log "autorun RESUME2 pid=$$ (hard deadline unchanged: $(date -u -d @"$HARD_DEADLINE_EPOCH" +%FT%TZ))"
+  load_creds || log "WARN: could not re-export credentials; using the inherited ones"
+  hygiene
+  local E2="ORDERS_PER_RECORD=15 RATE=30000 FANOUT=20 PAYLOAD=650 ACKS=all RF=3 DURATION=30s WARMUP=10s DRAIN=30s RELAY_STAGE_METRICS=true WRITE_CACHING=true LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=1 MODE=bookdepth GUEST=book-matcher"
+  run_phase P2gt-transfer-graceful 25 "$WB" run durability ACTIONS=transfer DEPTHS="1000 10000" TRIALS=3 \
+    GRACEFUL_MS=5000 OUT="$RUN_DIR/p2gt-transfer-graceful"
+  hygiene
+  # shellcheck disable=SC2086
+  run_phase P5-reference-cancel 9 "$WB" run e2 ${E2/GUEST=book-matcher/GUEST=mass-matcher} CANCEL_FRACTION=0.3 BOOKDEPTH_LEVELS="0 100 1000"
+  finish "resumed phases attempted"
+}
+
 finish() {
   local why="$1"
   fetch_results
@@ -337,6 +354,7 @@ watchdog() {
 case "${1:-}" in
   main) main ;;
   resume) resume ;;
+  resume2) resume2 ;;
   watchdog) watchdog ;;
   start)
     # Separate sessions: neither dies with this shell, nor with each other.
