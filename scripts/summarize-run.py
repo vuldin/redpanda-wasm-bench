@@ -16,6 +16,7 @@ Reads:
   metrics-bundle/                      wb monitor export, if present
 """
 import glob
+import json
 import os
 import re
 import sys
@@ -23,6 +24,13 @@ import sys
 R = sys.argv[1].rstrip("/")
 out = []
 w = out.append
+
+
+def p9999(t):
+    """loadgen emits p99.99 as 0 below ~10^5 samples rather than restating the
+    top few samples; say so instead of printing a 0 that reads as a latency."""
+    v = t.get("p9999_micros") or 0
+    return f"{v:,.0f}" if v else "n/a (<100k samples)"
 
 
 def read(p, default=""):
@@ -94,9 +102,11 @@ for s in e2:
         w("\n_no completed levels (the runner failed before measuring - see the phase log)_\n")
         continue
     cols = [c for c in WANT if c in hdr]
+    mode = (re.search(r"MODE=(\S+)", txt) or [None, ""])[1]
+    extra = ["p99us", "p9999us", "samples"]
     w("")
-    w("| " + " | ".join(cols) + " |")
-    w("|" + "---|" * len(cols))
+    w("| " + " | ".join(cols + extra) + " |")
+    w("|" + "---|" * (len(cols) + len(extra)))
     for r in rows:
         cells = []
         for c in cols:
@@ -111,6 +121,12 @@ for s in e2:
             except ValueError:
                 pass
             cells.append(v)
+        rep_json = os.path.join(os.path.dirname(s), f"{mode}-{r[0]}.json")
+        try:
+            t = json.load(open(rep_json)).get("total") or {}
+            cells += [f"{t.get('p99_micros', 0):,.0f}", p9999(t), f"{t.get('samples', 0):,}"]
+        except (OSError, ValueError):
+            cells += ["-", "-", "-"]
         w("| " + " | ".join(cells) + " |")
     w("")
 
@@ -175,6 +191,39 @@ for d in res:
     for m in re.finditer(r"RESULT (\S+): total p99 (\S+)->(\S+) max (\S+)->(\S+) \| produce p99 (\S+)->(\S+) \| over10ms \S+ \| duplicates=(\S+) missing=(\S+) \| recovery=(\S+)", txt):
         g = m.groups()
         w(f"| {g[0]} | {g[1]} -> {g[2]} | {g[3]} -> {g[4]} | {g[5]} -> {g[6]} | {g[7]} | {g[8]} | {g[9]} |")
+    w("")
+
+trad = []
+for d in sorted(glob.glob(f"{R}/client-results/traditional-sharded-*")):
+    m = re.search(r"-(\d{9,})$", d)
+    if m and int(m.group(1)) < started - 60:
+        continue
+    for rj in sorted(glob.glob(f"{d}/trad-*.json")):
+        try:
+            j = json.load(open(rj))
+        except (OSError, ValueError):
+            continue
+        n = re.search(r"trad-(\d+)\.json$", rj).group(1)
+        pl = {}
+        try:
+            pl = json.load(open(f"{d}/placement-{n}-after.json"))
+        except (OSError, ValueError):
+            pass
+        t = j.get("total") or {}
+        cfg = j.get("config") or {}
+        trad.append((j.get("label", ""), int(n), pl, t, j.get("clean"), cfg))
+if trad:
+    w("## Traditional arms (run traditional)\n")
+    w("The matcher outside the broker: `external` on its own client instance, `loopback` on the "
+      "partition leader's broker over loopback, `-isolated` pinned to cores outside Redpanda's "
+      "cpuset. End to end is client send to the measured consumer's receipt, which here includes "
+      "a fetch back out to a client (the in-broker figure does not).\n")
+    w("| label | consumers | matcher cpus | e2e p50 us | p99 | p99.9 | p99.99 | samples | depth | cancels | clean |")
+    w("|---|---|---|---|---|---|---|---|---|---|---|")
+    for lab, n, pl, t, clean, cfg in sorted(trad, key=lambda x: (x[0].rsplit("-", 1)[0], x[1])):
+        f = lambda k: f"{t.get(k, 0):,.0f}"
+        w(f"| {lab} | {n} | {pl.get('matcher_cpus') or '-'} | {f('p50_micros')} | {f('p99_micros')} | {f('p999_micros')} | "
+          f"{p9999(t)} | {t.get('samples', 0):,} | {cfg.get('book_depth', 0)} | {cfg.get('cancel_fraction', 0)} | {clean} |")
     w("")
 
 repro = sorted(glob.glob(f"{R}/**/reproduce-*", recursive=True)) + sorted(glob.glob(f"{R}/reproduce"))

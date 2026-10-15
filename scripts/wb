@@ -635,6 +635,22 @@ cmd_run() {
       done
       bash "$ROOT/bench/run-durability.sh"
       return ;;
+    # The traditional arms (external, co-located, co-located on isolated
+    # cores) over a fan-out ladder. Local, like durability: the runner drives
+    # every host over ssh.
+    traditional)
+      if [ "${WB_SKIP_BINARY_GATE:-0}" != "1" ]; then
+        binary_matches_everywhere || die "REFUSING TO RUN: at least one broker is not running your local build."
+        echo "wb: binary gate OK - all brokers running the local build"
+      fi
+      local kv2
+      for kv2 in "$@"; do
+        case "$kv2" in *=*) export "${kv2%%=*}=${kv2#*=}" ;; *) die "run arguments must be KEY=VALUE (got '$kv2')" ;; esac
+      done
+      CLIENTS="$CLIENT_PUB" BROKERS="$BROKERS" BROKER_PUB="$BROKER_PUB" BROKER_PRIV_LIST="$BROKER_PRIV" \
+        KEY="$BENCH_SSH_KEY" LOADGEN_METRICS_LISTEN="$([ -n "${MONITOR_PUB// /}" ] && echo :9110)" \
+        bash "$ROOT/bench/run-traditional-ladder.sh"
+      return ;;
     # Round 3 drives BOTH arms of the in-broker-vs-external comparison itself.
     # It exists so the invariant "both arms identical except CONSUMER_ARM" is
     # enforced by code rather than by remembering to set five variables the same

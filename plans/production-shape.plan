@@ -1,0 +1,48 @@
+# The in-broker matcher against the traditional deployments, all with the
+# production-shaped book and order flow, plus the measurements the first
+# six-broker runs left open:
+#
+#   1. in-broker reference, long windows, so p99.99 is real (>=10^5 samples)
+#   2. external / co-located / co-located on cores Redpanda does not use,
+#      at fan-out 1, 10, 20 and 50 - same module, same book, same cancels
+#   3. the rate sweep with that book and cancels (the first runs swept an
+#      empty book)
+#   4. broker kills with the victim HELD DOWN (KILL_MODE=down), so a
+#      surviving replica must take over
+#
+#   scripts/autorun.sh check plans/production-shape.plan
+#   scripts/autorun.sh start plans/production-shape.plan
+#
+# 6 brokers + 3 clients + monitoring, ~$55/hr; ~2h of phases.
+#
+# Workload: 30,000 orders/sec as 15-order mass quotes (production envelopes
+# run 1/15/30/100 orders), 1,000 resting orders per side (a common matching
+# engine benchmark depth), 30% of input records cancels plus as many passive
+# inserts, 650 B records (production orders run 512 B - 1 KB), RF=3,
+# acks=all, single AZ.
+
+TOPOLOGY=six-broker
+DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
+
+E2=(ORDERS_PER_RECORD=15 RATE=30000 FANOUT=20 PAYLOAD=650 ACKS=all RF=3
+    WARMUP=10s DRAIN=30s RELAY_STAGE_METRICS=true WRITE_CACHING=true
+    LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=1 GUEST=book-matcher STATE=off CANCEL_FRACTION=0.3)
+
+# 1. In-broker, fan-out 20, depth 1,000, 3-minute windows (~360k samples each).
+for t in 1 2; do
+  phase "inbroker-tail-t$t" 9 run e2 "${E2[@]}" MODE=bookdepth BOOKDEPTH_LEVELS=1000 DURATION=180s
+done
+
+# 2. The traditional arms with the same module, book and order flow.
+phase traditional-production 45 run traditional \
+  'PLACEMENTS=external loopback loopback-isolated' 'FANOUT_LADDER=1 10 20 50' \
+  GUEST_MODULE=book-matcher.wasm BOOK_DEPTH=1000 CANCEL_FRACTION=0.3 \
+  ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 DURATION=30s
+
+# 3. Rate with the production book (two producers so the client can offer 200k).
+phase rate-production 14 run e2 "${E2[@]}" MODE=rate BOOK_DEPTH=1000 DURATION=30s PRODUCERS=2 \
+  'RATE_LEVELS=30000 60000 120000 200000'
+
+# 4. Kills with the victim held down for 20s.
+phase kill-held-down 22 run durability ACTIONS=kill 'DEPTHS=1000 10000' TRIALS=2 KILL_MODE=down \
+  OUT=@RUN_DIR@/kill-held-down

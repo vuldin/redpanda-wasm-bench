@@ -110,6 +110,7 @@ Shipped plans:
 | `published.plan` | the published in-broker vs external comparison (REPRODUCE.md) and the resilience series | ~145 min | 3 brokers + 8 clients |
 | `resilience.plan` | the resilience series on its own: maintenance mode and leadership transfer, graceful drain unset vs set, then the module-residency A/B ([RESILIENCE.md](RESILIENCE.md)) | ~90 min | 3 brokers + 8 clients |
 | `book-durability.plan` | the 2026-10-15 book-depth + durability suite | ~171 min | 6 brokers |
+| `production-shape.plan` | the in-broker matcher against external, co-located and co-located-on-isolated-cores deployments with the same production-shaped book and order flow; long windows for p99.99; rate with that book; kills with the victim held down | ~99 min | 6 brokers |
 
 `smoke`, `published` and `book-durability`, one after the other, is the full
 set (`published` already includes the resilience series). They use different

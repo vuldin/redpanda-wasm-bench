@@ -761,7 +761,7 @@
         src: "{{ local_artifacts_dir }}/{{ item }}"
         dest: "/opt/wasm-bench/{{ item }}"
         mode: "0644"
-      loop: [wasm-matcher.wasm, mass-matcher.wasm]
+      loop: [wasm-matcher.wasm, mass-matcher.wasm, book-matcher.wasm]
 
 - name: Set up the load client with this project's own tools
   hosts: client

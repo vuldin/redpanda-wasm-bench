@@ -95,6 +95,14 @@ if [ "$ORDERS_PER_RECORD" -gt 1 ]; then
   EFFECTIVE_SAMPLE_EVERY=1
   MATCHER_MODULE="mass-matcher.wasm"
 fi
+# An explicit module wins, e.g. book-matcher.wasm for the production-shaped
+# book (it handles types 0, 1 and 2; the host stubs its shared-memory import,
+# and it runs with no state, exactly as the in-broker arm's STATE=off).
+MATCHER_MODULE="${GUEST_MODULE:-$MATCHER_MODULE}"
+# The same order flow as the in-broker runs: a preloaded book and the
+# insert+cancel side stream (loadgen -book-depth / -cancel-fraction).
+BOOK_DEPTH="${BOOK_DEPTH:-0}"
+CANCEL_FRACTION="${CANCEL_FRACTION:-0}"
 ACKS="${ACKS:-all}"; LINGER_MS="${LINGER_MS:-0}"
 RUN_ID="${RUN_ID:-$(date +%s)}"
 
@@ -135,6 +143,34 @@ case "$MATCHER_PLACEMENT" in
     # which would give this arm a different broker config from the other two
     # and confound the only variable it is meant to change.
     MATCHER_BROKERS="${_bpriv[0]}:9092"
+    # MATCHER_CPUS=auto: the cpus on the matcher's broker whose PHYSICAL core
+    # Redpanda's --cpuset does not include (and not core 0, which the deploy
+    # reserves for the OS). That is the isolated variant Travis specified -
+    # "ensure that Redpanda is pinned to cores different than your engine
+    # uses" - without changing the broker's own configuration, since the
+    # deploy already leaves cores outside Redpanda's cpuset.
+    if [ "$MATCHER_CPUS" = auto ]; then
+      MATCHER_CPUS="$(ssh -i "$KEY" "${SSH_OPTS[@]}" "ubuntu@$MATCH" 'bash -s' <<'FREE' 2>/dev/null
+set -euo pipefail
+flags="$(rpk redpanda config get rpk.additional_start_flags 2>/dev/null || true)"
+rp="$(echo "$flags" | grep -o -- '--cpuset=[0-9,-]*' | cut -d= -f2)"
+[ -n "$rp" ] || exit 0
+expand() { echo "$1" | tr ',' '\n' | while IFS= read -r r; do [ -n "$r" ] || continue; case "$r" in *-*) seq "${r%%-*}" "${r##*-}";; *) echo "$r";; esac; done; }
+used=" $(expand "$rp" | tr '\n' ' ') "
+free=""
+for c in $(expand "$(cat /sys/devices/system/cpu/online)"); do
+  tsl=/sys/devices/system/cpu/cpu$c/topology/thread_siblings_list
+  [ -r "$tsl" ] || continue
+  phys="$(cut -d, -f1 "$tsl" | cut -d- -f1)"
+  [ "$phys" = 0 ] && continue
+  case "$used" in *" $phys "*) continue ;; esac
+  free="$free${free:+,}$c"
+done
+echo "$free"
+FREE
+)"
+      [ -n "$MATCHER_CPUS" ] || { echo "ERROR: MATCHER_CPUS=auto found no cores outside Redpanda's cpuset on $MATCH" >&2; exit 1; }
+    fi
     if [ -n "$MATCHER_CPUS" ]; then
       MATCHER_PREFIX="taskset -c $MATCHER_CPUS "
     fi
@@ -265,7 +301,8 @@ record_placement() { # record_placement <when>
   f=$(admin "$SEED_ADMIN/v1/partitions/kafka/$FILLS/0" 2>/dev/null)
   sh_on "$LG" "jq -n --arg when '$1' --arg placement '$MATCHER_PLACEMENT' --arg mnode '$MATCHER_NODE' \
     --argjson o '${o:-null}' --argjson f '${f:-null}' \
-    '{when:\$when, matcher_placement:\$placement, matcher_node:\$mnode,
+    --arg mcpus '${MATCHER_CPUS:-}' --arg module '$MATCHER_MODULE' \
+    '{when:\$when, matcher_placement:\$placement, matcher_node:\$mnode, matcher_cpus:\$mcpus, module:\$module,
       orders:{leader:\$o.leader_id, replicas:[\$o.replicas[]?.node_id]},
       fills:{leader:\$f.leader_id, replicas:[\$f.replicas[]?.node_id]}}' \
     > $OUT/placement-$FANOUT_N-$1.json 2>/dev/null" || true
@@ -313,9 +350,10 @@ sh_on "$LG" "cd $BIN && ./loadgen -brokers $BROKERS -input-topic $ORDERS \
   -rate $RATE -duration $DURATION -warmup $WARMUP -drain $DRAIN \
   -pacing fixed -payload-bytes $PAYLOAD -sample-every $EFFECTIVE_SAMPLE_EVERY \
   -orders-per-record $ORDERS_PER_RECORD -timeline-ms 500 \
+  -book-depth $BOOK_DEPTH -cancel-fraction $CANCEL_FRACTION -guest ${MATCHER_MODULE%.wasm} \
   -linger-ms $LINGER_MS -acks $ACKS -producers 1 -clock-rms-micros $RMS \
   -metrics-listen '$LOADGEN_METRICS_LISTEN' \
-  -label trad-$MATCHER_PLACEMENT-$FANOUT_N -out $OUT/trad-$FANOUT_N.json" 2>&1 | grep -E 'wrote report|NOT CLEAN' || true
+  -label trad-$MATCHER_PLACEMENT${MATCHER_CPUS:+-isolated}-$FANOUT_N -out $OUT/trad-$FANOUT_N.json" 2>&1 | grep -E 'wrote report|NOT CLEAN' || true
 
 sh_on "$LG" "cd $OUT && jq -r '\"clean=\(.clean)  recv=\(.received_receipts)/\(.expected_receipts)  miss=\(.missing_receipts)  e2e_p50=\(.total.p50_micros|floor)us  p90=\(.total.p90_micros|floor)us  p99=\(.total.p99_micros|floor)us  lateness_p99=\(.send_lateness.p99_micros|floor)us\"' trad-$FANOUT_N.json"
 # Placement AFTER the window too: a leader that moved during the run is the
