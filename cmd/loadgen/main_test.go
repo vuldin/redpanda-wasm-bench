@@ -704,3 +704,48 @@ func checkPreloadDepth(t *testing.T, runID int64, depth int) {
 		}
 	}
 }
+
+// The cancel share of RECORDS must converge on -cancel-fraction: k inserts
+// and k cancels per pair against 2 pair records.
+func TestBookOpsDueConvergesOnTheRequestedRecordShare(t *testing.T) {
+	for _, f := range []float64{0.1, 0.2, 0.3, 1.0 / 3} {
+		var credit float64
+		var inserts int
+		const pairs = 100000
+		for i := 0; i < pairs; i++ {
+			n := bookOpsDue(&credit, f)
+			if n < 0 || n > 2 {
+				t.Fatalf("f=%v: %d inserts in one pair, cap is 2", f, n)
+			}
+			inserts += n
+		}
+		// steady state: every insert is eventually cancelled
+		share := float64(inserts) / float64(2*pairs+2*inserts)
+		if share < f-0.001 || share > f+0.001 {
+			t.Errorf("f=%v: cancel share of records %.4f", f, share)
+		}
+	}
+	var credit float64
+	if bookOpsDue(&credit, 0) != 0 {
+		t.Fatal("f=0 must send nothing")
+	}
+}
+
+// Inserts must use the guest's sequence layout and never cross anything.
+func TestPassiveInsertsUseTheSequenceLayoutAndNeverCross(t *testing.T) {
+	if got := insertIDAt(17, 't', 42, 0); got != "17t-i42-0" {
+		t.Fatalf("j=0 id %q", got)
+	}
+	if got := insertIDAt(17, 't', 42, 1); got != "17t-i42q1-0" {
+		t.Fatalf("j=1 id %q", got)
+	}
+	for seq := int64(0); seq < 1000; seq++ {
+		o, err := wire.DecodeNewOrder(encodePassiveInsert("x", seq))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if o.Side != 0 || o.Price < 2 || o.Price > 99 {
+			t.Fatalf("seq %d: side %d price %d - must be a bid in 2..99", seq, o.Side, o.Price)
+		}
+	}
+}

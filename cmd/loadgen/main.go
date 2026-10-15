@@ -301,10 +301,18 @@ type configReport struct {
 	InputBytesPerRecord int `json:"input_bytes_per_record"`
 	// Resting orders preloaded per side before the measured window. 0 is the
 	// historical traffic, where every pair crosses and the book stays empty.
-	BookDepth   int  `json:"book_depth"`
-	MaxBuffered int  `json:"max_buffered_records"`
-	KeyByPair   bool `json:"key_by_pair"`
-	LingerMs    int  `json:"producer_linger_ms"`
+	BookDepth int `json:"book_depth"`
+	// Insert+cancel side stream (-cancel-fraction). CancelFraction is a
+	// fraction of input RECORDS, not orders - see bookOpsDue for why.
+	CancelFraction float64 `json:"cancel_fraction"`
+	CancelLag      int     `json:"cancel_lag"`
+	// Recorded so a result says which guest binary produced it, not only
+	// which transform name it was deployed under.
+	Guest       string `json:"guest,omitempty"`
+	GuestSHA256 string `json:"guest_sha256,omitempty"`
+	MaxBuffered int    `json:"max_buffered_records"`
+	KeyByPair   bool   `json:"key_by_pair"`
+	LingerMs    int    `json:"producer_linger_ms"`
 	// Acks is fingerprinted because it is the DOMINANT e2e term - a run at
 	// acks=leader is not comparable with one at acks=all, and the difference
 	// is a durability trade rather than a tuning choice.
@@ -379,16 +387,22 @@ type ratesReport struct {
 	AchievedRecordsPerSec float64 `json:"achieved_records_per_sec"`
 	// AchievedOrdersPerSec divides receipts by num_probes, putting it in the
 	// same unit as the offered rate so the two compare directly.
-	AchievedOrdersPerSec   float64          `json:"achieved_orders_per_sec"`
-	AchievedReceiptsPerSec float64          `json:"achieved_receipts_per_sec"`
-	AttemptedRatio         float64          `json:"attempted_over_offered"`
-	AchievedRatio          float64          `json:"achieved_over_offered"`
-	OrdersSent             int64            `json:"orders_sent"`
-	EnvelopesSent          int64            `json:"envelopes_sent"`
-	RecordsSent            int64            `json:"records_sent"`
-	ProduceErrors          int64            `json:"produce_errors"`
-	ProduceErrorsByKind    map[string]int64 `json:"produce_errors_by_kind"`
-	ElapsedSeconds         float64          `json:"elapsed_seconds"`
+	AchievedOrdersPerSec   float64 `json:"achieved_orders_per_sec"`
+	AchievedReceiptsPerSec float64 `json:"achieved_receipts_per_sec"`
+	AttemptedRatio         float64 `json:"attempted_over_offered"`
+	AchievedRatio          float64 `json:"achieved_over_offered"`
+	OrdersSent             int64   `json:"orders_sent"`
+	EnvelopesSent          int64   `json:"envelopes_sent"`
+	RecordsSent            int64   `json:"records_sent"`
+	// The passive insert + cancel side stream, timed window only. Neither
+	// crosses, so neither produces receipts; they are book work, reported
+	// as book_ops_per_sec = (orders + inserts + cancels) / elapsed.
+	InsertsSent         int64            `json:"inserts_sent"`
+	CancelsSent         int64            `json:"cancels_sent"`
+	BookOpsPerSec       float64          `json:"book_ops_per_sec"`
+	ProduceErrors       int64            `json:"produce_errors"`
+	ProduceErrorsByKind map[string]int64 `json:"produce_errors_by_kind"`
+	ElapsedSeconds      float64          `json:"elapsed_seconds"`
 }
 
 type clockReport struct {
@@ -637,6 +651,65 @@ func appendEnvelopeIndex(b *strings.Builder, k int) {
 	}
 	b.WriteByte('q')
 	b.WriteString(strconv.Itoa(k))
+}
+
+// bookOpsState is one producer's side-stream state: fractional credit toward
+// the next insert, and the inserts not yet cancelled, oldest first.
+type bookOpsState struct {
+	credit      float64
+	outstanding []passiveRef
+}
+
+type passiveRef struct {
+	id  string
+	key []byte
+}
+
+// bookOpsDue returns how many passive inserts to send after one crossing pair
+// (each later matched by one cancel), accumulating the fractional remainder in
+// credit so the long-run share is exact.
+//
+// With k inserts and k cancels per pair the cancel share of records is
+// k/(2+2k), so k = 2F/(1-2F): F=0.3 is 1.5 per pair, F=1/3 is the cap of 2.
+// Capped at 2 per pair because the guest's replay detection gives inserts two
+// leg slots per sequence (i and iq1).
+func bookOpsDue(credit *float64, f float64) int {
+	if f <= 0 {
+		return 0
+	}
+	*credit += 2 * f / (1 - 2*f)
+	n := int(*credit + 1e-9)
+	if n > 2 {
+		n = 2
+	}
+	*credit -= float64(n)
+	if *credit < 0 {
+		*credit = 0
+	}
+	return n
+}
+
+// insertIDAt is "<runID><phase>-i<seq>[q<j>]-0", the same layout as a resting
+// id with leg 'i', so the guest can place it in the pair's sequence order.
+func insertIDAt(runID int64, phase byte, seq int64, j int) string {
+	var b strings.Builder
+	b.Grow(40)
+	b.WriteString(strconv.FormatInt(runID, 10))
+	b.WriteByte(phase)
+	b.WriteString("-i")
+	b.WriteString(strconv.FormatInt(seq, 10))
+	appendEnvelopeIndex(&b, j)
+	b.WriteString("-0")
+	return b.String()
+}
+
+// encodePassiveInsert is a bid priced 2..99: below the measured sells at 100,
+// the sentinels at 50,000 and the preload asks from 100,000, so it can never
+// cross anything and rests until its cancel arrives.
+func encodePassiveInsert(id string, seq int64) []byte {
+	return wire.EncodeNewOrder(wire.NewOrder{
+		OrderID: id, Participant: "passive", Side: 0, Price: 2 + seq%98, Qty: 1,
+	})
 }
 
 // encodeEnvelopePair builds the two record VALUES for one crossing pair of
@@ -1349,6 +1422,17 @@ func main() {
 				"\tsit in the book for the whole run and every measured order matches against a book of this depth.\n"+
 				"\tExpect the reference guest to degrade super-linearly: its Book is a sorted Vec with a linear-scan\n"+
 				"\tcancel, so this measures THAT guest's data structure, not an engine limit")
+		cancelFraction = flag.Float64("cancel-fraction", 0,
+			"fraction of input RECORDS that are cancels, with an equal number of passive inserts, sent alongside the\n"+
+				"\tcrossing pairs through the same producer. Inserts are bids priced 2..99, below every ask, so they rest;\n"+
+				"\teach is cancelled -cancel-lag inserts later, which keeps ~cancel-lag passive orders per producer resting.\n"+
+				"\tLatency is still measured on the crossing pairs only, so this measures latency UNDER insert+cancel load.\n"+
+				"\tRecords, not orders: a cancel is one order per record (no mass-cancel message exists), so at\n"+
+				"\t-orders-per-record=15 a 30% cancel share of ORDERS would multiply the record rate ~20x. Max 1/3\n"+
+				"\t(two inserts and two cancels per pair). 0 (the default) sends the historical traffic unchanged")
+		cancelLag       = flag.Int("cancel-lag", 200, "passive inserts outstanding per producer before each is cancelled (see -cancel-fraction)")
+		guestName       = flag.String("guest", "", "guest name, recorded in the report only")
+		guestSHA        = flag.String("guest-sha256", "", "guest binary sha256, recorded in the report only")
 		ordersPerRecord = flag.Int("orders-per-record", 1,
 			"orders carried in ONE record, as an exchange mass-quote message does.\n"+
 				"\t1 (the default) emits the historical one-order-per-record traffic, byte-identical to published runs.\n"+
@@ -1399,6 +1483,12 @@ func main() {
 
 	if *numProducers < 1 {
 		log.Fatalf("loadgen: -producers must be >= 1")
+	}
+	if *cancelFraction < 0 || *cancelFraction > 1.0/3 {
+		log.Fatalf("loadgen: -cancel-fraction must be in [0, 1/3], got %v", *cancelFraction)
+	}
+	if *cancelFraction > 0 && *cancelLag < 1 {
+		log.Fatalf("loadgen: -cancel-lag must be >= 1 with -cancel-fraction")
 	}
 	var acks kgo.Acks
 	switch *acksMode {
@@ -1654,6 +1744,51 @@ func main() {
 		live.ordersSent.Add(int64(*ordersPerRecord))
 	}
 
+	// The passive insert + cancel side stream. One bookOpsState per producer,
+	// touched only by that producer's goroutine, so it needs no lock. The
+	// records go through the SAME client as the crossing pairs, after them,
+	// which is what keeps the guest's per-lane sequence order (sell, buy,
+	// inserts) intact.
+	var insertsSent, cancelsSent atomic.Int64
+	opsState := make([]bookOpsState, *numProducers)
+	sendBookOps := func(idx int, pc *kgo.Client, phase byte, seq int64) {
+		st := &opsState[idx]
+		n := bookOpsDue(&st.credit, *cancelFraction)
+		if n == 0 {
+			return
+		}
+		var key []byte
+		if *keyByPair {
+			key = []byte(strconv.FormatInt(seq, 10))
+		}
+		cb := func(_ *kgo.Record, err error) {
+			if err != nil {
+				produceErrors.Add(1)
+				errTally.add(err)
+			}
+		}
+		for j := 0; j < n; j++ {
+			id := insertIDAt(runID, phase, seq, j)
+			pc.Produce(context.Background(), &kgo.Record{Topic: *inputTopic, Key: key, Value: pad(encodePassiveInsert(id, seq))}, cb)
+			st.outstanding = append(st.outstanding, passiveRef{id: id, key: key})
+			if phase == 't' {
+				insertsSent.Add(1)
+			}
+		}
+		recordsSent.Add(int64(n))
+		for len(st.outstanding) > *cancelLag {
+			ref := st.outstanding[0]
+			st.outstanding = st.outstanding[1:]
+			// Same key as the insert, so a multi-partition run still sends
+			// the cancel to the book that holds the order.
+			pc.Produce(context.Background(), &kgo.Record{Topic: *inputTopic, Key: ref.key, Value: pad(wire.EncodeCancel(wire.Cancel{OrderID: ref.id}))}, cb)
+			recordsSent.Add(1)
+			if phase == 't' {
+				cancelsSent.Add(1)
+			}
+		}
+	}
+
 	// pace runs the send loop against an absolute schedule anchored at the
 	// window's start, so scheduling error never accumulates into a silently
 	// reduced offered rate.
@@ -1737,6 +1872,9 @@ func main() {
 			// legs of a pair share a client.
 			seq := count*n + int64(idx)
 			sendOne(pc, phase, seq, seq%int64(*sampleEvery) == 0)
+			if *cancelFraction > 0 {
+				sendBookOps(idx, pc, phase, seq)
+			}
 			count++
 		}
 	}
@@ -1870,7 +2008,7 @@ func main() {
 	envelopesSent := sent
 	ordersSent := sent * int64(*ordersPerRecord)
 	// Two records per envelope pair: one resting leg, one aggressor leg.
-	recordsSentDerived := envelopesSent * 2
+	recordsSentDerived := envelopesSent*2 + insertsSent.Load() + cancelsSent.Load()
 	// One receipt per ORDER per probe - an envelope of N orders yields one
 	// output record carrying N fills, and relay-probe emits one receipt line
 	// per fill, so the count scales with orders rather than with records.
@@ -1903,6 +2041,7 @@ func main() {
 			SampleEvery: *sampleEvery, MaxBuffered: *maxBuffered, KeyByPair: *keyByPair, LingerMs: *lingerMs, Acks: *acksMode, Producers: *numProducers,
 			OrdersPerRecord: *ordersPerRecord, LatencySampleUnit: "envelope",
 			InputBytesPerRecord: inputBytesPerRecord, BookDepth: *bookDepth,
+			CancelFraction: *cancelFraction, CancelLag: *cancelLag, Guest: *guestName, GuestSHA256: *guestSHA,
 			MetadataMinAge: metadataMinAge.String(), RetryBackoffMax: retryBackoffMax.String(),
 			InputTopic: *inputTopic, ProbeTopic: *probeTopic, TransformName: *transformName,
 		},
@@ -1918,6 +2057,9 @@ func main() {
 			OrdersSent:             ordersSent,
 			EnvelopesSent:          envelopesSent,
 			RecordsSent:            recordsSent.Load(),
+			InsertsSent:            insertsSent.Load(),
+			CancelsSent:            cancelsSent.Load(),
+			BookOpsPerSec:          ratePerSec(ordersSent+insertsSent.Load()+cancelsSent.Load(), elapsed),
 			AchievedRecordsPerSec:  ratePerSec(recordsSentDerived, elapsed),
 			ProduceErrors:          produceErrors.Load(),
 			ProduceErrorsByKind:    errTally.snapshot(),

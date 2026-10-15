@@ -43,14 +43,14 @@ mkdir -p "$STAGE_DIR/bin" "$STAGE_DIR/redpanda-libs"
 # which is cheap - but the same class of mistake has twice been discovered by
 # ansible minutes into a deploy against already-billing hardware.
 echo "--- go measurement tools (built from this repo) ---"
-for t in loadgen fanout-load; do
+for t in loadgen fanout-load statecheck; do
   GOOS=linux GOARCH=amd64 go -C "$BENCH_SRC" build -o "$STAGE_DIR/bin/$t" "./cmd/$t" \
     || { echo "FAIL: building $t" >&2; exit 1; }
 done
 
 echo "--- wasm guests + external host (from $WASM_DIR) ---"
 for w in wasm-matcher.wasm relay-probe.wasm relay-sink.wasm passthrough.wasm \
-         position-tracker.wasm mass-matcher.wasm; do
+         position-tracker.wasm mass-matcher.wasm book-matcher.wasm; do
   [ -f "$WASM_DIR/$w" ] || { echo "FAIL: missing $WASM_DIR/$w - run 'make build-wasm' in redpanda-wasm-clients" >&2; exit 1; }
   cp "$WASM_DIR/$w" "$STAGE_DIR/"
 done
@@ -70,10 +70,14 @@ echo "--- benchmark scripts ---"
 for f in check-bottlenecks.sh scrape-metrics.sh lib-cluster.sh \
          run-e2-throughput.sh run-traditional-sharded.sh \
          run-inbroker-vs-external.sh run-cloud-fanout-comparison.sh \
-         run-resilience.sh; do
+         run-resilience.sh run-durability.sh; do
   cp "$BENCH_SRC/bench/$f" "$STAGE_DIR/" \
     || { echo "FAIL: missing bench/$f" >&2; exit 1; }
 done
+# The admin-API deploy helper (state_options + trusted-module grant) that
+# run-durability.sh and the book-matcher path of run-e2-throughput.sh use.
+cp "$BENCH_SRC/scripts/deploy-transform.sh" "$STAGE_DIR/" \
+  || { echo "FAIL: missing scripts/deploy-transform.sh" >&2; exit 1; }
 
 echo "--- rpk (client CLI only) ---"
 cp "$(command -v rpk)" "$STAGE_DIR/rpk"

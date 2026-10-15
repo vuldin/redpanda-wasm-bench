@@ -148,6 +148,14 @@ READ_LINGER_US="${READ_LINGER_US:-0}"
 RATE="${RATE:-10000}"
 PAYLOAD="${PAYLOAD:-0}"
 GUEST="${GUEST:-matcher}"
+# book-matcher only: guest-state persistence (off|snapshot) and how often the
+# guest re-serialises its book into the shared region. STATE=off is the
+# no-durability baseline of the same binary.
+STATE="${STATE:-off}"
+SNAPSHOT_EVERY_MS="${SNAPSHOT_EVERY_MS:-500}"
+# Fraction of input RECORDS that are cancels, with as many passive inserts
+# (loadgen -cancel-fraction). 0 is the historical traffic.
+CANCEL_FRACTION="${CANCEL_FRACTION:-0}"
 
 DURATION="${DURATION:-30s}"
 WARMUP="${WARMUP:-10s}"
@@ -400,6 +408,15 @@ report_placement() {
   echo "    distinct leader cores used: $(curl -sf "$ADMIN_URL/v1/cluster/partitions" 2>/dev/null | jq -r --arg t "$topic" '[.[] | select(.topic==$t) | .leader_id as $l | (.replicas[] | select(.node_id==$l) | "\($l)/\(.core)")] | unique | length' 2>/dev/null)"
 }
 
+guest_sha256() {
+  local f
+  case "$1" in
+    matcher) f="$BIN/wasm-matcher.wasm" ;;
+    *) f="$BIN/$1.wasm" ;;
+  esac
+  sha256sum "$f" 2>/dev/null | cut -d' ' -f1
+}
+
 deploy_producer() {
   local guest="$1" name="$2"
   local wasm
@@ -412,6 +429,20 @@ deploy_producer() {
     # byte-compared to a published figure. See the clients repo's
     # rust/testdata/published-modules/ and `make verify-published`.
     mass-matcher) wasm="$BIN/mass-matcher.wasm" ;;
+    # Depth-tolerant book + optional snapshot state. Imports the shared-memory
+    # host module, so it is deployed through the admin API helper, which
+    # first trusts its sha256 - rpk cannot, and an untrusted copy will not
+    # instantiate. SEQ_LANES must equal loadgen's -producers for the guest's
+    # replay detection (see the guest's Lanes doc).
+    book-matcher)
+      wasm="$BIN/book-matcher.wasm"
+      [ -f "$wasm" ] || { echo "ERROR: $wasm not found" >&2; return 1; }
+      echo "--- deploying producer $name (book-matcher STATE=$STATE) ---"
+      bash "$BIN/deploy-transform.sh" "$ADMIN_URL" "$name" "$orders" "$fills" "$wasm" \
+        --env RISK_LIMIT=0 --env "STATE=$STATE" --env "SEQ_LANES=$PRODUCERS" \
+        --env "SNAPSHOT_EVERY_MS=$SNAPSHOT_EVERY_MS" >/dev/null || return 1
+      wait_for_transforms_running "$name"
+      return ;;
     *) echo "unknown guest $guest" >&2; return 1 ;;
   esac
   [ -f "$wasm" ] || { echo "ERROR: $wasm not found - run make build-wasm / make build-passthrough" >&2; return 1; }
@@ -610,6 +641,7 @@ EOF
   echo "# fanout_shards=${FANOUT_SHARDS:-all($NUM_SHARDS)} fanout_shard_base=$FANOUT_SHARD_BASE"
   echo "# producer_acks=$ACKS"
   echo "# orders_per_record=$ORDERS_PER_RECORD mass_levels=${MASS_LEVELS} book_depth=$BOOK_DEPTH bookdepth_levels=${BOOKDEPTH_LEVELS}"
+  echo "# cancel_fraction=$CANCEL_FRACTION state=$STATE snapshot_every_ms=$SNAPSHOT_EVERY_MS guest_sha256=$(guest_sha256 "$GUEST")"
   echo "# fresh_topics_per_level=$FRESH_TOPICS_PER_LEVEL settle=${SETTLE}s"
   echo "# admin_endpoints_scraped=$(echo "$ADMIN_URLS" | tr ',' '\n' | grep -c .)"
   # New columns are APPENDED, never inserted: a summary.txt from an earlier
@@ -691,7 +723,10 @@ for level in $SWEEP; do
       # has none, so a depth sweep against it measures nothing. Envelopes
       # need the envelope-capable guest; it also decodes the single-order
       # preload records.
-      if [ "$this_opr" -gt 1 ]; then this_guest="mass-matcher"; else this_guest="matcher"; fi ;;
+      # GUEST=book-matcher is kept: it is the guest this sweep exists to
+      # compare against the reference one.
+      if [ "$GUEST" = "book-matcher" ]; then this_guest="book-matcher"
+      elif [ "$this_opr" -gt 1 ]; then this_guest="mass-matcher"; else this_guest="matcher"; fi ;;
   esac
   # Any envelope level, in ANY mode: a latency sample is one envelope, so the
   # sampled population shrinks by N. This used to live only in the massquote
@@ -705,7 +740,7 @@ for level in $SWEEP; do
   # loadgen sends drops every record and reports zero receipts, which costs a
   # full level of cluster time to discover and reads like a broker problem
   # rather than a configuration one. wasm-matcher handles wire type 0 only.
-  if [ "$this_opr" -gt 1 ] && [ "$this_guest" != "mass-matcher" ]; then
+  if [ "$this_opr" -gt 1 ] && [ "$this_guest" != "mass-matcher" ] && [ "$this_guest" != "book-matcher" ]; then
     echo "ERROR: orders-per-record=$this_opr needs GUEST=mass-matcher (got '$this_guest')." >&2
     echo "       wasm-matcher rejects wire type 2 outright, so this level would" >&2
     echo "       drop every record and report zero receipts. Use MODE=massquote," >&2
@@ -866,6 +901,8 @@ for level in $SWEEP; do
     -num-probes 1 -rate "$this_rate" -duration "$DURATION" -warmup "$WARMUP" \
     -pacing "$PACING" -payload-bytes "$this_payload" -sample-every "$this_sample_every" \
     -orders-per-record "$this_opr" -book-depth "$this_depth" \
+    -cancel-fraction "$CANCEL_FRACTION" -guest "$this_guest${STATE:+/state=$STATE}" \
+    -guest-sha256 "$(guest_sha256 "$this_guest")" \
     -linger-ms "$LINGER_MS" -acks "$ACKS" -producers "$PRODUCERS" \
     -drain "$DRAIN" -admin-url "$ADMIN_URLS" -transform-name "$want_producer" \
     -label "$tag" -out "$RESULTS_DIR/${tag}.json" || true

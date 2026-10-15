@@ -166,7 +166,14 @@ resolve_host() {
   load_env
   local t="$1" idx
   case "$t" in
-    broker0|broker1|broker2) idx=${t#broker}; echo "$BROKER_PUB" | awk -v i=$((idx+1)) '{print $i}' ;;
+    # Any index: the six-broker topology has broker3..5, and the durability
+    # series kills whichever broker leads the input partition.
+    broker*)
+      idx=${t#broker}
+      case "$idx" in ''|*[!0-9]*) die "bad broker index in '$t'" ;; esac
+      local nb; nb=$(echo "$BROKER_PUB" | wc -w)
+      [ "$idx" -lt "$nb" ] || die "no such target '$t' - only $nb broker(s) exist"
+      echo "$BROKER_PUB" | awk -v i=$((idx+1)) '{print $i}' ;;
     client*)
       # Any index, not just 0/1: client_count went to 8 on 2026-09-03 so the
       # traditional-deployment leg could shard 499 consumer groups off the
@@ -325,7 +332,7 @@ cmd_doctor() {
   # cluster exists rather than after it has been billing for a few minutes.
   _missing_wasm=""
   for _w in wasm-matcher.wasm passthrough.wasm relay-probe.wasm relay-sink.wasm \
-            position-tracker.wasm mass-matcher.wasm; do
+            position-tracker.wasm mass-matcher.wasm book-matcher.wasm; do
     [ -f "$WASM_DIR/$_w" ] || _missing_wasm="$_missing_wasm $_w"
   done
   [ -x "$WASM_DIR/wasm-client" ] || _missing_wasm="$_missing_wasm wasm-client"
@@ -504,6 +511,12 @@ cmd_ready() {
 # trials then measured the previous binary - the histogram change under test was
 # never on the brokers. status said DIFFERS and nobody was reading it. cmd_run now
 # enforces it (see BINARY GATE there) instead of leaving it to whoever is watching.
+all_brokers() {
+  load_env
+  local n i; n=$(echo "$BROKER_PUB" | wc -w)
+  for ((i = 0; i < n; i++)); do echo "broker$i"; done
+}
+
 binary_matches_everywhere() {
   local local_sha; local_sha=$(sha256sum "$REDPANDA_BIN" 2>/dev/null | cut -c1-16)
   if [ -z "$local_sha" ]; then
@@ -511,7 +524,9 @@ binary_matches_everywhere() {
     return 1
   fi
   local bad=0 t r
-  for t in broker0 broker1 broker2; do
+  # Every broker, not the first three: on the six-broker topology the gate
+  # used to pass with brokers 3-5 on any binary at all.
+  for t in $(all_brokers); do
     r=$(rsh "$t" "sudo sha256sum $REMOTE_BIN 2>/dev/null | cut -c1-16" 2>/dev/null | tr -d '\r\n')
     if [ "$r" != "$local_sha" ]; then
       echo "wb:   $t sha=${r:-<none>} != local $local_sha" >&2
@@ -593,6 +608,22 @@ cmd_run() {
   case "$phase" in
     e1) script=run-e1-ceiling.sh ;;
     e2) script=run-e2-throughput.sh ;;
+    # Durability of the stateful book-matcher guest. Runs from THIS machine
+    # rather than on client0, because the kill action needs ssh to whichever
+    # broker leads the input partition and the clients have no broker keys.
+    durability)
+      if [ "${WB_SKIP_BINARY_GATE:-0}" != "1" ]; then
+        binary_matches_everywhere || die "REFUSING TO RUN: at least one broker is not running your local build."
+        echo "wb: binary gate OK - all brokers running the local build"
+      fi
+      # KEY=VALUE arguments become the runner's environment, as they do for
+      # the remote runners.
+      local kv
+      for kv in "$@"; do
+        case "$kv" in *=*) export "${kv%%=*}=${kv#*=}" ;; *) die "run arguments must be KEY=VALUE (got '$kv')" ;; esac
+      done
+      bash "$ROOT/bench/run-durability.sh"
+      return ;;
     # Round 3 drives BOTH arms of the in-broker-vs-external comparison itself.
     # It exists so the invariant "both arms identical except CONSUMER_ARM" is
     # enforced by code rather than by remembering to set five variables the same

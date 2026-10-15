@@ -543,11 +543,15 @@
         rpk cluster config set readers_cache_target_max_size {{ readers_cache_target_max_size | default(5000) }}
         rpk cluster config set enable_rack_awareness {{ enable_rack_awareness | default(true) }}
         rpk cluster config set data_transforms_enabled true
-        rpk cluster config set data_transforms_per_function_memory_limit 4194304
-        rpk cluster config set data_transforms_max_instances_per_core 100
+        # Variables so a stateful-guest run can raise them; the defaults are
+        # what every published run used. Memory x instances is reserved per
+        # core up front, so raising one usually means lowering the other.
+        rpk cluster config set data_transforms_per_function_memory_limit {{ transform_memory_limit | default(4194304) }}
+        rpk cluster config set data_transforms_max_instances_per_core {{ transform_instances_per_core | default(100) }}
+        rpk cluster config set data_transforms_state_snapshot_max_size {{ transform_snapshot_max_size | default(4194304) }}
         rpk cluster config set data_transforms_runtime_limit_ms 30000
         echo "wasm-transforms/fanout cluster config now:"
-        for k in readers_cache_target_max_size enable_rack_awareness data_transforms_enabled data_transforms_per_function_memory_limit data_transforms_max_instances_per_core data_transforms_runtime_limit_ms; do
+        for k in readers_cache_target_max_size enable_rack_awareness data_transforms_enabled data_transforms_per_function_memory_limit data_transforms_max_instances_per_core data_transforms_state_snapshot_max_size data_transforms_runtime_limit_ms; do
           printf '  %s = %s\n' "$k" "$(rpk cluster config get "$k" 2>/dev/null)"
         done
       args: { executable: /bin/bash }
@@ -785,6 +789,7 @@
         - wasm-client
         - fanout-load
         - loadgen
+        - statecheck
 
     - name: Ship the wasm guest binaries (architecture-independent bytecode)
       copy:
@@ -798,8 +803,10 @@
       # handles type 0, so the same module runs the single-order control.
       # position-tracker was required by scripts/wb's preflight but never
       # shipped here, so it could not actually be deployed - now it can.
+      # book-matcher is the depth-tolerant, snapshot-capable guest; it must be
+      # trusted by sha256 (deploy-transform.sh does that) or it won't link.
       loop: [wasm-matcher.wasm, relay-probe.wasm, relay-sink.wasm, passthrough.wasm,
-             position-tracker.wasm, mass-matcher.wasm]
+             position-tracker.wasm, mass-matcher.wasm, book-matcher.wasm]
 
     # The push-relay systemd unit that used to live here is gone along with the
     # external Go relay stub it ran: the relay is part of the broker binary now
@@ -861,6 +868,10 @@
         # Optional resilience series. Also sources lib-cluster.sh, so it has
         # the same same-directory requirement as the other runners.
         - run-resilience.sh
+        # Durability series for the stateful book-matcher guest, and the
+        # admin-API deploy helper it (and e2's book-matcher path) uses.
+        - run-durability.sh
+        - deploy-transform.sh
 
     - name: Own the tool directory
       file: { path: /opt/wasm-bench, state: directory, owner: ubuntu, group: ubuntu, recurse: true }
