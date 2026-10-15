@@ -152,8 +152,12 @@ case "$MATCHER_PLACEMENT" in
     if [ "$MATCHER_CPUS" = auto ]; then
       MATCHER_CPUS="$(ssh -i "$KEY" "${SSH_OPTS[@]}" "ubuntu@$MATCH" 'bash -s' <<'FREE' 2>/dev/null
 set -euo pipefail
-flags="$(rpk redpanda config get rpk.additional_start_flags 2>/dev/null || true)"
-rp="$(echo "$flags" | grep -o -- '--cpuset=[0-9,-]*' | cut -d= -f2)"
+# The running broker's own command line is the authority (rpk passes the
+# deploy's --cpuset through to it); the config file is the fallback.
+pid="$(systemctl show -p MainPID --value redpanda 2>/dev/null || true)"
+rp=""
+[ -n "$pid" ] && [ "$pid" != 0 ] && rp="$(tr '\0' '\n' < /proc/$pid/cmdline 2>/dev/null | grep -o -- '--cpuset=[0-9,-]*' | cut -d= -f2 | head -1)"
+[ -n "$rp" ] || rp="$(grep -o -- '--cpuset=[0-9,-]*' /etc/redpanda/redpanda.yaml 2>/dev/null | cut -d= -f2 | head -1)"
 [ -n "$rp" ] || exit 0
 expand() { echo "$1" | tr ',' '\n' | while IFS= read -r r; do [ -n "$r" ] || continue; case "$r" in *-*) seq "${r%%-*}" "${r##*-}";; *) echo "$r";; esac; done; }
 used=" $(expand "$rp" | tr '\n' ' ') "
