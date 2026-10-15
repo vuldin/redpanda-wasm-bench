@@ -92,7 +92,10 @@ for s in e2:
             v = r[i] if i < len(r) else "-"
             try:
                 f = float(v)
-                v = f"{f:,.0f}" if abs(f) >= 100 else f"{f:.2f}"
+                if c == "level" or f == int(f) and abs(f) >= 100:
+                    v = f"{f:,.0f}"
+                else:
+                    v = f"{f:,.0f}" if abs(f) >= 100 else f"{f:.2f}"
             except ValueError:
                 pass
             cells.append(v)
