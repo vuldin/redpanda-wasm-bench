@@ -150,7 +150,10 @@ collect_logs() {
 run_trial() {
   local action="$1" depth="$2" trial="$3"
   local id; id="$(date +%s)"
-  local tag="$action-d$depth-$STATE-t$trial"
+  # The id makes every trial's files unique: a retried phase, or a second
+  # series into the same OUT, used to overwrite the first attempt's verdicts
+  # while summary.txt kept both attempts' lines.
+  local tag="$action-d$depth-$STATE-t$trial-$id"
   local orders="orders-du-$id" fills="fills-du-$id" name="bm-du-$id"
   local base="$OUT/$tag"
   say ""

@@ -1,0 +1,21 @@
+# The optional resilience series (docs/RESILIENCE.md): does an in-broker wasm
+# deployment survive leadership moving, what does latency do while it
+# happens, and how long until it is normal again? Maintenance mode and an
+# explicit leadership transfer, each with graceful drain unset vs set.
+#
+#   scripts/autorun.sh check plans/resilience.plan
+#   scripts/autorun.sh start plans/resilience.plan
+#
+# 3 brokers + clients + monitoring, ~$40/hr; ~1.5h of phases.
+#
+# Stateless relay latency during moves. For whether a STATEFUL guest's
+# book survives the same moves (and broker kills), see book-durability.plan.
+
+TOPOLOGY=single-az
+DEPLOY_ARGS=()
+
+# Four arms: {maintenance, transfer} x graceful drain {unset, 200ms}.
+phase resilience-drain-ab 30 run resilience 'ACTIONS=maintenance transfer' DRAIN_AB=1
+# Eight arms: the same, crossed with module residency {0, 8} - the series the
+# published figures in docs/RESILIENCE.md come from.
+phase resilience-residency 60 run resilience 'ACTIONS=maintenance transfer' DRAIN_AB=1 'RESIDENCY_LEVELS=0 8'

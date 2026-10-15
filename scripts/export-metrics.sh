@@ -33,6 +33,13 @@ WB="$HERE/wb"
 
 RESULTS="${1:?usage: export-metrics.sh <results-dir> [out-dir]}"
 OUT="${2:-$RESULTS/metrics-bundle}"
+# Never into an existing bundle: the blocks would merge with another export's
+# (possibly another cluster's) and the manifest would describe only the last.
+if [ -e "$OUT" ] && [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
+  NEW="$OUT-$(date -u +%Y%m%dT%H%M%SZ)"
+  echo "  $OUT already holds a bundle; writing this export to $NEW instead"
+  OUT="$NEW"
+fi
 [ -d "$RESULTS" ] || { echo "no such results dir: $RESULTS" >&2; exit 1; }
 
 # Seconds of padding either side of each measured window. The ramp into a

@@ -398,9 +398,22 @@ cmd_start() {
   [ "${1:-}" = "--existing" ] && { existing=1; shift; }
   local plan; plan="$(readlink -f "${1:?usage: autorun.sh start [--existing] PLAN}")"
   load_plan "$plan"
-  RUN_DIR="${RUN_DIR:-$ROOT/results/run-$(date -u +%Y-%m-%d-%H%M)-$(basename "$plan" .plan)}"
+  # A new run never writes into an existing directory: the default name is
+  # second-resolution and gets a suffix if taken. An explicit RUN_DIR that
+  # already holds a run is only accepted to continue it (--existing), and
+  # never once it is DONE.
+  if [ -z "${RUN_DIR:-}" ]; then
+    local base; base="$ROOT/results/run-$(date -u +%Y-%m-%d-%H%M%S)-$(basename "$plan" .plan)"
+    RUN_DIR="$base"; local n=2
+    while [ -e "$RUN_DIR" ]; do RUN_DIR="$base-$n"; n=$((n + 1)); done
+  else
+    [ -f "$RUN_DIR/DONE" ] && die "$RUN_DIR already holds a finished run; choose a new RUN_DIR"
+    if [ -f "$RUN_DIR/phases.tsv" ] && [ "$existing" = 0 ]; then
+      die "$RUN_DIR already holds a run; choose a new RUN_DIR, or use --existing to continue it on its cluster"
+    fi
+  fi
   mkdir -p "$RUN_DIR"
-  [ -f "$RUN_DIR/DONE" ] && die "$RUN_DIR already holds a finished run; set RUN_DIR"
+  [ -f "$RUN_DIR/RUN_STARTED_AT" ] || date +%s > "$RUN_DIR/RUN_STARTED_AT"
   if [ -f "$RUN_DIR/autorun.pid" ] && kill -0 "$(cat "$RUN_DIR/autorun.pid")" 2>/dev/null; then
     die "a run is already active in $RUN_DIR (pid $(cat "$RUN_DIR/autorun.pid"))"
   fi

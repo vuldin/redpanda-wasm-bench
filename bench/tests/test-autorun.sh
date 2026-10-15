@@ -116,5 +116,10 @@ check "start: default RUN_DIR is results/run-<date>-<plan>" "[ -n '$R9' ] && [ -
 check "start: no placeholder directory created" "[ ! -e '$T/<run-dir>' ]"
 [ -n "$R9" ] && [ -f "$R9/DONE" ] && case "$R9" in */results/run-*-autorun-selftest) rm -rf -- "$R9" ;; esac
 
+# 9: a new run never reuses a directory that already holds one
+R10="$T/r10"; mkdir -p "$R10"; touch "$R10/phases.tsv"
+out="$(env DRY_RUN=1 RUN_DIR="$R10" WB="$T/wb" STUB_LOG="$T/s10" bash "$AUTORUN" start "$T/test.plan" 2>&1)"
+check "start: refuses an explicit RUN_DIR that holds a run" "echo \"\$out\" | grep -q 'already holds a run'"
+
 echo "$pass passed, $fail failed  (scratch: $T)"
 [ "$fail" -eq 0 ]

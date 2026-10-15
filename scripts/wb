@@ -851,10 +851,16 @@ cmd_monitor() {
       # so this is the one monitoring operation with a deadline.
       local rdir="${1:-}"
       if [ -z "$rdir" ]; then
-        rdir="$(ls -dt "$ROOT"/results/reproduce-* 2>/dev/null | head -1)"
-        [ -n "$rdir" ] || die "no results directory found under $ROOT/results.
+        # Only a results dir created on THIS cluster: picking the newest of
+        # any age once meant exporting today's metrics into a run from
+        # another week. (export-metrics.sh also never merges into a bundle.)
+        [ -f "$CLUSTER_UP_MARK" ] || die "cannot tell which results belong to this cluster.
        Pass one: wb monitor export <results-dir>"
-        note "using the most recent results dir: $rdir"
+        rdir="$(find "$ROOT/results" -mindepth 1 -maxdepth 1 -type d \( -name 'run-*' -o -name 'reproduce-*' -o -name 'cloud-*' \) \
+                 -newer "$CLUSTER_UP_MARK" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+        [ -n "$rdir" ] || die "no results directory from this cluster under $ROOT/results.
+       Pass one: wb monitor export <results-dir>"
+        note "using this cluster's most recent results dir: $rdir"
       fi
       BENCH_SSH_KEY="$BENCH_SSH_KEY" bash "$HERE/export-metrics.sh" "$rdir" "${2:-}"
       ;;

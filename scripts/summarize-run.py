@@ -62,9 +62,21 @@ if phases:
 # e2 sweeps: whatever MODE, the runner writes a fingerprint and a header row.
 WANT = ["level", "offered/s", "achieved/s", "total_p50us", "total_p999us", "relay_p99us",
         "match_us/order", "records/s", "clean"]
-e2 = sorted(glob.glob(f"{R}/client-results/*/summary.txt"))
+e2 = sorted(s for s in glob.glob(f"{R}/client-results/*/summary.txt")
+            if not os.path.basename(os.path.dirname(s)).startswith("resilience-"))
+# `wb results` copies everything on the client, which on a cluster reused with
+# --existing includes earlier runs' sweeps. Keep only this run's: each sweep
+# directory ends in its runner's start (unix seconds).
+try:
+    started = int(read(f"{R}/RUN_STARTED_AT").strip())
+except ValueError:
+    started = 0
+older = [s for s in e2 if (m := re.search(r"-(\d{9,})$", os.path.basename(os.path.dirname(s)))) and int(m.group(1)) < started - 60]
+e2 = [s for s in e2 if s not in older]
 if e2:
     w("## Steady-state sweeps (run e2)\n")
+    if older:
+        w(f"_{len(older)} sweep(s) from before this run, also on the client, are not shown._\n")
     w("Latency columns are loadgen's own histograms (microseconds). A level that is "
       "not clean is a backlog or a delivery failure, not a latency; see the runner's "
       "per-level report for the reason.\n")
@@ -145,6 +157,24 @@ for d in dur:
         w("|---|---|---|---|---|")
         for t, h, a, c in reps:
             w(f"| {t} | {int(h):,} | {a} | {c} | {rv.get(t, '-')} |" if h else f"| {t} | - | {a} | {c} | {rv.get(t, '-')} |")
+    w("")
+
+res = sorted(d for d in glob.glob(f"{R}/client-results/resilience-*/summary.txt")
+             if not ((m := re.search(r"-(\d{9,})$", os.path.basename(os.path.dirname(d)))) and int(m.group(1)) < started - 60))
+if res:
+    w("## Resilience series (run resilience)\n")
+    w("`missing` must be zero (anything else is data loss). Duplicates are expected without a "
+      "graceful drain. Recovery is time until p99 is back within the band of this arm's own baseline "
+      "and holds; a first-arm `DID NOT RECOVER` is usually the shared log growing under it - see "
+      "docs/RESILIENCE.md.\n")
+for d in res:
+    txt = read(d)
+    w(f"### `{os.path.basename(os.path.dirname(d))}`\n")
+    w("| arm | total p99 us (base -> during) | max us | produce p99 us | duplicates | missing | recovery |")
+    w("|---|---|---|---|---|---|---|")
+    for m in re.finditer(r"RESULT (\S+): total p99 (\S+)->(\S+) max (\S+)->(\S+) \| produce p99 (\S+)->(\S+) \| over10ms \S+ \| duplicates=(\S+) missing=(\S+) \| recovery=(\S+)", txt):
+        g = m.groups()
+        w(f"| {g[0]} | {g[1]} -> {g[2]} | {g[3]} -> {g[4]} | {g[5]} -> {g[6]} | {g[7]} | {g[8]} | {g[9]} |")
     w("")
 
 repro = sorted(glob.glob(f"{R}/**/reproduce-*", recursive=True)) + sorted(glob.glob(f"{R}/reproduce"))
