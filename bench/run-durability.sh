@@ -192,7 +192,11 @@ run_trial() {
     transfer)
       local target; target=$(echo "$reps" | tr ' ' '\n' | grep -vx "$leader" | head -1)
       note="target=node$target"
-      C "curl -sf -X POST '$ADMIN_URL/v1/partitions/kafka/$orders/0/transfer_leadership?target=$target'" >> "$base.action.txt" 2>&1 ;;
+      # To the LEADER's admin API, following redirects. Sent to broker0 without
+      # -L, the request silently did nothing unless broker0 happened to lead
+      # (2026-10-15c P2/P2g: 10 of 12 "transfers" never moved leadership).
+      local lip; lip=$(C "curl -sf $ADMIN_URL/v1/brokers" | jq -r --argjson n "$leader" '.[] | select(.node_id==$n) | .internal_rpc_address')
+      C "curl -sfL -X POST 'http://$lip:9644/v1/partitions/kafka/$orders/0/transfer_leadership?target=$target' -w ' http=%{http_code}'" >> "$base.action.txt" 2>&1 ;;
     kill)
       local bi; bi="$(broker_index_of_node "$leader")"
       note="victim=broker$bi(node$leader)"
@@ -214,6 +218,19 @@ run_trial() {
   esac
   [ -n "${act_end:-}" ] || act_end=$(now_ms)
   say "  action=$action $note start_ms=$act_start took_ms=$((act_end - act_start))"
+  if [ "$action" != none ]; then
+    local moved_to=""; local w
+    for w in $(seq 1 20); do
+      moved_to="$(leader_of "$orders")"
+      [ -n "$moved_to" ] && [ "$moved_to" != "$leader" ] && break
+      sleep 0.5
+    done
+    if [ "$moved_to" = "$leader" ] || [ -z "$moved_to" ]; then
+      say "  LEADERSHIP-DID-NOT-MOVE: still node${moved_to:-?} - this trial does not test the action; exclude it"
+    else
+      say "  leadership moved node$leader -> node$moved_to"
+    fi
+  fi
 
   # Recovery: transform running again on whichever node now leads.
   local rec_start; rec_start=$(now_ms)
