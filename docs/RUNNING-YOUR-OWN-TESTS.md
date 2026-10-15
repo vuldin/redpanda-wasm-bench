@@ -179,7 +179,10 @@ be zero, are in [MONITORING.md](MONITORING.md).
   at T, recovery, then a read-back of the book. Knobs: `ACTIONS`
   (`maintenance transfer kill`), `DEPTHS`, `TRIALS`, `STATE`, `GRACEFUL_MS`,
   `REPLAY=1` (rebuild the same book by replaying the topic from the start and
-  time it), `PER_WAVE`, `WAVES`, `KILL_DOWN_S`, `RATE`, `ORDERS_PER_RECORD`,
+  time it), `PER_WAVE`, `WAVES`, `KILL_DOWN_S`, `KILL_MODE` (`down`: the
+  victim is held down for `KILL_DOWN_S` so a replica must take over;
+  `systemd`: the unit's `Restart=` brings it straight back, as in
+  production), `RATE`, `ORDERS_PER_RECORD`,
   `CANCEL_FRACTION`, `OUT`.
 - **`run resilience`** - latency during leadership movement; see
   [RESILIENCE.md](RESILIENCE.md).
@@ -223,7 +226,9 @@ has the full tables):
   guest re-serialises its region every 500ms and nothing tells it the broker is
   about to checkpoint.
 - A broker kill loses the last ~3.5-4s (the snapshot and the committed offset
-  are written independently); failover is 6.5-10s.
+  are written independently); failover is 6.5-10s. Those kills ran with the
+  victim restarted by systemd within seconds (what is now `KILL_MODE=systemd`);
+  leadership still moved to a surviving replica in every six-broker trial.
 - Snapshot restore is 1-14ms; replaying ~800k records to rebuild the same
   book is ~10s.
 - Whole-region snapshots every 500ms push p99.9 to 10-18ms at depth 1k-10k.

@@ -48,6 +48,14 @@ WAVES="${WAVES:-10,6,3,1,0.3}"
 # enough that the partition's new leader has to restore from the snapshot
 # rather than the old leader coming straight back.
 KILL_DOWN_S="${KILL_DOWN_S:-20}"
+# down (default): SIGKILL, then `systemctl stop` at once so systemd cannot
+# restart it - the broker stays down for KILL_DOWN_S and a surviving replica
+# must take over. systemd: SIGKILL only, and let the unit's Restart= policy
+# bring it straight back (production behaviour; on a 3-broker cluster the
+# victim can return fast enough to keep leadership, so the trial then tests a
+# crash-restart in place rather than a failover). Until 2026-10-15 every kill
+# was effectively `systemd`, whatever KILL_DOWN_S said.
+KILL_MODE="${KILL_MODE:-down}"
 REPLAY="${REPLAY:-0}"
 # data_transforms_graceful_transfer_timeout_ms for the run. Unset (the broker
 # default, null) means a leadership move does NOT drain: no final offset flush
@@ -206,7 +214,8 @@ run_trial() {
       local bi; bi="$(broker_index_of_node "$leader")"
       note="victim=broker$bi(node$leader)"
       # MainPID, not pkill: a pattern match can hit the ssh shell itself.
-      "$WB" ssh "broker$bi" "echo killed_at_ms=\$(date +%s%3N); sudo kill -9 \$(systemctl show -p MainPID --value redpanda)" >> "$base.action.txt" 2>&1
+      local hold=""; [ "$KILL_MODE" = down ] && hold="; sudo systemctl stop redpanda"
+      "$WB" ssh "broker$bi" "echo kill_mode=$KILL_MODE restart_policy=\$(systemctl show -p Restart --value redpanda)/\$(systemctl show -p RestartUSec --value redpanda); echo killed_at_ms=\$(date +%s%3N); sudo kill -9 \$(systemctl show -p MainPID --value redpanda)$hold; echo state_after_kill=\$(systemctl is-active redpanda)" >> "$base.action.txt" 2>&1
       act_end=$(now_ms)
       # Recovery is measured DURING the outage: the point is how fast a
       # surviving replica takes over, not how fast the victim comes back.
@@ -222,7 +231,7 @@ run_trial() {
       "$WB" ssh "broker$bi" "echo restarts=\$(systemctl show -p NRestarts --value redpanda) active=\$(systemctl is-active redpanda); sudo systemctl start redpanda; echo started_at_ms=\$(date +%s%3N)" >> "$base.action.txt" 2>&1 ;;
   esac
   [ -n "${act_end:-}" ] || act_end=$(now_ms)
-  say "  action=$action $note start_ms=$act_start took_ms=$((act_end - act_start))"
+  say "  action=$action $note start_ms=$act_start took_ms=$((act_end - act_start))$([ "$action" = kill ] && echo " kill_mode=$KILL_MODE")"
   if [ "$action" != none ]; then
     local moved_to=""; local w
     for w in $(seq 1 20); do
@@ -303,7 +312,7 @@ replay_arm() {
   say "  REPLAY-VERDICT $tag ${v:-<no verdict>}"
 }
 
-say "# durability run $(date -u +%FT%TZ) state=$STATE graceful_transfer_ms=${GRACEFUL_MS:-null} actions=[$ACTIONS] depths=[$DEPTHS] trials=$TRIALS rate=$RATE opr=$OPR producers=$PRODUCERS cancel_fraction=$CANCEL_FRACTION rf=$RF snapshot_every_ms=$SNAPSHOT_EVERY_MS per_wave=$PER_WAVE waves=$WAVES kill_down_s=$KILL_DOWN_S replay=$REPLAY"
+say "# durability run $(date -u +%FT%TZ) state=$STATE graceful_transfer_ms=${GRACEFUL_MS:-null} kill_mode=$KILL_MODE actions=[$ACTIONS] depths=[$DEPTHS] trials=$TRIALS rate=$RATE opr=$OPR producers=$PRODUCERS cancel_fraction=$CANCEL_FRACTION rf=$RF snapshot_every_ms=$SNAPSHOT_EVERY_MS per_wave=$PER_WAVE waves=$WAVES kill_down_s=$KILL_DOWN_S replay=$REPLAY"
 say "# guest sha256=$(C 'sha256sum book-matcher.wasm' | cut -d' ' -f1)"
 say "# broker cfg: $(C "$RPKR cluster config get data_transforms_per_function_memory_limit; $RPKR cluster config get data_transforms_state_snapshot_max_size; $RPKR cluster config get data_transforms_max_instances_per_core" | tr '\n' ' ')"
 # The leader balancer would move the partition on its own mid-trial and
