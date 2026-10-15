@@ -25,11 +25,17 @@ step "clean working trees (a gate result must describe committed code)"
 [ -z "$(git -C "$CLIENTS_REPO" status --porcelain)" ] || bad "uncommitted changes in $CLIENTS_REPO"
 [ -z "$(git -C "$REDPANDA_SRC" status --porcelain -uno)" ] || bad "uncommitted changes in $REDPANDA_SRC"
 
-step "broker binary is newer than the broker HEAD commit"
+step "broker binary was built after the last broker source edit"
+# Not a commit-time comparison: a binary built from a working tree and then
+# committed is current, and dev builds carry no git stamp to compare. What
+# matters is whether any source file changed after the build.
 if [ -x "$REDPANDA_BIN" ]; then
-  [ "$(stat -c %Y "$REDPANDA_BIN")" -ge "$(git -C "$REDPANDA_SRC" log -1 --format=%ct)" ] \
-    || bad "$REDPANDA_BIN is older than $(git -C "$REDPANDA_SRC" log -1 --format='%h %s') - rebuild it"
-  echo "  $(sha256sum "$REDPANDA_BIN" | cut -c1-16) $REDPANDA_BIN"
+  newer="$(find "$REDPANDA_SRC/src/v" -type f -newer "$REDPANDA_BIN" \( -name '*.cc' -o -name '*.h' -o -name 'BUILD' -o -name '*.bzl' \) 2>/dev/null | head -5)"
+  if [ -n "$newer" ] && [ "${ALLOW_STALE_BINARY:-0}" != 1 ]; then
+    bad "broker sources changed after $REDPANDA_BIN was built - rebuild it (or ALLOW_STALE_BINARY=1):"
+    echo "$newer" | sed 's/^/    /'
+  fi
+  echo "  $(sha256sum "$REDPANDA_BIN" | cut -c1-16) $REDPANDA_BIN (built $(date -r "$REDPANDA_BIN" '+%F %T'))"
 else
   bad "no broker binary at $REDPANDA_BIN"
 fi
