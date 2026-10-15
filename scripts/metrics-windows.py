@@ -75,8 +75,20 @@ def window_for(path, d):
 
     started = d.get("started_at_unix") or d.get("start_unix") or cfg.get("run_id")
     if not started:
-        m = re.search(r"-(\d{10})(?:\D|$)", str(path.parent.name))
-        started = int(m.group(1)) if m else None
+        # loadgen's own run_id is its start time in Unix NANOseconds. The
+        # durability runner's reports depend on it: they live in a flat OUT
+        # directory (kill-held-down/...), so there is no epoch in the parent
+        # name, and without this their windows exported as unlabelled
+        # "windowNN" (2026-10-15).
+        rid = d.get("run_id")
+        if isinstance(rid, (int, float)) and rid > 1e17:
+            started = rid / 1e9
+    if not started:
+        for name in (path.parent.name, path.stem, str(label)):
+            m = re.search(r"-(\d{10})(?:\D|$)", str(name))
+            if m:
+                started = int(m.group(1))
+                break
     if not started:
         return None
 
