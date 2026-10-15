@@ -156,6 +156,11 @@ SNAPSHOT_EVERY_MS="${SNAPSHOT_EVERY_MS:-500}"
 # Fraction of input RECORDS that are cancels, with as many passive inserts
 # (loadgen -cancel-fraction). 0 is the historical traffic.
 CANCEL_FRACTION="${CANCEL_FRACTION:-0}"
+# When in-broker relay consumers receive the matcher's output (broker
+# RELAY_DELIVERY, set on the producing transform): precommit (the default:
+# pushed before the output write, the lowest latency, not yet durable) or
+# committed (pushed only once a quorum has acknowledged the output batch).
+RELAY_DELIVERY="${RELAY_DELIVERY:-precommit}"
 
 DURATION="${DURATION:-30s}"
 WARMUP="${WARMUP:-10s}"
@@ -440,7 +445,7 @@ deploy_producer() {
       echo "--- deploying producer $name (book-matcher STATE=$STATE) ---"
       bash "$BIN/deploy-transform.sh" "$ADMIN_URLS" "$name" "$orders" "$fills" "$wasm" \
         --env RISK_LIMIT=0 --env "STATE=$STATE" --env "SEQ_LANES=$PRODUCERS" \
-        --env "SNAPSHOT_EVERY_MS=$SNAPSHOT_EVERY_MS" >/dev/null || return 1
+        --env "SNAPSHOT_EVERY_MS=$SNAPSHOT_EVERY_MS" --env "RELAY_DELIVERY=$RELAY_DELIVERY" >/dev/null || return 1
       wait_for_transforms_running "$name"
       return ;;
     *) echo "unknown guest $guest" >&2; return 1 ;;
@@ -449,7 +454,7 @@ deploy_producer() {
   echo "--- deploying producer $name ($guest) ---"
   rpkc transform deploy --name "$name" \
     --input-topic "$orders" --output-topic "$fills" \
-    --var RISK_LIMIT=0 --file "$wasm" >/dev/null
+    --var RISK_LIMIT=0 --var "RELAY_DELIVERY=$RELAY_DELIVERY" --file "$wasm" >/dev/null
   wait_for_transforms_running "$name"
 }
 
@@ -641,7 +646,7 @@ EOF
   echo "# fanout_shards=${FANOUT_SHARDS:-all($NUM_SHARDS)} fanout_shard_base=$FANOUT_SHARD_BASE"
   echo "# producer_acks=$ACKS"
   echo "# orders_per_record=$ORDERS_PER_RECORD mass_levels=${MASS_LEVELS} book_depth=$BOOK_DEPTH bookdepth_levels=${BOOKDEPTH_LEVELS}"
-  echo "# cancel_fraction=$CANCEL_FRACTION state=$STATE snapshot_every_ms=$SNAPSHOT_EVERY_MS guest_sha256=$(guest_sha256 "$GUEST")"
+  echo "# cancel_fraction=$CANCEL_FRACTION state=$STATE snapshot_every_ms=$SNAPSHOT_EVERY_MS relay_delivery=$RELAY_DELIVERY guest_sha256=$(guest_sha256 "$GUEST")"
   echo "# fresh_topics_per_level=$FRESH_TOPICS_PER_LEVEL settle=${SETTLE}s"
   echo "# admin_endpoints_scraped=$(echo "$ADMIN_URLS" | tr ',' '\n' | grep -c .)"
   # New columns are APPENDED, never inserted: a summary.txt from an earlier

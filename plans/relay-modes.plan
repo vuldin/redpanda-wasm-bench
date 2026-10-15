@@ -1,0 +1,36 @@
+# What waiting for the output quorum costs in-broker consumers: the broker's
+# RELAY_DELIVERY option, set on the producing transform.
+#
+#   precommit  (default) the relay pushes each output record from the
+#              transform callback, before its output write is even queued:
+#              the lowest latency, but a consumer can act on a record that
+#              never becomes durable if the leader fails
+#   committed  the relay pushes only after the output batch's write has
+#              returned, i.e. a quorum of the output partition's replicas
+#              has acknowledged it - what a Kafka consumer could fetch
+#
+# Same matcher, book and order flow as production-shape.plan; the modes are
+# interleaved so cluster drift cannot pose as a mode difference. Needs a broker
+# built with RELAY_DELIVERY (bench/local-relay-delivery.sh, run by the offline
+# gate, fails without it).
+#
+#   scripts/autorun.sh check plans/relay-modes.plan
+#   scripts/autorun.sh start plans/relay-modes.plan
+#   RUN_DIR=<run> scripts/autorun.sh start --existing plans/relay-modes.plan   (on a live cluster)
+#
+# 6 brokers + 3 clients + monitoring, ~$55/hr; ~30 min of phases.
+
+TOPOLOGY=six-broker
+DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
+
+E2=(ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 ACKS=all RF=3
+    WARMUP=10s DRAIN=30s RELAY_STAGE_METRICS=true WRITE_CACHING=true
+    LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=1 GUEST=book-matcher STATE=off CANCEL_FRACTION=0.3
+    MODE=bookdepth BOOKDEPTH_LEVELS=1000 DURATION=60s)
+
+for t in 1 2; do
+  phase "fo1-precommit-t$t" 5 run e2 "${E2[@]}" FANOUT=1 RELAY_DELIVERY=precommit
+  phase "fo1-committed-t$t" 5 run e2 "${E2[@]}" FANOUT=1 RELAY_DELIVERY=committed
+done
+phase fo20-precommit 5 run e2 "${E2[@]}" FANOUT=20 RELAY_DELIVERY=precommit
+phase fo20-committed 5 run e2 "${E2[@]}" FANOUT=20 RELAY_DELIVERY=committed

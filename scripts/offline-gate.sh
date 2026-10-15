@@ -4,8 +4,8 @@
 # commits of all three repos (bench, clients, broker), so run it after your
 # last commit and before `autorun.sh start`.
 #
-#   scripts/offline-gate.sh            all checks, including the local broker rehearsal
-#   REHEARSAL=0 scripts/offline-gate.sh   skip the rehearsal (no broker changes)
+#   scripts/offline-gate.sh            all checks, including the two local broker tests
+#   REHEARSAL=0 scripts/offline-gate.sh   skip the local broker tests (no broker changes)
 #
 # Records a line in results/GATE-PASSED on success.
 set -uo pipefail
@@ -73,6 +73,8 @@ for f in "$ROOT"/bench/*.sh "$ROOT"/scripts/*.sh "$ROOT/scripts/wb" "$ROOT"/plan
 if [ "${REHEARSAL:-1}" = 1 ]; then
   step "local broker rehearsal (snapshot survives SIGKILL)"
   REDPANDA_BIN="$REDPANDA_BIN" WASM_DIR="$CLIENTS_REPO/bin" bash "$ROOT/bench/local-rehearsal.sh" || bad "local rehearsal"
+  step "local relay-delivery check (RELAY_DELIVERY=committed waits for the output write)"
+  PAIRS=1 REDPANDA_BIN="$REDPANDA_BIN" WASM_DIR="$CLIENTS_REPO/bin" bash "$ROOT/bench/local-relay-delivery.sh" || bad "local relay-delivery check"
 fi
 
 echo ""
