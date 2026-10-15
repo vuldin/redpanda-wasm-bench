@@ -115,8 +115,8 @@ for _ov in region.auto.tfvars clients.auto.tfvars; do
   _age_days=$(( ( $(date +%s) - $(stat -c %Y "$_ov") ) / 86400 ))
   _overrides=""
   for _k in broker_count client_count region azs; do
-    _base=$(grep -oP "^${_k}\s*=\s*\K.*" "$TFVARS" 2>/dev/null | sed 's/[[:space:]]*#.*//;s/[[:space:]]*$//' | tail -1)
-    _ovv=$(grep -oP "^${_k}\s*=\s*\K.*" "$_ov" 2>/dev/null | sed 's/[[:space:]]*#.*//;s/[[:space:]]*$//' | tail -1)
+    _base=$(grep -oP "^${_k}\s*=\s*\K.*" "$TFVARS" 2>/dev/null | sed 's/[[:space:]]*#.*//;s/[[:space:]]*$//' | tail -1 || true)
+    _ovv=$(grep -oP "^${_k}\s*=\s*\K.*" "$_ov" 2>/dev/null | sed 's/[[:space:]]*#.*//;s/[[:space:]]*$//' | tail -1 || true)
     [ -n "$_ovv" ] && [ "$_ovv" != "$_base" ] && _overrides="$_overrides $_k: ${_base:-<unset>} -> $_ovv;"
   done
   if [ -n "$_overrides" ]; then
