@@ -739,6 +739,10 @@ cmd_run() {
     echo "    RSH_TIMEOUT; results for completed levels are still on the client."
   fi
   echo "wb: fetch result JSON with: wb results"
+  # Propagate it. wb used to exit 0 here whatever happened, so an unattended
+  # run recorded a failed phase as OK and never retried it (2026-10-15: a
+  # 3-minute window "passed" in 57s after its deploy failed).
+  return "$rc"
 }
 
 cmd_results() {

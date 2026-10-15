@@ -42,12 +42,20 @@ sha = hashlib.sha256(data).hexdigest()
 
 admins = [a.strip() for a in admin.split(",") if a.strip()]
 
-def req_once(base, method, path, body, ctype):
-    r = urllib.request.Request(base + path, data=body, method=method, headers={"Content-Type": ctype})
+def req_once(base, method, path, body, ctype, hops=0):
+    url = base + path if path.startswith("/") else path
+    r = urllib.request.Request(url, data=body, method=method, headers={"Content-Type": ctype})
     try:
         with urllib.request.urlopen(r, timeout=60) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
+        # The admin API redirects writes to the controller leader with 307/308.
+        # urllib will not re-send a POST/PUT body across a redirect, so follow
+        # it here. (2026-10-15: a deploy answered 307 was treated as final and
+        # a whole e2 phase failed.)
+        loc = e.headers.get("Location") if e.headers else None
+        if e.code in (301, 302, 307, 308) and loc and hops < 3:
+            return req_once(base, method, loc, body, ctype, hops + 1)
         return e.code, e.read()
     except Exception as e:  # connection refused, timeout: try the next broker
         return 599, str(e).encode()
