@@ -32,9 +32,11 @@ step "clean working trees (a gate result must describe committed code)"
 step "broker binary was built after the last broker source edit"
 # Not a commit-time comparison: a binary built from a working tree and then
 # committed is current, and dev builds carry no git stamp to compare. What
-# matters is whether any source file changed after the build.
+# matters is whether any source file changed after the build. Files under a
+# tests/ directory are not linked into the broker, so adding a unit test after
+# the build does not make the binary stale.
 if [ -x "$REDPANDA_BIN" ]; then
-  newer="$(find "$REDPANDA_SRC/src/v" -type f -newer "$REDPANDA_BIN" \( -name '*.cc' -o -name '*.h' -o -name 'BUILD' -o -name '*.bzl' \) 2>/dev/null | head -5)"
+  newer="$(find "$REDPANDA_SRC/src/v" -type f -newer "$REDPANDA_BIN" -not -path '*/tests/*' \( -name '*.cc' -o -name '*.h' -o -name 'BUILD' -o -name '*.bzl' \) 2>/dev/null | sed -n '1,5p')"
   if [ -n "$newer" ] && [ "${ALLOW_STALE_BINARY:-0}" != 1 ]; then
     bad "broker sources changed after $REDPANDA_BIN was built - rebuild it (or ALLOW_STALE_BINARY=1):"
     echo "$newer" | sed 's/^/    /'
