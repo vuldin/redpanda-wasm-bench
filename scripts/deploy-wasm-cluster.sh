@@ -5,7 +5,7 @@
 # under local_artifacts_dir, and run the playbook against whatever
 # cluster terraform/hosts.ini currently points at.
 #
-# Run this after every redpanda or wasm-orderbook source change that
+# Run this after every redpanda or redpanda-wasm-clients change that
 # needs to reach the live cluster (e.g. the network_module Nagle fix),
 # and again any time the cluster topology changes (single-AZ vs
 # multi-AZ) - it's the same artifact set either way, only hosts.ini
@@ -21,7 +21,8 @@ set -euo pipefail
 cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.."
 
 : "${BENCH_SSH_KEY:?set to the private key path matching the public_key_path terraform used}"
-REDPANDA_SRC="${REDPANDA_SRC:-$HOME/redpanda/redpanda}"
+# shellcheck source=lib-env.sh
+. scripts/lib-env.sh
 # WASM_DIR points at redpanda-wasm-clients/bin - the guests and the external
 # host are built in THAT repo, deliberately, so the artifact under test cannot
 # be silently changed by the harness measuring it. The Go measurement tools are

@@ -172,7 +172,7 @@ H="$(echo "$MONITOR_PUB" | awk '{print $1}')"
 # --exclude tmp_*: promtool leaves root-owned tmp_dbro_sandbox* scratch dirs
 # in the output; they hold no blocks, and an unreadable one made rsync exit 23
 # and lose the whole bundle's viewer half (2026-10-15).
-rsync -az --delete --exclude 'tmp_*' -e "ssh -i ${BENCH_SSH_KEY:-$HOME/.ssh/jlp-aws-iceberg.pem} \
+rsync -az --delete --exclude 'tmp_*' -e "ssh -i ${BENCH_SSH_KEY:?set BENCH_SSH_KEY in wb.local.env} \
   -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
   "ubuntu@$H:$REMOTE_WORK/data/" "$OUT/data/" || die "rsync of the blocks failed"
 bash "$WB" ssh monitor "sudo rm -rf $REMOTE_WORK" >/dev/null 2>&1 || true

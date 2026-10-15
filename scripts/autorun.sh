@@ -43,10 +43,11 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
-# Your per-machine settings (gitignored; see wb.local.env.example), read here
-# as well as by wb so that autorun's own settings - ARCHIVE_DIR above all -
-# can live there instead of on every command line. The environment still wins.
-[ -f "$ROOT/wb.local.env" ] && . "$ROOT/wb.local.env"
+# Your per-machine settings (wb.local.env, via lib-env.sh), read here as well as
+# by wb so that autorun's own settings - ARCHIVE_DIR above all - can live there
+# instead of on every command line. The environment still wins.
+# shellcheck source=lib-env.sh
+. "$HERE/lib-env.sh"
 WB="${WB:-$ROOT/scripts/wb}"
 RESERVE_MIN="${RESERVE_MIN:-25}"
 GATE_FILE="${GATE_FILE:-$ROOT/results/GATE-PASSED}"
@@ -94,7 +95,7 @@ plan_minutes() { local t=0 e; for e in "${PHASE_EST[@]}"; do t=$((t + e)); done;
 load_creds() {
   [ "${DRY_RUN:-0}" = 1 ] && return 0
   local c
-  c="$(aws configure export-credentials --profile "${AWS_PROFILE:-sandbox-cse}" --format env 2>/dev/null)" || return 1
+  c="$(aws configure export-credentials --format env 2>/dev/null)" || return 1
   eval "$c"
   export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
   [ -n "${AWS_CREDENTIAL_EXPIRATION:-}" ] && export AWS_CREDENTIAL_EXPIRATION
@@ -284,7 +285,7 @@ write_status() {
 refuse() { log "REFUSING: $1"; record "${2:-gate}" refused 0 -; write_status "$1 - nothing provisioned"; touch "$RUN_DIR/DONE"; exit 1; }
 
 heads() {
-  echo "bench=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null) clients=$(git -C "${CLIENTS_REPO:-$ROOT/../redpanda-wasm-clients}" rev-parse HEAD 2>/dev/null) broker=$(git -C "${REDPANDA_SRC:-$HOME/redpanda/redpanda}" rev-parse HEAD 2>/dev/null)"
+  echo "bench=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null) clients=$(git -C "${CLIENTS_REPO:-$WASM_CLIENTS_SRC}" rev-parse HEAD 2>/dev/null) broker=$(git -C "$REDPANDA_SRC" rev-parse HEAD 2>/dev/null)"
 }
 
 # ---------------------------------------------------------------------------
@@ -304,7 +305,7 @@ run() {
     fi
     record gate ok 0 "$h"
   fi
-  load_creds || refuse "cannot export AWS credentials (aws sso login --profile ${AWS_PROFILE:-sandbox-cse})" creds
+  load_creds || refuse "cannot export AWS credentials ($(aws_login_hint))" creds
   local exp; exp="$(creds_expiry_epoch)"
   [ "$exp" -ge $(( HARD_DEADLINE_EPOCH + RESERVE_MIN * 60 )) ] \
     || refuse "credentials expire $(date -u -d @"$exp" +%FT%TZ), before the deadline + reserve" creds
@@ -435,7 +436,7 @@ cmd_start() {
   if [ -f "$RUN_DIR/autorun.pid" ] && kill -0 "$(cat "$RUN_DIR/autorun.pid")" 2>/dev/null; then
     die "a run is already active in $RUN_DIR (pid $(cat "$RUN_DIR/autorun.pid"))"
   fi
-  load_creds || die "cannot export AWS credentials - run: aws sso login --profile ${AWS_PROFILE:-sandbox-cse}"
+  load_creds || die "cannot export AWS credentials - run: $(aws_login_hint)"
   local now cap exp hard
   now=$(date +%s); cap=$(( now + ${CAP_HOURS:-5} * 3600 )); exp="$(creds_expiry_epoch)"
   hard=$(( exp - (RESERVE_MIN + 10) * 60 ))

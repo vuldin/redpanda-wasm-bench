@@ -21,9 +21,10 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-REDPANDA_SRC="${REDPANDA_SRC:-$HOME/redpanda/redpanda}"
+# shellcheck source=../scripts/lib-env.sh
+. "$ROOT/scripts/lib-env.sh"
 REDPANDA_BIN="${REDPANDA_BIN:-$REDPANDA_SRC/bazel-bin/src/v/redpanda/redpanda}"
-WASM_DIR="${WASM_DIR:-${WASM_CLIENTS_SRC:-$HOME/redpanda/projects/redpanda-wasm-clients}/bin}"
+WASM_DIR="${WASM_DIR:-$WASM_CLIENTS_SRC/bin}"
 KAFKA_PORT="${KAFKA_PORT:-19093}" ADMIN_PORT="${ADMIN_PORT:-9645}" RPC_PORT="${RPC_PORT:-33146}"
 RPK_CLI="${RPK_CLI:-$(command -v rpk)}"
 PAIRS="${PAIRS:-2}"

@@ -67,23 +67,16 @@ TF="$ROOT/terraform"
 
 # --- local settings ----------------------------------------------------------
 # Your account, keys and checkout paths go in wb.local.env (gitignored; copy
-# wb.local.env.example). Read first, so anything set there - or in the
-# environment - wins over the defaults below.
-[ -f "$ROOT/wb.local.env" ] && . "$ROOT/wb.local.env"
-
-# --- defaults that were correct for this project, overridable ---------------
-export AWS_PROFILE="${AWS_PROFILE:-sandbox-cse}"
-BENCH_PUB_KEY="${BENCH_PUB_KEY:-$HOME/.ssh/jlp-aws-iceberg.pub}"
-BENCH_SSH_KEY="${BENCH_SSH_KEY:-$HOME/.ssh/jlp-aws-iceberg.pem}"
-REDPANDA_SRC="${REDPANDA_SRC:-$HOME/redpanda/redpanda}"
-WASM_ORDERBOOK_SRC="${WASM_ORDERBOOK_SRC:-$HOME/redpanda/projects/wasm-orderbook}"
+# wb.local.env.example). lib-env.sh reads it and fills in layout-neutral
+# defaults (the three repos cloned side by side); the environment wins.
+# shellcheck source=lib-env.sh
+. "$HERE/lib-env.sh"
 # The guests and the external host live in their own repo since the 2026-09-04
 # two-repo split, deliberately, so the artifact under test cannot be quietly
 # rebuilt by the harness measuring it. deploy-wasm-cluster.sh has required
 # WASM_DIR since that split and wb never passed it, so `wb deploy` failed on
 # every invocation with an unset-variable error - after `wb up` had already
 # provisioned a billing cluster.
-WASM_CLIENTS_SRC="${WASM_CLIENTS_SRC:-$HOME/redpanda/projects/redpanda-wasm-clients}"
 WASM_DIR="${WASM_DIR:-$WASM_CLIENTS_SRC/bin}"
 TFVARS_SINGLE="r8id-8xl-wasm-single-az.tfvars"
 TFVARS_MULTI="r8id-8xl-wasm-multi-az.tfvars"
@@ -303,11 +296,14 @@ cmd_doctor() {
   if aws sts get-caller-identity >/dev/null 2>&1; then
     note "OK   $(aws sts get-caller-identity --query Arn --output text 2>/dev/null | sed 's/.*\///')"
   else
-    note "EXPIRED - run: aws sso login --profile $AWS_PROFILE"; bad=1
+    note "EXPIRED - run: $(aws_login_hint)"; bad=1
   fi
   echo "=== keys ==="
-  [ -f "$BENCH_PUB_KEY" ] && note "OK   $BENCH_PUB_KEY" || { note "MISS $BENCH_PUB_KEY"; bad=1; }
-  [ -f "$BENCH_SSH_KEY" ] && note "OK   $BENCH_SSH_KEY" || { note "MISS $BENCH_SSH_KEY"; bad=1; }
+  for k in BENCH_PUB_KEY BENCH_SSH_KEY; do
+    if [ -z "${!k}" ]; then note "MISS $k is not set - add your EC2 keypair's paths to wb.local.env"; bad=1
+    elif [ -f "${!k}" ]; then note "OK   ${!k}"
+    else note "MISS ${!k} ($k)"; bad=1; fi
+  done
   echo "=== local redpanda build ==="
   if [ -f "$REDPANDA_BIN" ]; then
     note "OK   $(date -r "$REDPANDA_BIN" '+%Y-%m-%d %H:%M')  sha=$(sha256sum "$REDPANDA_BIN" | cut -c1-16)"
@@ -495,7 +491,7 @@ cmd_deploy() {
   [ -f "$REDPANDA_BIN" ] || die "no local redpanda binary at $REDPANDA_BIN"
   load_env
   BENCH_SSH_KEY="$BENCH_SSH_KEY" REDPANDA_SRC="$REDPANDA_SRC" \
-  WASM_ORDERBOOK_SRC="$WASM_ORDERBOOK_SRC" WASM_DIR="$WASM_DIR" \
+  WASM_DIR="$WASM_DIR" \
   ANSIBLE_PRIVATE_KEY_FILE="$BENCH_SSH_KEY" \
     bash "$HERE/deploy-wasm-cluster.sh" "$@" || die "deploy failed"
   # Verify the thing deploy exists to do actually happened. deploy-wasm-cluster.sh
@@ -1222,6 +1218,13 @@ cmd_cleanup_orphans() {
   echo "wb: clean - zero benchmark transforms remain"
 }
 
+# Everything except the read-only helpers reaches a cluster, so stop here with
+# a clear message rather than an ssh/terraform error about an empty key path.
+case "${1:-}" in
+  ""|-h|--help|help|doctor|env) ;;
+  *) require_bench_keys || exit 1 ;;
+esac
+
 case "${1:-}" in
   doctor)   shift; cmd_doctor "$@" ;;
   env)      shift; cmd_env "$@" ;;
@@ -1259,7 +1262,7 @@ case "${1:-}" in
   # i.e. the one entry point the README tells you to use could not run.
   reproduce)
     shift
-    export REDPANDA_BIN WASM_DIR REDPANDA_SRC WASM_ORDERBOOK_SRC \
+    export REDPANDA_BIN WASM_DIR REDPANDA_SRC \
            BENCH_SSH_KEY BENCH_PUB_KEY
     exec bash "$(dirname "${BASH_SOURCE[0]}")/reproduce.sh" "$@" ;;
   ""|-h|--help|help)

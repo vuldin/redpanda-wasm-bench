@@ -17,7 +17,9 @@
 # cycle.
 set -uo pipefail
 
-REPO="${REPO:-$HOME/redpanda/redpanda}"
+# shellcheck source=lib-env.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib-env.sh"
+REPO="${REPO:-$REDPANDA_SRC}"
 TARGET="${TARGET:-//src/v/redpanda:redpanda}"
 BASE_REF="${BASE_REF:-origin/dev}"
 JOBS="${JOBS:-6}"

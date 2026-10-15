@@ -21,7 +21,8 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-export AWS_PROFILE="${AWS_PROFILE:-sandbox-cse}"
+# shellcheck source=lib-env.sh
+. "$HERE/lib-env.sh"
 OWNER="${OWNER:-rp-percore-benchmark}"
 # Every region the harness can land in, since select-region.sh falls back on
 # capacity and a forgotten cluster is most likely in the one you did not expect.

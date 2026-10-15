@@ -11,9 +11,9 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-[ -f "$ROOT/wb.local.env" ] && . "$ROOT/wb.local.env"
-CLIENTS_REPO="${CLIENTS_REPO:-${WASM_CLIENTS_SRC:-$HOME/redpanda/projects/redpanda-wasm-clients}}"
-REDPANDA_SRC="${REDPANDA_SRC:-$HOME/redpanda/redpanda}"
+# shellcheck source=lib-env.sh
+. "$HERE/lib-env.sh"
+CLIENTS_REPO="${CLIENTS_REPO:-$WASM_CLIENTS_SRC}"
 REDPANDA_BIN="${REDPANDA_BIN:-$REDPANDA_SRC/bazel-bin/src/v/redpanda/redpanda}"
 GATE_FILE="${GATE_FILE:-$ROOT/results/GATE-PASSED}"
 fail=0

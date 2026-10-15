@@ -261,7 +261,7 @@ is 1 plus the background groups.
 ## Invocation
 
 ```bash
-cd ~/redpanda/projects/redpanda-wasm-bench
+cd redpanda-wasm-bench             # wherever you cloned it
 ./scripts/wb doctor               # always first
 
 # rate sweep at production replication settings

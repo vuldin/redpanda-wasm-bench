@@ -30,9 +30,9 @@
 #                        touch these at all - OMB never deploys transforms)
 #   enable_rack_awareness  default true - RF=3 across 3 AZs is the point
 #   local_artifacts_dir  path to the prebuilt bin/ + *.wasm this playbook
-#                        ships to clients (default: ../../wasm-orderbook
-#                        relative artifacts staged under /tmp/cloud-deploy
-#                        by the caller before running this playbook)
+#                        ships to clients (default /tmp/cloud-deploy, staged
+#                        by scripts/deploy-wasm-cluster.sh before running
+#                        this playbook)
 
 - name: Pre-flight - fail fast if the seed already reports an unhealthy cluster
   # Catches a stuck/unhealthy cluster in seconds, before any of the real

@@ -34,6 +34,23 @@ The monitoring host is about 1% of the bill. If you want it gone anyway, set
 | `jq`, `python3` | result parsing and the capacity probe |
 | `ssh` keypair | the public half must match `public_key_path`; the private half is how every script reaches the instances |
 
+### Where the checkouts go
+
+The scripts need three repos. Clone them side by side and nothing needs
+configuring:
+
+```
+<any dir>/redpanda-wasm-bench     this repo
+<any dir>/redpanda                the broker (below)
+<any dir>/redpanda-wasm-clients   the guests and the external host (below)
+```
+
+If yours live elsewhere, set `REDPANDA_SRC` and `WASM_CLIENTS_SRC` in
+`wb.local.env` (copy `wb.local.env.example`). That file is also where your
+EC2 keypair (`BENCH_PUB_KEY`, `BENCH_SSH_KEY`, required) and AWS profile
+(`AWS_PROFILE`, optional - unset uses the AWS CLI's normal credential chain)
+go. `./scripts/wb doctor` checks all of it.
+
 ### A redpanda binary built from the branch
 
 The in-broker arm needs a broker built from the

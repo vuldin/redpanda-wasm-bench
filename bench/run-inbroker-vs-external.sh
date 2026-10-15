@@ -33,7 +33,8 @@
 # leg would confound "in-broker execution" with "in-broker delivery".
 set -euo pipefail
 
-KEY="${KEY:-$HOME/.ssh/jlp-aws-iceberg.pem}"
+# wb passes KEY; run directly, set KEY or BENCH_SSH_KEY (wb.local.env).
+KEY="${KEY:-${BENCH_SSH_KEY:?set KEY or BENCH_SSH_KEY to your EC2 private key}}"
 SSH_OPTS=(-o IdentitiesOnly=yes -o StrictHostKeyChecking=no
           -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=15
           -o ServerAliveInterval=30 -o ServerAliveCountMax=1000)
