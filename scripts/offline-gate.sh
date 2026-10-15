@@ -37,9 +37,19 @@ step "broker binary was built after the last broker source edit"
 # the build does not make the binary stale.
 if [ -x "$REDPANDA_BIN" ]; then
   newer="$(find "$REDPANDA_SRC/src/v" -type f -newer "$REDPANDA_BIN" -not -path '*/tests/*' \( -name '*.cc' -o -name '*.h' -o -name 'BUILD' -o -name '*.bzl' \) 2>/dev/null | sed -n '1,5p')"
+  # A newer timestamp is not always a change: a file restored or re-saved
+  # with the same content leaves bazel's action cache valid, and a cache-hit
+  # build does not touch the binary's mtime. So ask bazel (capped like every
+  # broker build here): if it builds cleanly, the binary matches the sources.
   if [ -n "$newer" ] && [ "${ALLOW_STALE_BINARY:-0}" != 1 ]; then
-    bad "broker sources changed after $REDPANDA_BIN was built - rebuild it (or ALLOW_STALE_BINARY=1):"
+    echo "  sources newer than the binary; asking bazel whether it is current:"
     echo "$newer" | sed 's/^/    /'
+    if (cd "$REDPANDA_SRC" && bazel build //src/v/redpanda:redpanda -c opt --jobs="${BAZEL_JOBS:-6}" \
+          --local_resources=memory="${BAZEL_MEMORY_MB:-16384}" >/tmp/gate-bazel-$$.log 2>&1); then
+      echo "  bazel: binary is current ($(grep -o '[0-9]* total action[s]*' /tmp/gate-bazel-$$.log | tail -1))"
+    else
+      bad "broker build failed - see /tmp/gate-bazel-$$.log"
+    fi
   fi
   echo "  $(sha256sum "$REDPANDA_BIN" | cut -c1-16) $REDPANDA_BIN (built $(date -r "$REDPANDA_BIN" '+%F %T'))"
 else
