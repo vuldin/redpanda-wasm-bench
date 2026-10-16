@@ -1,0 +1,74 @@
+# Durable state without the tail, and where the in-broker tail comes from,
+# with every deployment compared on one cluster. In priority order, so if the
+# budget rule has to skip anything it is the end of this file:
+#
+#   1. Snapshot cost, full vs live (book-matcher SNAPSHOT_MODE). The full mode
+#      re-serialises the whole book every 500ms inline with a record and
+#      registers a fixed 4 MiB region the broker copies and replicates every
+#      5s; on 2026-10-15 that put p99.9 at 10-18ms. The live mode keeps the
+#      region current slot by slot and registers only what is in use. STATE=off
+#      is the no-state baseline. Depth 1,000 and 10,000, fan-out 20.
+#   2. Graceful planned moves with the live region (data_transforms_graceful_
+#      transfer_timeout_ms=5000): the region is always current, so the
+#      0.07-0.5s of traffic the full mode left out of a forced checkpoint
+#      should be gone.
+#   3. Every deployment on ONE cluster, two interleaved trials, 90s windows
+#      (>=100k samples, so p99.99 is real for every arm): in-broker with
+#      precommit and commit-gated delivery, external client, co-located, and
+#      co-located on cores Redpanda does not use; fan-out 1, 10, 20 and 50.
+#   4. Is the in-broker relay tail the transforms scheduler share?
+#      data_transforms_scheduling_group_shares 100 (default) vs 1000, fan-out 20.
+#   5. Tail against rate with the production book: 30k, 60k, 90k orders/sec.
+#
+# RESULTS.md reports p99.99 per level and splits it into the produce leg
+# (acks=all replication, the same in every deployment) and the in-broker relay
+# leg, which is what attributes a tail to WASM or not.
+#
+#   scripts/autorun.sh check plans/state-and-jitter.plan
+#   scripts/autorun.sh start plans/state-and-jitter.plan
+#
+# 6 brokers + 3 clients + monitoring, ~$55/hr; ~3.6h of phases, ~4.5h with
+# provisioning and teardown. Needs a broker with RELAY_DELIVERY and a
+# book-matcher with SNAPSHOT_MODE (the offline gate checks both locally).
+#
+# Workload as production-shape.plan: 30,000 orders/sec as 15-order mass
+# quotes, 1,000 resting orders per side, 30% of input records cancels plus as
+# many passive inserts, 650 B records, RF=3, acks=all, single AZ.
+
+TOPOLOGY=six-broker
+DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
+
+E2=(ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 ACKS=all RF=3
+    WARMUP=10s DRAIN=30s RELAY_STAGE_METRICS=true WRITE_CACHING=true
+    LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=1 GUEST=book-matcher CANCEL_FRACTION=0.3
+    DURATION=90s)
+
+# 1. Snapshot cost: off, then full and live interleaved.
+phase snap-off 7 run e2 "${E2[@]}" STATE=off MODE=bookdepth 'BOOKDEPTH_LEVELS=1000 10000' FANOUT=20
+for t in 1 2; do
+  phase "snap-full-t$t" 7 run e2 "${E2[@]}" STATE=snapshot SNAPSHOT_MODE=full MODE=bookdepth 'BOOKDEPTH_LEVELS=1000 10000' FANOUT=20
+  phase "snap-live-t$t" 7 run e2 "${E2[@]}" STATE=snapshot SNAPSHOT_MODE=live MODE=bookdepth 'BOOKDEPTH_LEVELS=1000 10000' FANOUT=20
+done
+
+# 2. Graceful planned moves with the live region.
+phase graceful-live 20 run durability 'ACTIONS=maintenance transfer' DEPTHS=1000 TRIALS=2 \
+  GRACEFUL_MS=5000 STATE=snapshot SNAPSHOT_MODE=live OUT=@RUN_DIR@/graceful-live
+
+# 3. Every deployment, one cluster, two trials.
+for t in 1 2; do
+  phase "inbroker-precommit-t$t" 16 run e2 "${E2[@]}" STATE=off MODE=fanout 'FANOUT_LEVELS=1 10 20 50' \
+    FRESH_TOPICS_PER_LEVEL=1 BOOK_DEPTH=1000 RELAY_DELIVERY=precommit
+  phase "inbroker-committed-t$t" 16 run e2 "${E2[@]}" STATE=off MODE=fanout 'FANOUT_LEVELS=1 10 20 50' \
+    FRESH_TOPICS_PER_LEVEL=1 BOOK_DEPTH=1000 RELAY_DELIVERY=committed
+  phase "traditional-t$t" 35 run traditional 'PLACEMENTS=external loopback loopback-isolated' 'FANOUT_LADDER=1 10 20 50' \
+    GUEST_MODULE=book-matcher.wasm BOOK_DEPTH=1000 CANCEL_FRACTION=0.3 ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 DURATION=90s
+done
+
+# 4. Scheduler share A/B, interleaved.
+for t in 1 2; do
+  phase "shares-default-t$t" 4 run e2 "${E2[@]}" STATE=off MODE=bookdepth BOOKDEPTH_LEVELS=1000 FANOUT=20
+  phase "shares-1000-t$t" 4 run e2 "${E2[@]}" STATE=off MODE=bookdepth BOOKDEPTH_LEVELS=1000 FANOUT=20 TRANSFORM_SHARES=1000
+done
+
+# 5. Tail against rate.
+phase rate-tail 10 run e2 "${E2[@]}" STATE=off MODE=rate BOOK_DEPTH=1000 PRODUCERS=2 FANOUT=20 'RATE_LEVELS=30000 60000 90000'

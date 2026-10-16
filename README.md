@@ -43,6 +43,7 @@ scripts/autorun.sh status               # progress, the Grafana URL, where resul
 | `book-durability.plan` | a stateful matcher's book: depth up to 10,000 orders, and whether it survives maintenance, transfers and broker kills | ~3 h | $200 |
 | `production-shape.plan` | in-broker vs external vs co-located (also on isolated cores), all with a 1,000-deep book and cancels; p99.99; rate with that book; kills with failover | ~1.8 h | $120 |
 | `relay-modes.plan` | the latency cost of delivering to in-broker consumers only after the output is quorum-acknowledged (`RELAY_DELIVERY=committed`) instead of before (`precommit`, the default) | ~30 min | $70 |
+| `state-and-jitter.plan` | durable state without the tail (full vs live snapshots, graceful moves), every deployment on one cluster with p99.99, and where the in-broker tail comes from | ~4.5 h | $250 |
 
 `scripts/autorun.sh check <plan>` lists a plan's phases and whether they fit
 the time cap, without spending anything. Each run writes to its own
@@ -76,7 +77,7 @@ While a run is going, Grafana's URL is in `autorun.log` and in `status`.
 ## Repo layout
 
 ```
-plans/      test plans for scripts/autorun.sh (smoke, published, resilience, book-durability, production-shape, relay-modes)
+plans/      test plans for scripts/autorun.sh (smoke, published, resilience, book-durability, production-shape, relay-modes, state-and-jitter)
 scripts/    wb (entry point), autorun.sh (unattended plan runs + watchdog),
             offline-gate.sh (every free check; autorun requires it),
             summarize-run.py (a run directory -> RESULTS.md),
@@ -98,7 +99,8 @@ bench/      the measurement scripts both arms run, plus run-resilience.sh
             (the optional maintenance/leadership-move series),
             run-durability.sh (does a stateful guest's book survive moves and
             kills), local-rehearsal.sh (the same on one local broker) and
-            local-relay-delivery.sh (RELAY_DELIVERY on one local broker)
+            local-relay-delivery.sh (RELAY_DELIVERY on one local broker) and
+            local-plan-smoke.sh (a plan's e2 phases, scaled down, locally)
 cmd/        loadgen (rate-paced generator, source of every published number),
             fanout-load (background consumer groups), statecheck (sentinel
             orders that read a matcher's book back after an event)

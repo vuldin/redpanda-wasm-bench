@@ -79,6 +79,12 @@ that both deliver every record and that committed waits for the output write
 measures the same in both). It records the commits of all three repos in
 `results/GATE-PASSED`.
 
+Before the first run of a new or changed plan, `bench/local-plan-smoke.sh
+plans/<plan>.plan` runs each distinct `run e2` phase of it, scaled down, on a
+local broker (about 1-2 minutes per phase). It catches settings that do not
+work together before a cluster is paid for; `run traditional` and
+`run durability` phases need cluster hosts and are listed as not covered.
+
 `autorun.sh start` refuses to provision unless the gate passed for exactly the
 commits you are running, and refuses uncommitted bench changes. Commit first,
 then gate, then start. `REHEARSAL=0` skips both local broker tests when the
@@ -117,6 +123,7 @@ Shipped plans:
 | `book-durability.plan` | the 2026-10-15 book-depth + durability suite | ~171 min | 6 brokers |
 | `production-shape.plan` | the in-broker matcher against external, co-located and co-located-on-isolated-cores deployments with the same production-shaped book and order flow; long windows for p99.99; rate with that book; kills with the victim held down | ~107 min | 6 brokers |
 | `relay-modes.plan` | what waiting for the output quorum costs in-broker consumers: `RELAY_DELIVERY=precommit` vs `committed`, interleaved, at fan-out 1 and 20 | ~30 min | 6 brokers |
+| `state-and-jitter.plan` | snapshot cost full vs live; graceful moves with the live region; every deployment on one cluster with 90s windows (p99.99 for each); the transforms scheduler share A/B; tail against rate | ~3.6h | 6 brokers |
 
 `smoke`, `published` and `book-durability`, one after the other, is the full
 set (`published` already includes the resilience series). They use different
@@ -184,6 +191,14 @@ be zero, are in [MONITORING.md](MONITORING.md).
   `GUEST=book-matcher`, `STATE=off|snapshot`, `SNAPSHOT_EVERY_MS`,
   `CANCEL_FRACTION` (share of input records that are cancels, with as many
   passive inserts), `MODE=bookdepth` with `BOOKDEPTH_LEVELS`.
+  `SNAPSHOT_MODE=live|full` (with `STATE=snapshot`): `live`, the default,
+  keeps the region current after every record and registers only what is in
+  use; `full` re-serialises the whole book every `SNAPSHOT_EVERY_MS`, the
+  original format. `TRANSFORM_SHARES=<n>` sets
+  `data_transforms_scheduling_group_shares` for the run and restores it.
+  `TIMELINE_MS` (500) gives every report a per-interval timeline so a stall
+  can be placed in time. Each level's RESULTS.md row splits the end-to-end
+  p99.99 into the produce leg and the in-broker relay leg.
   `RELAY_DELIVERY=precommit|committed` (needs a broker with the option) sets
   when in-broker relay consumers get the producer's output: before its
   durable write (default) or after a quorum has acknowledged it. It is set on
