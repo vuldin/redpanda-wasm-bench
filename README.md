@@ -62,6 +62,7 @@ scripts/autorun.sh status                  # progress, the Grafana URL, where re
 | `relay-modes.plan` | the latency cost of delivering to in-broker consumers only after the output is quorum-acknowledged (`RELAY_DELIVERY=committed`) instead of before (`precommit`, the default) | ~30 min | $70 |
 | `state-and-jitter.plan` | durable state without the tail (full vs live snapshots, graceful moves), every deployment on one cluster with p99.99, and where the in-broker tail comes from | ~4.5 h | $250 |
 | `checkpoint-ab.plan` | whether the broker's guest-state checkpoint still stalls produces once it runs in the background without a forced flush | ~1.4 h | $80 |
+| `checkpoint-chunks.plan` | whether chunked checkpoints (or a longer interval) remove the depth-10,000 checkpoint stall; plus partition scale-out and the committed relay at fan-out 50 | ~3 h | $165 |
 
 ### Results
 
@@ -106,7 +107,7 @@ with a checksummed tarball. While a run is going, Grafana's URL is in
 ## Repo layout
 
 ```
-plans/      test plans for scripts/autorun.sh (smoke, published, resilience, book-durability, production-shape, relay-modes, state-and-jitter, checkpoint-ab)
+plans/      test plans for scripts/autorun.sh (smoke, published, resilience, book-durability, production-shape, relay-modes, state-and-jitter, checkpoint-ab, checkpoint-chunks)
 scripts/    wb (entry point), autorun.sh (unattended plan runs + watchdog),
             offline-gate.sh (every free check; autorun requires it),
             summarize-run.py (a run directory -> RESULTS.md),
@@ -116,7 +117,8 @@ scripts/    wb (entry point), autorun.sh (unattended plan runs + watchdog),
             verify-each-commit.sh (verifies the redpanda branch commit by commit),
             make-dashboards.py and check-dashboards.py (the Grafana panels and
             a validator for their queries), check-counter-resets.py (finds
-            "counters" that rate() misreads), annotate-phases.py (phase
+            "counters" that rate() misreads), check-scrapes.py (every failed
+            broker scrape, timeout or fast failure), annotate-phases.py (phase
             regions for runs older than the marker), check-prometheus-template.py,
             cost-guard.sh (cron-friendly reminder that a cluster is billing),
             export-metrics.sh + metrics-windows.py + metrics-bundle.py

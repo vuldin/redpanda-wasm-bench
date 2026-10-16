@@ -125,6 +125,7 @@ Shipped plans:
 | `relay-modes.plan` | what waiting for the output quorum costs in-broker consumers: `RELAY_DELIVERY=precommit` vs `committed`, interleaved, at fan-out 1 and 20 | ~30 min | 6 brokers |
 | `state-and-jitter.plan` | snapshot cost full vs live; graceful moves with the live region; every deployment on one cluster with 90s windows (p99.99 for each); the transforms scheduler share A/B; tail against rate | ~3.6h | 6 brokers |
 | `checkpoint-ab.plan` | the broker's guest-state checkpoint inline (original) vs background, interleaved, with the live region at depth 1,000 and 10,000 | ~49 min | 6 brokers |
+| `checkpoint-chunks.plan` | whether splitting the checkpoint into chunks (64 KiB, 16 KiB) or checkpointing every 30s instead of 5s removes the depth-10,000 stall; plus a partition scale-out sweep (1-8 partitions at 120k and 240k orders/sec) and the committed relay at fan-out 50 | ~2 h | 6 brokers |
 
 `smoke`, `published` and `book-durability`, one after the other, is the full
 set (`published` already includes the resilience series). They use different
@@ -213,9 +214,18 @@ be zero, are in [MONITORING.md](MONITORING.md).
   `CHECKPOINT_INLINE=true|false` does the same for
   `data_transforms_state_checkpoint_inline` (true: the original checkpoint
   that blocks the transform loop and forces a flush; false: background).
+  `CHECKPOINT_INTERVAL_MS=<ms>` sets `data_transforms_state_checkpoint_interval_ms`
+  (minimum time between checkpoints, broker default 5000) and
+  `CHECKPOINT_CHUNK_BYTES=<n>` sets `data_transforms_state_checkpoint_chunk_bytes`
+  (split a larger checkpoint into records of at most n bytes, replicated one
+  after another; 0, the default, writes one record). Both need a broker that
+  has them, and both are recorded in the fingerprint.
   `TIMELINE_MS` (500) gives every report a per-interval timeline so a stall
   can be placed in time. Each level's RESULTS.md row splits the end-to-end
-  p99.99 into the produce leg and the in-broker relay leg.
+  p99.99 into the produce leg and the in-broker relay leg, and its
+  `stalls>3ms` column counts timeline buckets whose slowest sample took over
+  3ms, adding the period when they recur at a fixed spacing (`23 @ 5,000ms`
+  is a stall on every 5s checkpoint).
   `RELAY_DELIVERY=precommit|committed` (needs a broker with the option) sets
   when in-broker relay consumers get the producer's output: before its
   durable write (default) or after a quorum has acknowledged it. It is set on
@@ -308,8 +318,11 @@ it, so you can regenerate the tables (RESULTS.md in that plan's run directory).
   (`production-shape.plan`, `KILL_MODE=down`).
 - With the live region, state costs nothing at depth 1,000 (p99.9 ~1ms, as
   with no state); at 10,000 the broker's checkpoint still adds ~3ms at p99.9
-  (`state-and-jitter.plan`; `checkpoint-ab.plan` measures the broker change
-  aimed at that).
+  (`state-and-jitter.plan`). It is a stall on every 5s checkpoint, on the
+  produce leg, and replicating the checkpoint in the background does not
+  remove it (`checkpoint-ab.plan`): the ~2 MB region goes through the input
+  partition's own raft log as one entry, so produces queue behind it.
+  `checkpoint-chunks.plan` tests splitting it.
 
 ## Gotchas that have cost real runs
 

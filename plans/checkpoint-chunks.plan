@@ -1,0 +1,75 @@
+# Is the depth-10,000 checkpoint stall head-of-line blocking in the input
+# partition's raft log, and does splitting the checkpoint fix it?
+#
+# checkpoint-ab (2026-10-16) showed the stall is not the transform loop waiting:
+# replicating the checkpoint in the background changed nothing. The per-500ms
+# timeline put it exactly on the 5,000ms checkpoint interval, on the PRODUCE
+# leg, while the relay leg on the same core barely moved. The live snapshot is
+# ~2 MB at depth 10,000, replicated as one record through the input partition's
+# own raft group, so produces queue behind it. Two broker properties test that
+# (both live; a broker that has them is needed):
+#
+#   data_transforms_state_checkpoint_chunk_bytes   split each checkpoint into
+#       records of at most this size, replicated one after another, so produces
+#       interleave between them (0 = one record, the default)
+#   data_transforms_state_checkpoint_interval_ms   minimum time between
+#       checkpoints (5000 = the default)
+#
+# If chunking moves the produce-leg p99.99 and the "stalls>3ms" column back to
+# the no-state baseline, the cause is raft head-of-line blocking and chunking
+# is the fix; if only the longer interval helps, the cost is per checkpoint
+# but not about entry size. Every state phase sets both properties explicitly.
+#
+# Two add-ons on the same cluster, independent of the checkpoint question:
+#   - partitions (josh-393): does throughput scale across input partitions?
+#     State off and an empty book (loadgen preloads a book through one
+#     partition key, so a deep book would sit on one partition only).
+#   - committed relay at fan-out 50 (josh-410): it held a steady ~1,770-record
+#     transform lag; now with the timeline and stall column.
+#
+#   scripts/autorun.sh check plans/checkpoint-chunks.plan
+#   scripts/autorun.sh start plans/checkpoint-chunks.plan
+#
+# 6 brokers + 3 clients + monitoring, ~$55/hr; ~1h50 of phases, ~2.3h in all.
+
+TOPOLOGY=six-broker
+# Region preference for autorun's region selection (first with capacity wins).
+# us-west-2 first: every six-broker series so far ran in us-west-2a, and the
+# region is part of a result's fingerprint. The environment wins.
+: "${REGIONS:=us-west-2 us-east-1 us-east-2 eu-west-1}"; export REGIONS
+DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
+
+E2=(ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 ACKS=all RF=3
+    WARMUP=10s DRAIN=30s RELAY_STAGE_METRICS=true WRITE_CACHING=true
+    LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=1 GUEST=book-matcher CANCEL_FRACTION=0.3
+    DURATION=90s MODE=bookdepth 'BOOKDEPTH_LEVELS=1000 10000' FANOUT=20)
+LIVE=(STATE=snapshot SNAPSHOT_MODE=live CHECKPOINT_INLINE=false)
+
+# --- the checkpoint question, interleaved so drift lands on every arm --------
+phase off 7 run e2 "${E2[@]}" STATE=off
+for t in 1 2 3; do
+  phase "whole-t$t" 7 run e2 "${E2[@]}" "${LIVE[@]}" CHECKPOINT_INTERVAL_MS=5000 CHECKPOINT_CHUNK_BYTES=0
+  phase "chunk64k-t$t" 7 run e2 "${E2[@]}" "${LIVE[@]}" CHECKPOINT_INTERVAL_MS=5000 CHECKPOINT_CHUNK_BYTES=65536
+done
+for t in 1 2; do
+  phase "chunk16k-t$t" 7 run e2 "${E2[@]}" "${LIVE[@]}" CHECKPOINT_INTERVAL_MS=5000 CHECKPOINT_CHUNK_BYTES=16384
+  phase "interval30s-t$t" 7 run e2 "${E2[@]}" "${LIVE[@]}" CHECKPOINT_INTERVAL_MS=30000 CHECKPOINT_CHUNK_BYTES=0
+done
+
+# --- josh-393: scale-out across input partitions ----------------------------
+PART=(ORDERS_PER_RECORD=15 PAYLOAD=650 ACKS=all RF=3 WARMUP=10s DRAIN=30s
+      WRITE_CACHING=true LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=4
+      GUEST=book-matcher STATE=off CANCEL_FRACTION=0.3 DURATION=60s FANOUT=1
+      MODE=partitions 'PARTITION_LEVELS=1 2 4 8')
+phase partitions-120k 12 run e2 "${PART[@]}" RATE=120000
+phase partitions-240k 12 run e2 "${PART[@]}" RATE=240000
+
+# --- josh-410: commit-gated relay at fan-out 50 -----------------------------
+FO50=(ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 ACKS=all RF=3
+      WARMUP=10s DRAIN=30s RELAY_STAGE_METRICS=true WRITE_CACHING=true
+      LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=1 GUEST=book-matcher STATE=off CANCEL_FRACTION=0.3
+      MODE=bookdepth BOOKDEPTH_LEVELS=1000 DURATION=60s FANOUT=50)
+phase fo50-precommit 6 run e2 "${FO50[@]}" RELAY_DELIVERY=precommit
+for t in 1 2; do
+  phase "fo50-committed-t$t" 6 run e2 "${FO50[@]}" RELAY_DELIVERY=committed
+done

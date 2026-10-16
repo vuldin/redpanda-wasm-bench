@@ -611,8 +611,29 @@ It takes every metric a dashboard wraps in `rate()`, `irate()` or `increase()`
 and flags any series that reset more than once per three minutes of window
 (at least 5). Measured on a six-broker run, loadgen's counters reset at most 4
 times an hour (one restart per measured level), and the busy-time gauge 5-10
-times a minute per broker, so the line sits far from both. Target liveness is
-no help here: a missed scrape takes `up` to 0 without any restart.
+times a minute per broker, so the line sits far from both. Filtering on target
+liveness instead (only flag series whose target stayed up) does not work: any
+window that includes a deploy's rolling restart has every broker down for a
+few scrapes, which excluded every broker, fake resets included.
+
+Plan runs do both checks themselves. Just before exporting the metrics,
+`scripts/autorun.sh` runs `check-counter-resets.py` over the run and
+`check-scrapes.py` over every broker scrape since the cluster was ready
+(after provisioning, so a deploy's rolling restart is not counted), writes
+`counter-resets.txt`, `scrape-health.txt` and `scrape-failures.tsv` into the
+run directory, logs a line for each, and RESULTS.md gets a "Monitoring health"
+section. They are reports, not gates. `check-scrapes.py` separates a scrape
+that timed out (the target was too slow to answer: its recorded duration is
+close to the job's timeout) from one that failed fast (connection refused or
+reset), and says when one target's failures recur at a fixed spacing:
+
+```bash
+scripts/check-scrapes.py http://<monitor-ip>:9090 <start-unix> <end-unix> ['redpanda.*'] [--tsv FILE]
+```
+
+On the 2026-10-16 checkpoint run the bundle held 1,245 `up` samples per broker
+across the measured windows, none failed, slowest 31ms: the broker `up` dips
+seen live that day were the deploy's rolling restart, not missed scrapes.
 
 Offline, `bench/tests/test-dashboards.sh` (part of the offline gate) checks
 that the committed JSON is what the generator produces, that the generator

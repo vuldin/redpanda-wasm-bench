@@ -66,6 +66,29 @@ if phases:
             w(f"| {p[1]} | {p[2]} | {p[3]} | {p[4]} |")
     w("")
 
+# A stall is a timeline bucket (loadgen -timeline-ms, 500ms by default) whose
+# slowest sample took longer than this. A run of them at a fixed spacing is a
+# periodic stall; the 2026-10-16 checkpoint run found its depth-10k tail that
+# way, at exactly the 5,000ms guest-state checkpoint interval.
+STALL_US = 3000
+
+
+def stalls(timeline):
+    """'N' slow buckets, plus '@ Pms' when their spacing is periodic.
+
+    Periodic means the commonest gap between consecutive slow buckets accounts
+    for at least 40% of the gaps, over at least 3 of them."""
+    if not timeline:
+        return "-"
+    slow = [b["offset_ms"] for b in timeline if b.get("max_micros", 0) > STALL_US]
+    gaps = [b - a for a, b in zip(slow, slow[1:])]
+    if len(gaps) >= 3:
+        period, n = max(((g, gaps.count(g)) for g in set(gaps)), key=lambda x: (x[1], -x[0]))
+        if n / len(gaps) >= 0.4:
+            return f"{len(slow)} @ {period:,}ms"
+    return str(len(slow))
+
+
 # ---------------------------------------------------------------------------
 # e2 sweeps: whatever MODE, the runner writes a fingerprint and a header row.
 WANT = ["level", "offered/s", "achieved/s", "total_p50us", "total_p999us", "relay_p99us",
@@ -107,7 +130,9 @@ for s in e2:
     # produce (replication; the same in every deployment) and the in-broker
     # relay to the consumer (broker clock). Where the e2e p99.99 comes from
     # is the jitter question, so both are reported next to it.
-    extra = ["p99us", "p9999us", "produce_p9999us", "relay_p9999us", "samples"]
+    # stalls>3ms: timeline buckets whose slowest sample exceeded STALL_US, with
+    # the period when they recur at a fixed spacing (see stalls()).
+    extra = ["p99us", "p9999us", "produce_p9999us", "relay_p9999us", "stalls>3ms", "samples"]
     w("")
     w("| " + " | ".join(cols + extra) + " |")
     w("|" + "---|" * (len(cols) + len(extra)))
@@ -131,11 +156,24 @@ for s in e2:
             t = rep.get("total") or {}
             cells += [f"{t.get('p99_micros', 0):,.0f}", p9999(t),
                       p9999(rep.get("produce") or {}), p9999(rep.get("relay_consume") or {}),
-                      f"{t.get('samples', 0):,}"]
+                      stalls(rep.get("timeline")), f"{t.get('samples', 0):,}"]
         except (OSError, ValueError):
-            cells += ["-", "-", "-", "-", "-"]
+            cells += ["-", "-", "-", "-", "-", "-"]
         w("| " + " | ".join(cells) + " |")
     w("")
+
+# ---------------------------------------------------------------------------
+# Monitoring health (autorun's monitor_health, just before the export).
+health = [(f, read(f"{R}/{f}").strip()) for f in ("counter-resets.txt", "scrape-health.txt")
+          if os.path.exists(f"{R}/{f}")]
+if health:
+    w("## Monitoring health\n")
+    w("Checked just before the metrics export. Counters: any metric a dashboard "
+      "rate()s that reset far more often than restarts explain (its chart would be "
+      "wrong). Scrapes: every failed broker scrape since the cluster was ready, and "
+      "whether it timed out (a target too slow to answer) or failed fast.\n")
+    for f, txt in health:
+        w(f"`{f}`\n\n```\n{txt}\n```\n")
 
 # ---------------------------------------------------------------------------
 dur = sorted(d for d in glob.glob(f"{R}/*/summary.txt") if "/client-results/" not in d)

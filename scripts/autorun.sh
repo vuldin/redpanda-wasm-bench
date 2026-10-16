@@ -207,6 +207,9 @@ monitor_info() {
   timeout 120 "$WB" monitor status > "$RUN_DIR/MONITORING.txt" 2>&1 || true
   local g; g="$(grep -m1 -E 'Grafana' "$RUN_DIR/MONITORING.txt" | awk '{print $2}')"
   if [ -n "$g" ]; then
+    # Where monitor_health's scrape check starts: after provisioning, so a
+    # deploy's rolling restart is not reported as failed scrapes.
+    date +%s > "$RUN_DIR/MONITOR_READY_AT"
     log "WATCH: Grafana $g (anonymous viewer; admin/wasmbench to edit) - start with the 'wasm bench: overview' dashboard"
   else
     log "no monitoring host in this cluster (monitor_count=0) - nothing to watch or export"
@@ -239,6 +242,27 @@ export_metrics() {
   else
     log "WARN: metrics export failed or timed out (see metrics-export.log); the cluster is torn down regardless"
   fi
+}
+
+# Monitoring health, just before the export: counters the dashboards rate()
+# that reset far more often than restarts explain (check-counter-resets.py),
+# and every failed broker scrape since the cluster was ready, with whether it
+# timed out (check-scrapes.py). Reports for RESULTS.md, never a gate, and
+# time-boxed so a slow Prometheus cannot hold a billing cluster.
+monitor_health() {
+  if [ "${DRY_RUN:-0}" = 1 ]; then log "monitor health checks skipped (dry run)"; return 0; fi
+  local prom; prom="$(grep -m1 -E 'Prometheus' "$RUN_DIR/MONITORING.txt" 2>/dev/null | awk '{print $2}')"
+  [ -n "$prom" ] || return 0
+  local now since mins
+  now="$(date +%s)"
+  since="$(cat "$RUN_DIR/MONITOR_READY_AT" 2>/dev/null || echo $(( now - 3600 )))"
+  mins=$(( (now - since) / 60 + 1 ))
+  timeout 300 python3 "$ROOT/scripts/check-counter-resets.py" "$prom" "${mins}m" \
+    > "$RUN_DIR/counter-resets.txt" 2>&1
+  log "counter check: $(tail -1 "$RUN_DIR/counter-resets.txt" 2>/dev/null)"
+  timeout 300 python3 "$ROOT/scripts/check-scrapes.py" "$prom" "$since" "$now" 'redpanda.*' \
+    --tsv "$RUN_DIR/scrape-failures.tsv" > "$RUN_DIR/scrape-health.txt" 2>&1
+  log "scrape check: $(head -1 "$RUN_DIR/scrape-health.txt" 2>/dev/null)"
 }
 
 summarize() {
@@ -394,6 +418,7 @@ finish() {
   local why="$1"
   phase_marker clear
   fetch_results
+  monitor_health
   export_metrics
   summarize
   write_status "$why (pre-teardown)"

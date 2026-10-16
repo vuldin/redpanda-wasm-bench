@@ -91,6 +91,7 @@ check "marker: removed after the last phase" "[ ! -e '$T/textfile/bench_phase.pr
 
 # 6: observability on the normal path (run 3's logs)
 check "observability: Grafana URL logged" "grep -q 'WATCH: Grafana http://203.0.113.9:3000' '$R3/autorun.log'"
+check "observability: monitor health checks run before the export" "awk '/monitor health checks skipped/{h=NR} /exporting the scraped metrics/{e=NR} END{exit !(h && e && h < e)}' '$R3/autorun.log'"
 check "observability: export ran before teardown" "awk '/ monitor export /{e=NR} / teardown /{t=NR} END{exit !(e && t && e < t)}' '$T/s3'"
 check "observability: metrics-bundle and RESULTS.md written" "[ -d '$R3/metrics-bundle' ] && grep -q '^# Results' '$R3/RESULTS.md'"
 

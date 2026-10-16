@@ -166,6 +166,14 @@ TRANSFORM_SHARES="${TRANSFORM_SHARES:-}"
 # behaviour; false: background, unforced). Unset leaves the cluster's value;
 # set, it applies for the run and is restored. Needs a broker that has it.
 CHECKPOINT_INLINE="${CHECKPOINT_INLINE:-}"
+# Broker data_transforms_state_checkpoint_interval_ms (minimum time between
+# periodic guest-state checkpoints; 5000 is the broker default) and
+# data_transforms_state_checkpoint_chunk_bytes (split a checkpoint larger than
+# this into records replicated one after another, so produces interleave
+# between them; 0 = one record, the default). Same rules as CHECKPOINT_INLINE:
+# unset leaves the cluster's value, set applies for the run and is restored.
+CHECKPOINT_INTERVAL_MS="${CHECKPOINT_INTERVAL_MS:-}"
+CHECKPOINT_CHUNK_BYTES="${CHECKPOINT_CHUNK_BYTES:-}"
 # loadgen -timeline-ms: per-interval latency and lag buckets in the report, so
 # a stall can be placed in time. 0 turns it off.
 TIMELINE_MS="${TIMELINE_MS:-500}"
@@ -663,7 +671,7 @@ EOF
   echo "# fanout_shards=${FANOUT_SHARDS:-all($NUM_SHARDS)} fanout_shard_base=$FANOUT_SHARD_BASE"
   echo "# producer_acks=$ACKS"
   echo "# orders_per_record=$ORDERS_PER_RECORD mass_levels=${MASS_LEVELS} book_depth=$BOOK_DEPTH bookdepth_levels=${BOOKDEPTH_LEVELS}"
-  echo "# cancel_fraction=$CANCEL_FRACTION state=$STATE snapshot_mode=$SNAPSHOT_MODE snapshot_every_ms=$SNAPSHOT_EVERY_MS relay_delivery=$RELAY_DELIVERY transform_shares=${TRANSFORM_SHARES:-cluster} checkpoint_inline=${CHECKPOINT_INLINE:-cluster} guest_sha256=$(guest_sha256 "$GUEST")"
+  echo "# cancel_fraction=$CANCEL_FRACTION state=$STATE snapshot_mode=$SNAPSHOT_MODE snapshot_every_ms=$SNAPSHOT_EVERY_MS relay_delivery=$RELAY_DELIVERY transform_shares=${TRANSFORM_SHARES:-cluster} checkpoint_inline=${CHECKPOINT_INLINE:-cluster} checkpoint_interval_ms=${CHECKPOINT_INTERVAL_MS:-cluster} checkpoint_chunk_bytes=${CHECKPOINT_CHUNK_BYTES:-cluster} guest_sha256=$(guest_sha256 "$GUEST")"
   echo "# fresh_topics_per_level=$FRESH_TOPICS_PER_LEVEL settle=${SETTLE}s"
   echo "# admin_endpoints_scraped=$(echo "$ADMIN_URLS" | tr ',' '\n' | grep -c .)"
   # New columns are APPENDED, never inserted: a summary.txt from an earlier
@@ -708,6 +716,14 @@ fi
 if [ -n "$CHECKPOINT_INLINE" ]; then
   echo "--- guest-state checkpoint inline for this sweep: $CHECKPOINT_INLINE ---"
   cfg_set data_transforms_state_checkpoint_inline "$CHECKPOINT_INLINE"
+fi
+if [ -n "$CHECKPOINT_INTERVAL_MS" ]; then
+  echo "--- guest-state checkpoint interval for this sweep: ${CHECKPOINT_INTERVAL_MS}ms ---"
+  cfg_set data_transforms_state_checkpoint_interval_ms "$CHECKPOINT_INTERVAL_MS"
+fi
+if [ -n "$CHECKPOINT_CHUNK_BYTES" ]; then
+  echo "--- guest-state checkpoint chunk size for this sweep: $CHECKPOINT_CHUNK_BYTES bytes ---"
+  cfg_set data_transforms_state_checkpoint_chunk_bytes "$CHECKPOINT_CHUNK_BYTES"
 fi
 
 # READ_LINGER_US used to be applied ONLY in MODE=readlinger, while every mode

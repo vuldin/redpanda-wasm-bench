@@ -14,10 +14,11 @@ continually (the busy-time gauge "reset" 100+ times per broker in 20 minutes).
 So the signature is many resets on one series. Measured on a live six-broker
 run: loadgen counters reset at most 4 times an hour, the busy-time gauge 5-10
 times a minute per broker. The default limit is one reset per three minutes of
-window (at least 5), which sits between the two with a wide margin either way. Target liveness is no help: a
-missed scrape takes `up` to 0 without any restart. This checks every metric
-any dashboard wraps in rate(), irate() or increase() against a live
-Prometheus.
+window (at least 5), which sits between the two with a wide margin either
+way. Filtering on target liveness does not work: a window that includes a
+deploy's rolling restart has every broker down for a few scrapes, which
+excluded them all. This checks every metric any dashboard wraps in rate(),
+irate() or increase() against a live Prometheus.
 
   scripts/check-counter-resets.py http://<monitor-ip>:9090 [window, default 30m] [max resets]
   scripts/check-counter-resets.py <prom> 20m --metric redpanda_cpu_busy_seconds_total

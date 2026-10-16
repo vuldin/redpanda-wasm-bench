@@ -16,6 +16,11 @@
 #
 #   REDPANDA_BIN=... WASM_DIR=... bench/local-rehearsal.sh
 #
+# CHECKPOINT_CHUNK_BYTES=<n> sets data_transforms_state_checkpoint_chunk_bytes,
+# so the snapshot is written as chunks and must be reassembled on restart; the
+# rehearsal then also requires the broker to have logged a chunked checkpoint
+# (the region at depth 1,000 is ~200 KB, so 16384 gives ~13 chunks).
+#
 # Ports: KAFKA_PORT (19093), ADMIN_PORT (9645), RPC_PORT (33146) - must be free.
 set -uo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -46,6 +51,7 @@ redpanda:
   data_transforms_per_function_memory_limit: 16777216
   data_transforms_max_instances_per_core: 10
   data_transforms_state_snapshot_max_size: 8388608
+${CHECKPOINT_CHUNK_BYTES:+  data_transforms_state_checkpoint_chunk_bytes: $CHECKPOINT_CHUNK_BYTES}
   rpc_server: {address: 127.0.0.1, port: $RPC_PORT}
   kafka_api: [{address: 127.0.0.1, port: $KAFKA_PORT}]
   admin: [{address: 127.0.0.1, port: $ADMIN_PORT}]
@@ -55,7 +61,7 @@ rpk:
 YAML
 cat > "$W/start.sh" <<SH
 #!/usr/bin/env bash
-exec "$REDPANDA_BIN" --redpanda-cfg "$W/redpanda.yaml" --smp 1 --memory 2G --overprovisioned --unsafe-bypass-fsync=true >> "$W/broker.log" 2>&1
+exec "$REDPANDA_BIN" --redpanda-cfg "$W/redpanda.yaml" --smp 1 --memory 2G --overprovisioned --unsafe-bypass-fsync=true --logger-log-level=transform/state_stm=debug >> "$W/broker.log" 2>&1
 SH
 chmod +x "$W/start.sh"
 # --config, so a local rpk profile (SASL, cloud) cannot leak into the run.
@@ -103,14 +109,21 @@ sleep 5
 rpkw transform logs bm 2>/dev/null | grep STATE > "$W/state.log"
 
 restored=$(grep -c "STATE restored" "$W/state.log")
+chunked_ok=true
+if [ -n "${CHECKPOINT_CHUNK_BYTES:-}" ]; then
+  chunked=$(grep -c "as [0-9]* chunks of" "$W/broker.log")
+  echo "  chunked checkpoints logged by the broker: $chunked"
+  grep -m1 "as [0-9]* chunks of" "$W/broker.log" | sed 's/^/  /'
+  [ "$chunked" -ge 1 ] || chunked_ok=false
+fi
 old_ok=$(jq '[.waves[] | select(.wave_seconds_before_t >= 6) | (.recovered == .placed)] | all' "$W/verdict.json")
 echo "--- verdict"
 jq -r '"placed=\(.placed) recovered=\(.recovered) lost=\(.lost) duplicated=\(.duplicated)", (.waves[] | "  wave T-\(.wave_seconds_before_t)s: \(.recovered)/\(.placed)")' "$W/verdict.json"
 grep "STATE restored" "$W/state.log" | head -1
-if [ "$restored" -ge 1 ] && [ "$old_ok" = true ]; then
+if [ "$restored" -ge 1 ] && [ "$old_ok" = true ] && [ "$chunked_ok" = true ]; then
   echo "REHEARSAL PASSED: snapshot restored, every sentinel older than one checkpoint interval survived"
   rc=0
 else
-  echo "REHEARSAL FAILED: restored_lines=$restored older_waves_survived=$old_ok (logs: $W)" >&2
+  echo "REHEARSAL FAILED: restored_lines=$restored older_waves_survived=$old_ok chunked_ok=$chunked_ok (logs: $W)" >&2
 fi
 exit "$rc"

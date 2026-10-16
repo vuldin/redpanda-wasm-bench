@@ -98,6 +98,40 @@ expect("annotate-phases: in place - matching phase untouched, running extended, 
        [b["tags"][2] for b in c] == ["phase:bg"] and [i for i, _ in u] == [2] and sorted(dl) == [3, 4])
 c, u, dl = ap.plan_changes([dict(b, id=i) for i, b in enumerate(desired.values())], desired)
 expect("annotate-phases: a second pass over an unchanged log changes nothing", (c, u, dl) == ([], [], []))
+# summarize-run.py's stall column: periodic slow buckets are named with their
+# period, scattered ones are only counted.
+# summarize-run.py is a script, not a module: lift STALL_US and stalls() out
+# of it by name rather than running it.
+import ast, types
+tree = ast.parse(open(f"{root}/scripts/summarize-run.py").read())
+keep = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == "stalls")
+        or (isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "STALL_US" for t in n.targets))]
+sr = types.ModuleType("sr"); exec(compile(ast.Module(body=keep, type_ignores=[]), "sr", "exec"), sr.__dict__)
+bucket = lambda ms, mx: {"offset_ms": ms, "max_micros": mx}
+periodic_tl = [bucket(i * 500, 9000 if i % 10 == 3 else 900) for i in range(180)]
+scattered_tl = [bucket(i * 500, 9000 if i in (5, 31, 77, 140) else 900) for i in range(180)]
+expect("stall column: a 5s checkpoint stall reads '18 @ 5,000ms'", sr.stalls(periodic_tl) == "18 @ 5,000ms")
+expect("stall column: scattered stalls are only counted", sr.stalls(scattered_tl) == "4")
+expect("stall column: no timeline -> '-'", sr.stalls(None) == "-")
+
+cs = load("cs", "scripts/check-scrapes.py")
+cfg = """global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+scrape_configs:
+- job_name: redpanda
+  scrape_interval: 2s
+  scrape_timeout: 2s
+- job_name: node
+  scrape_interval: 5s
+  scrape_timeout: 5s
+"""
+expect("check-scrapes: effective timeout per job", cs.job_timeouts(cfg) == {"redpanda": 2.0, "node": 5.0})
+up = {("redpanda", "broker0"): [(t, 0.0 if t in (10, 20, 30, 40) else 1.0) for t in range(0, 60, 2)]}
+dur = {("redpanda", "broker0"): [(t, 1.95 if t in (10, 20) else 0.02) for t in range(0, 60, 2)]}
+r = cs.analyse(up, dur, {"redpanda": 2.0})[0]
+expect("check-scrapes: timeouts vs fast failures, and the spacing",
+       (r["failed"], r["timeouts"], r["fast_failures"], r["spacing"]) == (4, 2, 2, "every 10,000ms"))
 sys.exit(1 if bad else 0)
 PY
 
