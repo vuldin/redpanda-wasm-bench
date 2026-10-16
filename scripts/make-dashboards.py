@@ -311,8 +311,8 @@ def now_running(pid, y):
               [(f"{what} or on() {NO_PHASE}", "{{now}}")],
               desc=("The phase's description from its plan (the `about` line "
                     "before it), including which charts answer its question. "
-                    "Not every chart applies to every test: the matcher "
-                    "latency panels stay empty for a test that runs no matcher."),
+                    "Not every chart applies to every test: emit -> guest "
+                    "stays empty for one with no in-broker relay subscribers."),
               text_size=14)
     ab["options"].update({"textMode": "name", "colorMode": "none", "graphMode": "none"})
     lg = stat(pid + 100, "loadgen (level / stage)", 14, y + 3, 10, 3,

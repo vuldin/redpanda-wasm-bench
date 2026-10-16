@@ -178,8 +178,8 @@ The overview opens on three strips that describe the END of the selected range:
   the titles shows plan / phase / attempt instead.
 - **what this phase is for**: the phase's description from its plan, which
   also names the charts that answer its question. Not every chart applies to
-  every test: the matcher latency panels stay empty for one that runs no
-  matcher, such as gateway filtering.
+  every test: "emit -> guest" stays empty for one with no in-broker relay
+  subscribers, such as gateway filtering (whose demux shows in transform e2e).
 - **loadgen**: level / stage (preload, warmup, measure, drain), or "loadgen
   idle" between levels and while a phase deploys or settles.
 

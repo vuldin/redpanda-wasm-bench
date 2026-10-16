@@ -39,8 +39,8 @@ its plan takes; the one limit is your AWS credentials, which teardown needs.
 aws sso login                              # add --profile <your-profile> if you use one
 scripts/wb doctor                          # tools, credentials, keys, builds
 scripts/offline-gate.sh                    # after your last commit: every free check, incl. local broker tests
-scripts/autorun.sh check plans/smoke.plan  # the phases and the time they need; spends nothing
-scripts/autorun.sh start plans/smoke.plan  # provision, run, export, tear down, verify
+scripts/autorun.sh check plans/baseline.plan  # the phases and the time they need; spends nothing
+scripts/autorun.sh start plans/baseline.plan  # provision, run, export, tear down, verify
 scripts/autorun.sh status                  # progress, the Grafana URL, where results are
 ```
 
@@ -50,11 +50,17 @@ scripts/autorun.sh status                  # progress, the Grafana URL, where re
   that their expiry actually moved: [Credentials](docs/RUNNING-YOUR-OWN-TESTS.md#run-modes-and-knobs).
 - New or changed plan: run `bench/local-plan-smoke.sh plans/<plan>.plan` first.
   It runs the plan's e2 phases, scaled down, on a local broker.
-- Start with `smoke.plan`, which proves your build, keys and account end to end.
+- The first time, run `smoke.plan` instead: it proves your build, keys and
+  account end to end for a fraction of the cost.
+- `baseline.plan` is the default run, and the one to quote: in-broker WASM
+  against the other architectures, with nothing else. RESULTS.md opens with
+  its "Architecture comparison" table. Every other plan below investigates
+  something or validates a change; run one when that is the question.
 
 | plan | what it tests | phases | cost, roughly |
 |---|---|---|---|
 | `smoke.plan` | your build, keys and account work end to end; start here | ~22 min | $15-40 |
+| **`baseline.plan`** | **the default: the same matcher, book and order flow in-broker (precommit and committed delivery) and as an external, co-located and isolated-core client, at fan-out 1 and 20, two interleaved trials** | ~1.5 h | $110 |
 | `published.plan` | the published in-broker vs external comparison ([REPRODUCE.md](REPRODUCE.md)), then the resilience series | ~2.5 h | $130 |
 | `resilience.plan` | latency and correctness while a broker goes into maintenance mode or leadership is transferred, graceful drain on vs off ([RESILIENCE.md](docs/RESILIENCE.md)) | ~1.5 h | $90 |
 | `book-durability.plan` | a stateful matcher's book: depth up to 10,000 orders, and whether it survives maintenance, transfers and broker kills | ~3 h | $200 |

@@ -129,7 +129,7 @@
           "instant": true
         }
       ],
-      "description": "The phase's description from its plan (the `about` line before it), including which charts answer its question. Not every chart applies to every test: the matcher latency panels stay empty for a test that runs no matcher.",
+      "description": "The phase's description from its plan (the `about` line before it), including which charts answer its question. Not every chart applies to every test: emit -> guest stays empty for one with no in-broker relay subscribers.",
       "options": {
         "reduceOptions": {
           "calcs": [

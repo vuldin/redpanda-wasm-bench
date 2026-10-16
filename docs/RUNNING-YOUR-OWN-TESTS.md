@@ -132,10 +132,13 @@ phase kill  35 run durability ACTIONS=kill 'DEPTHS=1000 10000' OUT=@RUN_DIR@/kil
   maintenance cleared, balancers and graceful-transfer back to defaults, every
   broker started). A failed phase is retried once.
 
-Shipped plans:
+Shipped plans. `baseline.plan` is the default run: the architecture
+comparison and nothing else. The rest investigate one question each or
+validate a change.
 
 | plan | what | phases | cluster |
 |---|---|---|---|
+| **`baseline.plan`** | **the default: the same matcher (book-matcher, 1,000-deep book, 30% cancels, 30k orders/sec in 15-order envelopes) in-broker with precommit and committed delivery, and as an external, co-located and co-located-on-isolated-cores client, at fan-out 1 and 20, 90s windows, two interleaved trials. RESULTS.md opens with an "Architecture comparison" table per fan-out** | ~90 min | 6 brokers |
 | `smoke.plan` | proves your build, keys and account end to end | ~22 min | 3 brokers |
 | `published.plan` | the published in-broker vs external comparison (REPRODUCE.md) and the resilience series | ~145 min | 3 brokers + 8 clients |
 | `resilience.plan` | the resilience series on its own: maintenance mode and leadership transfer, graceful drain unset vs set, then the module-residency A/B ([RESILIENCE.md](RESILIENCE.md)) | ~90 min | 3 brokers + 8 clients |
@@ -452,9 +455,12 @@ it, so you can regenerate the tables (RESULTS.md in that plan's run directory).
   move stalled the producer and the firehose readers for ~5s and restarted the
   demux on the new leader, which replayed from its last offset commit. That
   put a ~4.5s p99 on 7 of 10 levels and duplicates on 3, in both runs, and it
-  looked like a property of the arms. `run-gateways.sh` now pauses it (restored
-  on exit) and records `leader_changes` per level, which should be 0;
-  `run-traditional-sharded.sh` and `run-durability.sh` already paused it.
+  looked like a property of the arms. `run-gateways.sh` and
+  `run-e2-throughput.sh` now pause it (restored on exit) and record
+  `leader_changes` per level, which should be 0 (a WARN in the phase log
+  when not); `run-traditional-sharded.sh` and `run-durability.sh` already
+  paused it. e2 results from before 2026-10-17 ran with it on: a level with a
+  ~5s max or a lost co-location may be a move, not the arm.
 - Never redeploy a transform under a name it had before with MORE output
   topics on a broker without the fix (josh-416, broker fork after
   `eae35a38ab`). The broker cached the first deployment's per-output metrics

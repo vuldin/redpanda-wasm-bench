@@ -131,6 +131,39 @@ expect("stall column: a 5s checkpoint stall reads '18 @ 5,000ms'", sr.stalls(per
 expect("stall column: scattered stalls are only counted", sr.stalls(scattered_tl) == "4")
 expect("stall column: no timeline -> '-'", sr.stalls(None) == "-")
 
+# summarize-run.py's architecture comparison (plans/baseline.plan): in-broker
+# fanout sweeps by relay delivery and traditional placements, one table per
+# fan-out, sweeps numbered per arm, p50 against external. Run the script on a
+# synthetic run directory and read its markdown.
+import json as _json, subprocess as _sp, tempfile as _tf
+from pathlib import Path as _P
+with _tf.TemporaryDirectory() as td:
+    rd = _P(td) / "run-2026-10-17-000000-baseline"
+    def report(path, p50, label="x"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps({"label": label, "clean": True, "total": {
+            "p50_micros": p50, "p99_micros": 2 * p50, "p999_micros": 3 * p50, "p9999_micros": 4 * p50, "samples": 180000}}))
+    for rid, rdl, base in ((1792200100, "precommit", 400), (1792200200, "committed", 600), (1792200500, "precommit", 420)):
+        d = rd / "client-results" / f"e2-throughput-fanout-{rid}"; d.mkdir(parents=True)
+        (d / "summary.txt").write_text(f"# fingerprint: MODE=fanout RF=3\n# consumer_arm=inbroker\n# relay_delivery={rdl}\nlevel x\n")
+        for n in (1, 20):
+            report(d / f"fanout-{n}.json", base + n)
+        (d / "fanout-1.after.json").write_text("{}")  # scrape snapshots are not levels
+    for rid, place, n, p50 in ((1792200300, "external", 1, 1000), (1792200310, "external", 20, 2000),
+                               (1792200320, "loopback", 1, 800), (1792200330, "loopback-isolated", 20, 1500)):
+        report(rd / "client-results" / f"traditional-sharded-{rid}" / f"trad-{n}.json", p50, f"trad-{place}-{n}")
+    md_out = _sp.run([sys.executable, f"{root}/scripts/summarize-run.py", str(rd)], capture_output=True, text=True).stdout
+    sec = md_out.split("## Architecture comparison", 1)[-1].split("\n## ", 1)[0]
+    expect("comparison: one table per fan-out", "### fan-out 1\n" in sec and "### fan-out 20\n" in sec)
+    expect("comparison: in-broker sweeps by delivery, numbered per arm in run order",
+           "| in-broker, precommit | 1 | 401 |" in sec and "| in-broker, precommit | 2 | 421 |" in sec
+           and "| in-broker, committed | 1 | 601 |" in sec)
+    expect("comparison: traditional placements named, p50 vs external",
+           "| external | 1 | 1,000 |" in sec and "| co-located | 1 | 800 | 1,600 | 2,400 | 3,200 | 180,000 | 0.80x | true |" in sec
+           and "| co-located, isolated cores | 1 | 1,500 |" in sec)
+    expect("comparison: arms in the fixed order (in-broker first, external before co-located)",
+           sec.index("in-broker, precommit") < sec.index("in-broker, committed") < sec.index("| external") < sec.index("| co-located"))
+
 cs = load("cs", "scripts/check-scrapes.py")
 cfg = """global:
   scrape_interval: 15s

@@ -35,6 +35,6 @@ GW=(RATE=30000 SIZE=650 DURATION=60s RF=3 WRITE_CACHING=true ACKS=-1
 
 for t in 1 2; do
   about "trial $t of 2: firehose, topics and keyed at 2 to 20 gateways" \
-    "60s per level at 30k events/sec. Watch network out by broker on the measurement-health dashboard. No matcher runs, so the matcher latency panels stay empty."
+    "60s per level at 30k events/sec. Watch network out by broker on the measurement-health dashboard, and transform e2e for the demux. No relay subscribers, so emit -> guest stays empty."
   phase "gateways-t$t" 20 run gateways "${GW[@]}"
 done

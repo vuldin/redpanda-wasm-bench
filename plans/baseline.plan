@@ -1,0 +1,54 @@
+# The default run: in-broker WASM against the other architectures, and
+# nothing else. The same matcher (book-matcher), book and order flow in every
+# deployment:
+#
+#   in-broker, precommit   delivered from the transform before its output write
+#   in-broker, committed   delivered once the output quorum has it - what a
+#                          Kafka consumer of the output could fetch, so the
+#                          like-for-like comparison with the arms below
+#   external               the matcher on its own client instance
+#   co-located             on the input partition leader's broker, over loopback
+#   co-located, isolated   the same, pinned to cores Redpanda does not use
+#
+# at fan-out 1 (the pure path) and 20 (the production shape), 90s windows so
+# p99.99 rests on >=100k samples, two trials interleaved so cluster drift lands
+# on every arm. RESULTS.md opens with an "Architecture comparison" table per
+# fan-out. Everything else (depth, state, kills, moves, rate, partitions,
+# gateways) is an investigation and has its own plan.
+#
+# Workload as production-shape.plan: 30,000 orders/sec as 15-order mass
+# quotes, 1,000 resting orders per side, 30% of input records cancels plus as
+# many passive inserts, 650 B records, RF=3, acks=all, single AZ.
+#
+#   scripts/autorun.sh check plans/baseline.plan
+#   scripts/autorun.sh start plans/baseline.plan
+#
+# 6 brokers + 3 clients + monitoring, ~$55/hr; ~1.5h of phases, ~2h in all.
+# Needs a broker with RELAY_DELIVERY (the offline gate checks it locally).
+
+TEST="Architecture comparison"
+TEST_ABOUT="The same matcher, book and order flow in-broker (precommit and committed delivery) and as a traditional external, co-located and isolated-core client, at fan-out 1 and 20."
+TOPOLOGY=six-broker
+# Region preference for autorun's region selection (first with capacity wins).
+# us-west-2 first: every six-broker series so far ran in us-west-2a, and the
+# region is part of a result's fingerprint. The environment wins.
+: "${REGIONS:=us-west-2 us-east-1 us-east-2 eu-west-1}"; export REGIONS
+DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
+
+E2=(ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 ACKS=all RF=3
+    WARMUP=10s DRAIN=30s RELAY_STAGE_METRICS=true WRITE_CACHING=true
+    LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=1 GUEST=book-matcher CANCEL_FRACTION=0.3
+    DURATION=90s STATE=off MODE=fanout 'FANOUT_LEVELS=1 20' FRESH_TOPICS_PER_LEVEL=1 BOOK_DEPTH=1000)
+
+for t in 1 2; do
+  about "trial $t of 2: in-broker, precommit delivery" \
+    "Fan-out 1 and 20, fresh topics per level, 90s windows. Watch the headline latency."
+  phase "inbroker-precommit-t$t" 10 run e2 "${E2[@]}" RELAY_DELIVERY=precommit
+  about "trial $t of 2: in-broker, committed delivery" \
+    "The same, delivered once the output quorum has it: the like-for-like arm. Compare with precommit."
+  phase "inbroker-committed-t$t" 10 run e2 "${E2[@]}" RELAY_DELIVERY=committed
+  about "trial $t of 2: traditional: external, co-located, isolated cores" \
+    "The same module and book outside the broker, fan-out 1 and 20. Its latency is in the client results; the broker charts show only the cluster side."
+  phase "traditional-t$t" 25 run traditional 'PLACEMENTS=external loopback loopback-isolated' 'FANOUT_LADDER=1 20' \
+    GUEST_MODULE=book-matcher.wasm BOOK_DEPTH=1000 CANCEL_FRACTION=0.3 ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 DURATION=90s
+done

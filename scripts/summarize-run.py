@@ -90,9 +90,90 @@ def stalls(timeline):
 
 
 # ---------------------------------------------------------------------------
+# Architecture comparison (plans/baseline.plan): the same matcher, book and
+# order flow in every deployment, side by side per fan-out. In-broker arms are
+# e2 fanout sweeps, named by their relay delivery; traditional arms are run
+# traditional's placements. Both are loadgen's own end-to-end report, so the
+# columns mean the same thing in every row. Sweeps are numbered per arm in the
+# order they ran; a phase retried after a failure can add a partial one.
+ARM_ORDER = ["in-broker, precommit", "in-broker, committed", "external", "co-located",
+             "co-located, isolated cores"]
+PLACEMENT = {"external": "external", "loopback": "co-located", "loopback-isolated": "co-located, isolated cores"}
+
+
+def run_id_of(d):
+    m = re.search(r"-(\d{9,})/?$", d)
+    return int(m.group(1)) if m else 0
+
+
+def comparison_rows(run_dir, started):
+    """[(fanout, arm, sweep, total, clean)] for this run's in-broker fanout
+    sweeps and traditional placements."""
+    found = []  # (run_id, fanout, arm, report)
+    for s in glob.glob(f"{run_dir}/client-results/*/summary.txt"):
+        d = os.path.dirname(s)
+        txt = read(s)
+        if run_id_of(d) < started - 60 or not re.search(r"MODE=fanout\b", txt) or "consumer_arm=inbroker" not in txt:
+            continue
+        arm = "in-broker, " + (re.search(r"relay_delivery=(\S+)", txt) or [None, "precommit"])[1]
+        for rj in glob.glob(f"{d}/fanout-*.json"):
+            m = re.search(r"/fanout-(\d+)\.json$", rj)
+            if m:
+                try:
+                    found.append((run_id_of(d), int(m[1]), arm, json.load(open(rj))))
+                except (OSError, ValueError):
+                    pass
+    for d in glob.glob(f"{run_dir}/client-results/traditional-sharded-*"):
+        if run_id_of(d) < started - 60:
+            continue
+        for rj in glob.glob(f"{d}/trad-*.json"):
+            try:
+                j = json.load(open(rj))
+            except (OSError, ValueError):
+                continue
+            m = re.match(r"trad-(.+)-(\d+)$", j.get("label", ""))
+            if m:
+                found.append((run_id_of(d), int(m[2]), PLACEMENT.get(m[1], m[1]), j))
+    rows, trial = [], {}
+    for rid, n, arm, j in sorted(found, key=lambda f: f[0]):
+        trial[(n, arm)] = trial.get((n, arm), 0) + 1
+        rows.append((n, arm, trial[(n, arm)], j.get("total") or {}, j.get("clean")))
+    return rows
+
+
+try:
+    _started = int(read(f"{R}/RUN_STARTED_AT").strip())
+except ValueError:
+    _started = 0
+cmp_rows = comparison_rows(R, _started)
+if len({arm for _, arm, *_ in cmp_rows}) >= 2:
+    w("## Architecture comparison\n")
+    w("The same matcher (book-matcher), book and order flow in every deployment, per fan-out "
+      "(subscribers per order). End to end is loadgen's send to the measured consumer's "
+      "receipt in every row. in-broker precommit delivers from the transform before its output "
+      "write; committed delivers once the output quorum has it, which is what a Kafka consumer "
+      "of the output could fetch, so it is the like-for-like comparison with the traditional "
+      "arms. One row per sweep, numbered per arm in the order they ran (a phase retried after a "
+      "failure can add a partial sweep). The per-arm sections below have the detail.\n")
+    for n in sorted({r[0] for r in cmp_rows}):
+        rows = sorted((r for r in cmp_rows if r[0] == n),
+                      key=lambda r: (ARM_ORDER.index(r[1]) if r[1] in ARM_ORDER else 99, r[2]))
+        ext = [r[3].get("p50_micros", 0) for r in rows if r[1] == "external" and r[3].get("p50_micros")]
+        ext50 = sorted(ext)[len(ext) // 2] if ext else 0
+        w(f"### fan-out {n}\n")
+        w("| arm | sweep | p50 us | p99 | p99.9 | p99.99 | samples | p50 vs external | clean |")
+        w("|---|---|---|---|---|---|---|---|---|")
+        for _, arm, t, tot, clean in rows:
+            f = lambda k: f"{tot.get(k, 0):,.0f}"
+            vs = f"{tot.get('p50_micros', 0) / ext50:.2f}x" if ext50 and tot.get("p50_micros") else "-"
+            w(f"| {arm} | {t} | {f('p50_micros')} | {f('p99_micros')} | {f('p999_micros')} | {p9999(tot)} | "
+              f"{tot.get('samples', 0):,} | {vs} | {str(clean).lower()} |")
+        w("")
+
+# ---------------------------------------------------------------------------
 # e2 sweeps: whatever MODE, the runner writes a fingerprint and a header row.
 WANT = ["level", "offered/s", "achieved/s", "total_p50us", "total_p999us", "relay_p99us",
-        "match_us/order", "records/s", "clean"]
+        "match_us/order", "records/s", "clean", "leader_changes"]
 e2 = sorted(s for s in glob.glob(f"{R}/client-results/*/summary.txt")
             if not os.path.basename(os.path.dirname(s)).startswith(("resilience-", "gateways-")))
 # `wb results` copies everything on the client, which on a cluster reused with

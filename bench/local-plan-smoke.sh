@@ -41,6 +41,8 @@ phase() {
   for x in "$@"; do a+="$(printf '%q' "$x") "; done
   ARGS+=("$a")
 }
+# A phase's title and description (autorun's `about`) do not change what runs.
+about() { :; }
 RUN_DIR="<run-dir>"
 # shellcheck disable=SC1090
 . "$PLAN"
