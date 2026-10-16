@@ -136,7 +136,10 @@ came from.
 
 A plan can define `pre_up() { ...; }` for steps that must happen before
 provisioning (`published.plan` sizes the client fleet and picks a region
-there); if it fails, nothing is provisioned. Plans can also `export`
+there); if it fails, nothing is provisioned. A plan without one gets
+`scripts/select-region.sh` run for its topology instead, so a run never
+inherits the region an earlier run chose; `REGIONS` (exported by the plan or
+set in the environment) is the preference order. Plans can also `export`
 settings for runners that read the environment (`wb reproduce` does), and
 refer to `$RUN_DIR`.
 

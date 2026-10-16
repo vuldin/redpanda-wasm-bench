@@ -246,6 +246,10 @@ teardown_and_verify() {
   local ok=0 i
   for i in 1 2 3; do
     if timeout 1500 "$WB" teardown --yes >> "$RUN_DIR/teardown.log" 2>&1; then ok=1; break; fi
+    # Provisioning that failed before terraform created anything leaves
+    # nothing to tear down, and wb says so with a non-zero exit. Not a
+    # failure: verify-clean below still checks the EC2 API either way.
+    if tail -5 "$RUN_DIR/teardown.log" | grep -q "no cluster is provisioned"; then ok=1; break; fi
     log "$who: teardown attempt $i failed (see teardown.log)"
     [ "$i" = 2 ] && timeout 600 "$WB" cleanup-orphans --force >> "$RUN_DIR/teardown.log" 2>&1
     sleep 20
@@ -319,6 +323,25 @@ run() {
       log "pre_up: running the plan's pre-provisioning step"
       if ! (pre_up) >> "$RUN_DIR/pre_up.log" 2>&1; then
         refuse "the plan's pre_up step failed (see pre_up.log)" pre_up
+      fi
+    else
+      # No pre_up of its own: pick this run's region for this topology now, so
+      # a run never inherits terraform/region.auto.tfvars from an earlier one
+      # (2026-10-16: refused at P0-up because that overlay was a day old).
+      # REGIONS (exported by the plan, or the environment) is the preference
+      # order; select-region.sh takes the first with capacity.
+      local tv
+      case "$TOPOLOGY" in   # same mapping as scripts/switch-topology.sh
+        single-az) tv=r8id-8xl-wasm-single-az.tfvars ;;
+        multi-az) tv=r8id-8xl-wasm-multi-az.tfvars ;;
+        six-broker) tv=r8id-8xl-wasm-6broker.tfvars ;;
+        highcore) tv=r6id-32xl-wasm-highcore.tfvars ;;
+        *) tv="" ;;
+      esac
+      if [ -n "$tv" ] && [ "${DRY_RUN:-0}" != 1 ]; then
+        log "selecting a region for $TOPOLOGY (${REGIONS:-select-region.sh default order})"
+        TFVARS="$ROOT/terraform/$tv" bash "$ROOT/scripts/select-region.sh" >> "$RUN_DIR/pre_up.log" 2>&1 \
+          || refuse "region selection failed (see pre_up.log)" pre_up
       fi
     fi
     run_phase P0-up 25 "up ${TOPOLOGY:?plan must set TOPOLOGY}" || { finish "provisioning failed"; return 1; }

@@ -11,6 +11,10 @@
 # invocation; quote a KEY=VALUE whose value contains spaces.
 
 TOPOLOGY=six-broker
+# Region preference for autorun's region selection (first with capacity wins).
+# us-west-2 first: every six-broker series so far ran in us-west-2a, and the
+# region is part of a result's fingerprint. The environment wins.
+: "${REGIONS:=us-west-2 us-east-1 us-east-2 eu-west-1}"; export REGIONS
 # 16 MiB guests (the snapshot region is 4 MiB of it), fewer instances per
 # core to keep the per-core reservation sane, 16 MiB snapshot cap.
 DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
