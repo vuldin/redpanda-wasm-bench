@@ -133,30 +133,56 @@ bash "$WB" ssh monitor "sudo rm -rf $REMOTE_WORK && sudo mkdir -p $REMOTE_WORK/d
 # ssh calls below are belt-and-braces for the same hazard.
 mapfile -t WINLINES <<< "$WINDOWS"
 
+# Windows are dumped EXPORT_PARALLEL at a time (default 4; the monitoring
+# host has 8 vCPUs). One at a time a full-scope window took ~50s, and a
+# 56-window run (2026-10-16, state-and-jitter) needed ~50 minutes - more than
+# was left before its deadline, so its bundle was lost. Each job writes its own
+# dump file and its own block directory, so concurrent importers never share
+# a path, and deletes its multi-GB dump once imported; the blocks are moved
+# into one data directory afterwards.
+PAR="${EXPORT_PARALLEL:-4}"
+JOBS="$(mktemp -d)"
+export_window() {
+  local i="$1" label="$2" start_ms="$3" end_ms="$4"
+  bash "$WB" ssh monitor \
+    "sudo mkdir -p $REMOTE_WORK/blk.$i \
+     && sudo promtool tsdb dump-openmetrics --min-time=$start_ms --max-time=$end_ms \
+       ${MATCH:+--match='$MATCH'} /var/lib/prometheus > $REMOTE_WORK/w.$i.om 2>/dev/null \
+     && sudo promtool tsdb create-blocks-from openmetrics -q $REMOTE_WORK/w.$i.om $REMOTE_WORK/blk.$i \
+     && wc -c < $REMOTE_WORK/w.$i.om; sudo rm -f $REMOTE_WORK/w.$i.om" </dev/null 2>&1 \
+    | tr -d '\r' | grep -E '^[0-9]+$' | tail -1 > "$JOBS/$i.out"
+  printf '%s\t%s\n' "$label" "$(cat "$JOBS/$i.out")" > "$JOBS/$i.done"
+}
 i=0
 for _line in "${WINLINES[@]}"; do
   [ -z "${_line//[[:space:]]/}" ] && continue
   read -r label start_ms end_ms <<< "$_line"
   i=$((i+1))
-  printf '  [%d/%d] %-26s ' "$i" "$NWIN" "$label"
+  while [ "$(jobs -rp | wc -l)" -ge "$PAR" ]; do wait -n 2>/dev/null || true; done
   # promtool reads the live data directory, including the WAL, so nothing is
   # stopped and no admin endpoint is needed.
-  out="$(bash "$WB" ssh monitor \
-    "sudo promtool tsdb dump-openmetrics --min-time=$start_ms --max-time=$end_ms \
-       ${MATCH:+--match='$MATCH'} /var/lib/prometheus > $REMOTE_WORK/w.om 2>/dev/null \
-     && sudo promtool tsdb create-blocks-from openmetrics -q $REMOTE_WORK/w.om $REMOTE_WORK/data \
-     && wc -c < $REMOTE_WORK/w.om" </dev/null 2>&1 | tr -d '\r' | tail -1)"
-  if [ -z "${out//[!0-9]/}" ]; then
-    echo "FAILED"
-    echo "      remote output: ${out:-<empty>}" >&2
-    die "window $label could not be exported.
+  export_window "$i" "$label" "$start_ms" "$end_ms" &
+done
+wait
+failed=0
+for n in $(seq 1 "$i"); do
+  IFS=$'\t' read -r label bytes < "$JOBS/$n.done" 2>/dev/null || { label="window $n"; bytes=""; }
+  if [ -z "$bytes" ]; then
+    printf '  [%d/%d] %-26s FAILED\n' "$n" "$NWIN" "$label"; failed=$((failed + 1))
+  else
+    printf '  [%d/%d] %-26s ok (%s of openmetrics text)\n' "$n" "$NWIN" "$label" \
+      "$(numfmt --to=iec "$bytes" 2>/dev/null || echo "$bytes bytes")"
+  fi
+done
+rm -rf -- "${JOBS:?}"
+[ "$failed" -eq 0 ] || die "$failed window(s) could not be exported.
        An EMPTY remote output usually means the ssh was killed rather than the
        command failing - check RSH_TIMEOUT (currently ${RSH_TIMEOUT}s) against
        how long a ${SCOPE}-scope dump takes, and check disk on the monitoring
-       host (a full-scope window is 6-20 GB of intermediate text)."
-  fi
-  echo "ok ($(numfmt --to=iec "${out//[!0-9]/}" 2>/dev/null || echo "$out bytes") of openmetrics text)"
-done
+       host (a full-scope window is 6-20 GB of intermediate text, times
+       EXPORT_PARALLEL=${PAR} at once)."
+bash "$WB" ssh monitor "sudo sh -c 'for d in $REMOTE_WORK/blk.*; do mv \"\$d\"/* $REMOTE_WORK/data/ 2>/dev/null; rmdir \"\$d\" 2>/dev/null; done; true'" </dev/null \
+  || die "could not gather the window blocks into one data directory"
 
 # One import per window, so each becomes its own time-disjoint block. Do NOT
 # concatenate the dumps into a single import: per-series sample ordering is
