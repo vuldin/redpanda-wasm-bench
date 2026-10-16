@@ -11,10 +11,13 @@
 #   egress per event (broker fetch bytes): firehose > 2x topics
 #   no leadership changes in any level, and the leader balancer the runner
 #   paused is back on afterwards
+#   the producer serves loadgen_phase_info{phase="measure"} while it sends,
+#   which the dashboards' "measured only" view keys on
 #
 #   REDPANDA_BIN=... WASM_DIR=... bench/local-gateways.sh
 #
-# Ports: KAFKA_PORT (19093), ADMIN_PORT (9645), RPC_PORT (33146) - must be free.
+# Ports: KAFKA_PORT (19093), ADMIN_PORT (9645), RPC_PORT (33146), METRICS_PORT
+# (19110, the producer's stage marker) - must be free.
 set -uo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -27,7 +30,7 @@ RPK_CLI="${RPK_CLI:-$(command -v rpk)}"
 [ -x "$REDPANDA_BIN" ] || { echo "gateways-check: no broker binary at $REDPANDA_BIN" >&2; exit 1; }
 [ -f "$WASM_DIR/gateway-demux.wasm" ] || { echo "gateways-check: no $WASM_DIR/gateway-demux.wasm (make build-wasm)" >&2; exit 1; }
 [ -n "$RPK_CLI" ] || { echo "gateways-check: rpk not on PATH" >&2; exit 1; }
-for p in "$KAFKA_PORT" "$ADMIN_PORT" "$RPC_PORT"; do
+for p in "$KAFKA_PORT" "$ADMIN_PORT" "$RPC_PORT" "${METRICS_PORT:-19110}"; do
   if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then echo "gateways-check: port $p is in use" >&2; exit 1; fi
 done
 
@@ -77,10 +80,21 @@ for _ in $(seq 1 60); do curl -sf "$ADMIN/v1/status/ready" >/dev/null && break; 
 curl -sf "$ADMIN/v1/status/ready" >/dev/null || { echo "gateways-check: broker never ready" >&2; exit 1; }
 
 echo "--- bench/run-gateways.sh, scaled down"
-( cd "$W/tools" && RPK="$W/rpk" BROKERS="127.0.0.1:$KAFKA_PORT" ADMIN_URL="$ADMIN" ADMIN_URLS="$ADMIN" \
+# Poll the producer's stage marker the way Prometheus would scrape it.
+METRICS_PORT="${METRICS_PORT:-19110}"
+( while :; do curl -sf "http://127.0.0.1:$METRICS_PORT/metrics" 2>/dev/null | grep '^loadgen_phase_info'; sleep 0.5; done ) \
+  > "$W/stages.txt" 2>/dev/null &
+poller=$!
+( cd "$W/tools" && LOADGEN_METRICS_LISTEN=":$METRICS_PORT" RPK="$W/rpk" BROKERS="127.0.0.1:$KAFKA_PORT" ADMIN_URL="$ADMIN" ADMIN_URLS="$ADMIN" \
     BIN="$W/tools" RF=1 RATE=2000 DURATION=8s SETTLE=2 GATEWAY_LEVELS=4 KEYED_EXTRA_LEVELS=8 \
     RESULTS_DIR="$W/results" bash "$HERE/run-gateways.sh" ) > "$W/run.log" 2>&1
+kill "$poller" 2>/dev/null; wait "$poller" 2>/dev/null
 tail -8 "$W/run.log" | sed 's/^/  /'
+if ! grep -q 'loadgen_phase_info{phase="measure",arm="topics",label="topics-4"} 1' "$W/stages.txt"; then
+  echo "  FAIL  the producer never served loadgen_phase_info{phase=\"measure\"} for topics-4 (see $W/stages.txt)"
+  exit 1
+fi
+echo "  ok    the producer served its stage marker (measure, topics-4)"
 # The broker must have survived the whole series: on 2026-10-16 a redeploy of
 # one transform name with more output topics killed a broker (josh-416).
 if ! kill -0 "$(cat "$W/pid")" 2>/dev/null || grep -qE "Invalid instruction|Segmentation fault|out_of_range" "$W/broker.log"; then

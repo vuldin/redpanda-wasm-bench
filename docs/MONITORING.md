@@ -262,9 +262,11 @@ each dashboard picks between:
   when comparing a chart with `RESULTS.md`. It is a 1/0 mask applied as
   `X * M / M`, so that outside the window the value is 0/0 = NaN and the line
   breaks there too. It needs loadgen's stage marker: a current loadgen
-  publishes it live, and every bundle has it, rebuilt by `bench-series.py`
+  publishes it live (so does the gateways runner's producer, its load
+  generator, with the same series), and every bundle has it, rebuilt by `bench-series.py`
   from the timestamped lines loadgen prints into each phase log - so older
-  runs get it too. A live cluster deployed before the marker shows nothing
+  runs get it too; a gateways run's stages are rebuilt from its producer
+  reports. A live cluster deployed before the marker shows nothing
   here; switch to "all".
 - **all**: every sample the broker recorded, preload, warmup and drain
   included.

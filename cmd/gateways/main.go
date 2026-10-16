@@ -120,6 +120,10 @@ func produce(args []string) {
 	acks := fs.Int("acks", -1, "-1 (all) or 1")
 	compression := fs.String("compression", "none", "none, snappy, lz4 or zstd. none by default: broker egress is then the bytes gateways actually receive")
 	out := fs.String("out", "-", "report path")
+	warmup := fs.Duration("warmup", 5*time.Second, "the stage marker's warmup: match consume's -warmup")
+	label := fs.String("label", "", "the level's tag, carried on the stage marker")
+	arm := fs.String("arm", "", "the arm, carried on the stage marker")
+	metricsListen := fs.String("metrics-listen", "", "serve loadgen_phase_info (warmup, measure, drain) on this address (\":9110\" or \"9110\"), loadgen's port. Off when empty")
 	_ = fs.Parse(args)
 	if *size < header {
 		*size = header
@@ -140,12 +144,19 @@ func produce(args []string) {
 
 	var acked, errs atomic.Int64
 	interval := time.Duration(float64(time.Second) / *rate)
+	marker := &stageMarker{arm: *arm, label: *label}
+	marker.serve(*metricsListen)
 	cpu0, start := cpuSeconds(), time.Now()
 	deadline := start.Add(*duration)
 	var seq uint64
+	stage := ""
 	for next := start; time.Now().Before(deadline); next = next.Add(interval) {
 		if d := time.Until(next); d > 0 {
 			time.Sleep(d)
+		}
+		if s := stageAt(time.Since(start), *warmup, true); s != stage {
+			stage = s
+			marker.set(s)
 		}
 		// Random padding: zeros compress to almost nothing anywhere a codec
 		// is in play, and egress would then measure compressed zeros.
@@ -161,6 +172,7 @@ func produce(args []string) {
 		})
 		seq++
 	}
+	marker.set(stageAt(time.Since(start), *warmup, false))
 	_ = cl.Flush(context.Background())
 	wall := time.Since(start).Seconds()
 	writeJSON(*out, produceReport{

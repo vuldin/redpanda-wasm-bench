@@ -159,6 +159,7 @@ for arm in $ARMS; do
     sleep 3
     ./gateways produce -brokers "$BROKERS" -topic "$events" -gateways "$gw_n" -rate "$RATE" -size "$SIZE" \
       -duration "$DURATION" -acks "$ACKS" -out "$RESULTS_DIR/$tag.produce.json" \
+      -warmup 5s -arm "$arm" -label "$tag" -metrics-listen "${LOADGEN_METRICS_LISTEN:-}" \
       > "$RESULTS_DIR/$tag.produce.log" 2>&1 || echo "WARN: producer exited non-zero (see $tag.produce.log)"
     wait "$cpid" || echo "WARN: consumer exited non-zero (see $tag.consume.log)"
     e1="$(fetch_bytes)"; l1="$(leader_changes)"

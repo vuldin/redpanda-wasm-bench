@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 // Kafka's own murmur2 test vectors (clients' UtilsTest), as signed ints. The
 // broker uses the same function, so matching these is what lets a gateway
@@ -64,5 +68,29 @@ func TestAssignment(t *testing.T) {
 	}
 	if topic, ps := assignment("keyed", "gw-keyed", 3, 32, all); topic != "gw-keyed" || len(ps) != 1 || ps[0] != keyedPartition(3, 32) {
 		t.Errorf("keyed: %s %v", topic, ps)
+	}
+}
+
+// The producer's stage marker: the stages the dashboards' "measured only"
+// view keys on, in loadgen's own series and label set.
+func TestStageMarker(t *testing.T) {
+	w := 5 * time.Second
+	for _, c := range []struct {
+		elapsed time.Duration
+		sending bool
+		want    string
+	}{{0, true, "warmup"}, {4 * time.Second, true, "warmup"}, {5 * time.Second, true, "measure"},
+		{59 * time.Second, true, "measure"}, {61 * time.Second, false, "drain"}} {
+		if got := stageAt(c.elapsed, w, c.sending); got != c.want {
+			t.Errorf("stageAt(%v, sending=%v) = %q, want %q", c.elapsed, c.sending, got, c.want)
+		}
+	}
+	m := &stageMarker{arm: "topics", label: "topics-4"}
+	if m.render() != "" {
+		t.Error("no series before the first stage")
+	}
+	m.set("measure")
+	if !strings.Contains(m.render(), `loadgen_phase_info{phase="measure",arm="topics",label="topics-4"} 1`) {
+		t.Errorf("render: %q", m.render())
 	}
 }

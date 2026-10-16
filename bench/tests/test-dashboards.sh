@@ -174,6 +174,12 @@ with tempfile.TemporaryDirectory() as td:
         "2\tinline-t1\t7\ttrial 1: inline\tCheckpoint inline.\n"
         "3\tbackground-t1\t7\ttrial 1: background\t\n")
     text, _, _ = bs.render(rd, [], step=5)
+    # gateways: no loadgen lines in the phase log; stages from produce reports.
+    cr = rd / "client-results" / "gateways-1"; cr.mkdir(parents=True)
+    (cr / "topics-4.produce.json").write_text(json.dumps({"start_unix_ms": 1792154000000, "end_unix_ms": 1792154060000}))
+    st = bs.gateway_stages(rd)
+    expect("bench-series: gateway stages from produce reports (5s warmup, then measure)",
+           st == [("topics-4", "warmup", 1792154000.0, 1792154005.0), ("topics-4", "measure", 1792154005.0, 1792154060.0)])
     expect("bench-series: titles, descriptions and N of M from plan-phases.tsv",
            any('phase="off",attempt="1",step="1",steps="3",test="Checkpoint A/B",title="no state",about="The \\"baseline\\"."' in l
                and 'display="Checkpoint A/B - phase 1 of 3: no state"' in l for l in text.splitlines()))

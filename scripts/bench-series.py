@@ -10,7 +10,8 @@ already draw as shaded regions:
                    step, steps, test, title, about,    and plan-phases.tsv
                    display} 1
   bench_window_info{window} 1                          from the export's windows
-  loadgen_phase_info{label, phase} 1                   from each phase's log
+  loadgen_phase_info{label, phase} 1                   from each phase's log, and
+                                                       gateways' produce reports
 
 The last is loadgen's own stage marker (preload, warmup, measure, drain per
 level), rebuilt from the timestamped lines loadgen prints and the runner's
@@ -133,6 +134,28 @@ def loadgen_stages(log_text):
     return out
 
 
+GATEWAY_WARMUP_S = 5  # run-gateways.sh passes -warmup 5s to produce and consume
+
+
+def gateway_stages(run_dir):
+    """[(level label, stage, start_s, end_s)] for a gateways run, from the
+    <level>.produce.json reports fetched into client-results. The gateway
+    producer is that runner's load generator but logs no stages; its report
+    has the send window, whose first 5s are the warmup both sides leave out.
+    (A current producer also publishes loadgen_phase_info live.)"""
+    out = []
+    for f in sorted(run_dir.glob("client-results/gateways-*/*.produce.json")):
+        try:
+            r = json.loads(f.read_text())
+            t0, t1 = r["start_unix_ms"] / 1000, r["end_unix_ms"] / 1000
+        except (OSError, ValueError, KeyError):
+            continue
+        label = f.name[: -len(".produce.json")]
+        w = min(t0 + GATEWAY_WARMUP_S, t1)
+        out += [(label, "warmup", t0, w), (label, "measure", w, t1)]
+    return out
+
+
 def windows_from(path):
     out = []
     for line in Path(path).read_text().splitlines():
@@ -182,11 +205,12 @@ def render(run_dir, windows, step=5.0):
         f = run_dir / f"{name}.log"
         if f.exists():
             stages += loadgen_stages(f.read_text(errors="replace"))
+    stages += gateway_stages(run_dir)
     if stages:
         # 1s samples, like loadgen's own scrape: the dashboards read this
         # series over a 3s window.
         lines.append("# TYPE loadgen_phase_info gauge")
-        lines.append("# HELP loadgen_phase_info loadgen stage per level (rebuilt from the phase logs).")
+        lines.append("# HELP loadgen_phase_info loadgen stage per level (rebuilt from the phase logs and produce reports).")
         for label, stage, t0, t1 in sorted(stages, key=lambda s: (s[0], s[1], s[2])):
             lines += series("loadgen_phase_info", {"label": label, "phase": stage,
                                                    "source": "phase-log"}, t0, t1, 1.0)
