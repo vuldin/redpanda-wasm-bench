@@ -58,7 +58,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -118,7 +118,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -191,7 +191,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -251,7 +251,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -322,7 +322,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -465,7 +465,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -480,7 +480,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(loadgen_send_lateness_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(loadgen_send_lateness_seconds_bucket[$__rate_interval]))) $window",
           "legendFormat": "p50",
           "refId": "A",
           "editorMode": "code",
@@ -491,7 +491,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(loadgen_send_lateness_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(loadgen_send_lateness_seconds_bucket[$__rate_interval]))) $window",
           "legendFormat": "p95",
           "refId": "B",
           "editorMode": "code",
@@ -502,7 +502,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(loadgen_send_lateness_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(loadgen_send_lateness_seconds_bucket[$__rate_interval]))) $window",
           "legendFormat": "p99",
           "refId": "C",
           "editorMode": "code",
@@ -547,7 +547,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -642,7 +642,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -702,7 +702,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -776,11 +776,56 @@
         "textFormat": "plan {{plan}}, phase {{phase}}, attempt {{attempt}}",
         "tagKeys": "plan,phase",
         "useValueForTime": false
+      },
+      {
+        "name": "measured windows (loadgen)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "enable": true,
+        "hide": false,
+        "iconColor": "rgba(80, 200, 120, 0.5)",
+        "expr": "max by (label) (loadgen_phase_info{phase=\"measure\"})",
+        "target": {
+          "refId": "Measured",
+          "expr": "max by (label) (loadgen_phase_info{phase=\"measure\"})",
+          "interval": "5s"
+        },
+        "step": "5s",
+        "titleFormat": "{{label}}",
+        "textFormat": "measured window: {{label}}",
+        "tagKeys": "label",
+        "useValueForTime": false
       }
     ]
   },
   "templating": {
     "list": [
+      {
+        "name": "window",
+        "label": "latency samples",
+        "type": "custom",
+        "query": "all : * 1,measured only : * on() (max(loadgen_phase_info{phase=\"measure\"}) and on() max(loadgen_phase_info{phase=\"measure\"} offset $__rate_interval) or on() vector(0)) / on() (max(loadgen_phase_info{phase=\"measure\"}) and on() max(loadgen_phase_info{phase=\"measure\"} offset $__rate_interval) or on() vector(0))",
+        "options": [
+          {
+            "text": "all",
+            "value": "* 1",
+            "selected": true
+          },
+          {
+            "text": "measured only",
+            "value": "* on() (max(loadgen_phase_info{phase=\"measure\"}) and on() max(loadgen_phase_info{phase=\"measure\"} offset $__rate_interval) or on() vector(0)) / on() (max(loadgen_phase_info{phase=\"measure\"}) and on() max(loadgen_phase_info{phase=\"measure\"} offset $__rate_interval) or on() vector(0))",
+            "selected": false
+          }
+        ],
+        "current": {
+          "text": "all",
+          "value": "* 1",
+          "selected": true
+        },
+        "hide": 0
+      },
       {
         "name": "broker",
         "label": "broker (per-CPU heatmap)",

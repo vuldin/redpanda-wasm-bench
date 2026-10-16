@@ -35,7 +35,7 @@
       "gridPos": {
         "x": 0,
         "y": 0,
-        "w": 24,
+        "w": 14,
         "h": 3
       },
       "fieldConfig": {
@@ -45,12 +45,11 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
-          },
-          "noValue": "no autorun phase in progress"
+          }
         },
         "overrides": []
       },
@@ -60,14 +59,75 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max by (plan, phase, attempt) (bench_phase_info)",
-          "legendFormat": "{{plan}} / {{phase}} / attempt {{attempt}}",
+          "expr": "label_join(max by (plan, phase, attempt) (bench_phase_info), \"now\", \" / \", \"plan\", \"phase\", \"attempt\") or on() label_replace(vector(0), \"now\", \"no autorun phase in progress\", \"\", \"\")",
+          "legendFormat": "{{now}}",
           "refId": "A",
           "editorMode": "code",
           "range": true
         }
       ],
       "description": "The autorun phase at the end of the selected time range, from bench_phase_info. Empty between phases, outside an autorun plan, and for runs older than the marker. The shaded regions on every graph are the same series over time: hover one for its plan, phase and attempt.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "text": {
+          "titleSize": 14,
+          "valueSize": 20
+        }
+      }
+    },
+    {
+      "id": 109,
+      "type": "stat",
+      "title": "loadgen (level / stage)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 14,
+        "y": 0,
+        "w": 10,
+        "h": 3
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "label_join(max by (label, phase) (loadgen_phase_info), \"now\", \" / \", \"label\", \"phase\") or on() label_replace(vector(0), \"now\", \"loadgen idle\", \"\", \"\")",
+          "legendFormat": "{{now}}",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "description": "The level loadgen is running (the runner's tag, e.g. bookdepth-10000) and its stage: preload, warmup, measure or drain. Only measure is in the published numbers; the green regions on the graphs are those windows. Idle between levels and while a phase deploys or settles.",
       "options": {
         "reduceOptions": {
           "calcs": [
@@ -120,7 +180,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -135,7 +195,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(redpanda_relay_emit_to_guest_duration_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(redpanda_relay_emit_to_guest_duration_seconds_bucket[$__rate_interval]))) $window",
           "legendFormat": "p50",
           "refId": "A",
           "editorMode": "code",
@@ -146,7 +206,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(redpanda_relay_emit_to_guest_duration_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(redpanda_relay_emit_to_guest_duration_seconds_bucket[$__rate_interval]))) $window",
           "legendFormat": "p95",
           "refId": "B",
           "editorMode": "code",
@@ -157,7 +217,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(redpanda_relay_emit_to_guest_duration_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(redpanda_relay_emit_to_guest_duration_seconds_bucket[$__rate_interval]))) $window",
           "legendFormat": "p99",
           "refId": "C",
           "editorMode": "code",
@@ -202,7 +262,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -217,7 +277,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(redpanda_transform_e2e_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(redpanda_transform_e2e_latency_seconds_bucket[$__rate_interval]))) $window",
           "legendFormat": "p50",
           "refId": "A",
           "editorMode": "code",
@@ -228,7 +288,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(redpanda_transform_e2e_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(redpanda_transform_e2e_latency_seconds_bucket[$__rate_interval]))) $window",
           "legendFormat": "p95",
           "refId": "B",
           "editorMode": "code",
@@ -239,7 +299,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(redpanda_transform_e2e_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(redpanda_transform_e2e_latency_seconds_bucket[$__rate_interval]))) $window",
           "legendFormat": "p99",
           "refId": "C",
           "editorMode": "code",
@@ -297,7 +357,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "thresholds"
@@ -371,7 +431,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -432,7 +492,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -527,7 +587,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "thresholds"
@@ -601,7 +661,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "thresholds"
@@ -675,7 +735,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -748,7 +808,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -808,7 +868,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -823,7 +883,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(redpanda_transform_execution_latency_sec_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(redpanda_transform_execution_latency_sec_bucket[$__rate_interval]))) $window",
           "legendFormat": "p50",
           "refId": "A",
           "editorMode": "code",
@@ -834,7 +894,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(redpanda_transform_execution_latency_sec_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(redpanda_transform_execution_latency_sec_bucket[$__rate_interval]))) $window",
           "legendFormat": "p95",
           "refId": "B",
           "editorMode": "code",
@@ -845,7 +905,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(redpanda_transform_execution_latency_sec_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(redpanda_transform_execution_latency_sec_bucket[$__rate_interval]))) $window",
           "legendFormat": "p99",
           "refId": "C",
           "editorMode": "code",
@@ -963,7 +1023,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -1034,7 +1094,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -1094,7 +1154,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -1189,7 +1249,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "thresholds"
@@ -1263,7 +1323,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -1345,7 +1405,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -1427,7 +1487,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -1509,7 +1569,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -1569,7 +1629,7 @@
             "lineWidth": 2,
             "fillOpacity": 5,
             "showPoints": "never",
-            "spanNulls": true
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
@@ -1654,10 +1714,56 @@
         "textFormat": "plan {{plan}}, phase {{phase}}, attempt {{attempt}}",
         "tagKeys": "plan,phase",
         "useValueForTime": false
+      },
+      {
+        "name": "measured windows (loadgen)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "enable": true,
+        "hide": false,
+        "iconColor": "rgba(80, 200, 120, 0.5)",
+        "expr": "max by (label) (loadgen_phase_info{phase=\"measure\"})",
+        "target": {
+          "refId": "Measured",
+          "expr": "max by (label) (loadgen_phase_info{phase=\"measure\"})",
+          "interval": "5s"
+        },
+        "step": "5s",
+        "titleFormat": "{{label}}",
+        "textFormat": "measured window: {{label}}",
+        "tagKeys": "label",
+        "useValueForTime": false
       }
     ]
   },
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "window",
+        "label": "latency samples",
+        "type": "custom",
+        "query": "all : * 1,measured only : * on() (max(loadgen_phase_info{phase=\"measure\"}) and on() max(loadgen_phase_info{phase=\"measure\"} offset $__rate_interval) or on() vector(0)) / on() (max(loadgen_phase_info{phase=\"measure\"}) and on() max(loadgen_phase_info{phase=\"measure\"} offset $__rate_interval) or on() vector(0))",
+        "options": [
+          {
+            "text": "all",
+            "value": "* 1",
+            "selected": true
+          },
+          {
+            "text": "measured only",
+            "value": "* on() (max(loadgen_phase_info{phase=\"measure\"}) and on() max(loadgen_phase_info{phase=\"measure\"} offset $__rate_interval) or on() vector(0)) / on() (max(loadgen_phase_info{phase=\"measure\"}) and on() max(loadgen_phase_info{phase=\"measure\"} offset $__rate_interval) or on() vector(0))",
+            "selected": false
+          }
+        ],
+        "current": {
+          "text": "all",
+          "value": "* 1",
+          "selected": true
+        },
+        "hide": 0
+      }
+    ]
   }
 }

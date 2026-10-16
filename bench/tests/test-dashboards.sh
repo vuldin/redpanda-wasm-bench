@@ -34,6 +34,22 @@ def expect(name, ok):
 
 for name, fn in md.DASHBOARDS.items():
     expect(f"{name}: no rate() over a NOT_COUNTERS metric", md.rate_misuse(fn()) == [])
+# Latency lines must break at idle gaps: NaN kept (a `>= 0` filter makes
+# Grafana join across the gap), spanNulls off everywhere, and both "latency
+# samples" choices keep NaN rather than dropping points.
+lat = [t["expr"] for fn in md.DASHBOARDS.values() for p in fn()["panels"]
+       for t in p.get("targets", []) if "histogram_quantile" in t.get("expr", "")]
+expect("latency queries keep NaN (no >= 0 filter) and carry $window",
+       lat and all(">= 0" not in e and "$window" in e for e in lat if "increase(" not in e))
+expect("spanNulls is off on every time series panel",
+       all(p["fieldConfig"]["defaults"]["custom"].get("spanNulls") is False
+           for fn in md.DASHBOARDS.values() for p in fn()["panels"] if p.get("type") == "timeseries"))
+expect("measured-only is a NaN mask (X * M / M), not an `and` filter",
+       md.MEASURED_ONLY.startswith("* on() ") and " / on() " in md.MEASURED_ONLY and md.ALL_SAMPLES == "* 1")
+expect("now-running strips always return a series (idle fallback)",
+       all("or on() label_replace(vector(0)" in t["expr"]
+           for p in md.overview()["panels"] if p["id"] in (9, 109) for t in p["targets"]))
+
 planted = {"panels": [{"title": "planted", "targets": [
     {"expr": "sum by (shard) (irate( redpanda_cpu_busy_seconds_total[$__rate_interval]))"}]}]}
 expect("generator refuses a planted irate() over the busy-time gauge",

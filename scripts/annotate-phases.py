@@ -8,10 +8,11 @@ a run whose cluster was deployed before the marker existed, or an exported
 bundle of such a run opened in its local Grafana. It reads the START / OK /
 FAIL lines in <run-dir>/autorun.log and posts one region annotation per phase
 attempt to each wasm-bench dashboard. A phase still running is drawn up to
-now; run it again later to extend it. Re-running replaces this run's
-annotations rather than adding duplicates.
+now. Re-running replaces this run's annotations rather than adding duplicates,
+and --follow does that every N seconds (default 30) until the run's DONE file
+appears, so a live run's current phase is shaded while it runs.
 
-  scripts/annotate-phases.py <run-dir> [grafana-url]
+  scripts/annotate-phases.py <run-dir> [grafana-url] [--follow [seconds]]
 
 The Grafana URL defaults to the one in <run-dir>/MONITORING.txt. Credentials
 come from GRAFANA_AUTH (user:password), default the bench's admin/wasmbench.
@@ -74,11 +75,33 @@ def call(base, auth, method, path, body=None):
 
 
 def main():
-    if len(sys.argv) < 2:
+    args = sys.argv[1:]
+    follow = None
+    if "--follow" in args:
+        i = args.index("--follow")
+        follow = 30
+        if i + 1 < len(args) and args[i + 1].isdigit():
+            follow = int(args.pop(i + 1))
+        args.pop(i)
+    if not args:
         print(__doc__, file=sys.stderr)
         return 2
-    run_dir = Path(sys.argv[1])
-    base = sys.argv[2] if len(sys.argv) > 2 else grafana_from(run_dir)
+    if follow is None:
+        return draw(args)
+    run_dir = Path(args[0])
+    while True:
+        try:
+            draw(args)
+        except Exception as e:  # noqa: BLE001 - a Grafana blip must not end the watch
+            print(f"annotate-phases: {e}; retrying in {follow}s", file=sys.stderr)
+        if (run_dir / "DONE").exists():
+            return draw(args)
+        time.sleep(follow)
+
+
+def draw(args):
+    run_dir = Path(args[0])
+    base = args[1] if len(args) > 1 else grafana_from(run_dir)
     if not base:
         print(f"no Grafana URL given and none in {run_dir}/MONITORING.txt", file=sys.stderr)
         return 2

@@ -96,6 +96,25 @@ func TestDisabledRecordsNothing(t *testing.T) {
 	}
 }
 
+// The dashboards shade levels and gate "measured windows only" on this exact
+// line, so its labels are part of the contract.
+func TestPhaseInfoCarriesPhaseArmAndLabel(t *testing.T) {
+	m := newLiveMetrics()
+	m.enabled = true
+	m.arm, m.label = "probe", "bookdepth-10000"
+	var mu sync.Mutex
+	if strings.Contains(m.render(&mu), "loadgen_phase_info") {
+		t.Error("phase info emitted before any phase was set")
+	}
+	for _, p := range []string{"preload", "warmup", "measure", "drain"} {
+		m.setPhase(p)
+		want := `loadgen_phase_info{phase="` + p + `",arm="probe",label="bookdepth-10000"} 1`
+		if out := m.render(&mu); !strings.Contains(out, want+"\n") {
+			t.Errorf("phase %s: missing %q in\n%s", p, want, out)
+		}
+	}
+}
+
 func TestListenAddrAcceptsBarePort(t *testing.T) {
 	for in, want := range map[string]string{
 		"9110":           ":9110",

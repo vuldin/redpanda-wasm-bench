@@ -1687,6 +1687,7 @@ func main() {
 	// "fills" consumes the output topic as an ordinary Kafka consumer
 	// (external).
 	live.arm = *receiptSrc
+	live.label = *label
 	live.serve(*metricsListen, &latenessMu)
 
 	sendOne := func(pc *kgo.Client, phase byte, seq int64, sampled bool) {
@@ -1915,6 +1916,7 @@ func main() {
 		preload := encodeBookPreload(runID, *bookDepth)
 		log.Printf("loadgen: preloading %d resting orders per side (%d records) before warmup",
 			*bookDepth, len(preload))
+		live.setPhase("preload")
 		var preloadErrs atomic.Int64
 		for _, rec := range preload {
 			var k []byte
@@ -1940,6 +1942,7 @@ func main() {
 
 	log.Printf("loadgen: warmup %s at %.0f orders/sec across %d producer(s) (%s pacing, linger %dms)",
 		*warmup, *rate, *numProducers, *pacing, *lingerMs)
+	live.setPhase("warmup")
 	pace('w', *warmup)
 	flushAll()
 	// Let warmup receipts land before the timed window opens, so a warmup
@@ -1961,6 +1964,9 @@ func main() {
 
 	log.Printf("loadgen: timed window %s at %.0f orders/sec", *duration, *rate)
 	recordsSent.Store(0)
+	// "measure" is exactly the timed window the report's latency comes from;
+	// the dashboards' "measured windows only" view gates on it.
+	live.setPhase("measure")
 	timedStart := time.Now()
 	sent := pace('t', *duration)
 	flushAll()
@@ -1969,6 +1975,7 @@ func main() {
 
 	log.Printf("loadgen: sent %d orders in %s, draining receipts for %s",
 		sent, sendElapsed.Round(time.Millisecond), *drain)
+	live.setPhase("drain")
 	time.Sleep(*drain)
 	stopCollect()
 	<-collectorDone

@@ -86,8 +86,15 @@ def hist_quantile(metric, q, extra=""):
     cluster-wide quantile, which is what every published figure is.
     """
     sel = f'{{{extra}}}' if extra else ""
+    # With no traffic in the rate window histogram_quantile returns NaN, and
+    # the NaN is what breaks the line (panel() sets spanNulls false). Do NOT
+    # filter it out: Grafana 11.6 joins the points either side of a gap that
+    # has no samples at all, insertNulls notwithstanding - tried 2026-10-16,
+    # and every idle gap (deploy, book preload, settling) became a straight
+    # ramp into the next level. $window is "all" or "measured only", and both
+    # keep the NaN.
     return (f"histogram_quantile({q}, sum by (le) "
-            f"(rate({metric}_bucket{sel}[$__rate_interval])))")
+            f"(rate({metric}_bucket{sel}[$__rate_interval]))) $window")
 
 
 def event_quantile(metric, q, window="10m"):
@@ -111,7 +118,10 @@ def panel(pid, title, x, y, w, h, targets, unit=None, desc=None,
         "lineWidth": 2,
         "fillOpacity": 5,
         "showPoints": "never",
-        "spanNulls": True,
+        # Never draw across missing data. Spanning nulls joined the last point
+        # before an idle gap to the first point after it, and the latency
+        # panels showed a ramp starting minutes before the traffic did.
+        "spanNulls": False,
     }
     fc = {"defaults": {"custom": custom, "color": {"mode": "palette-classic"}},
           "overrides": []}
@@ -236,10 +246,23 @@ PHASE_ANNOTATION = {
 }
 
 
+def _named(expr, labels, idle):
+    """One series whose `now` label names what is running, or says `idle`.
+
+    A stat in "name" mode shows nothing at all when its query is empty - not
+    even noValue - so "between phases" looked exactly like "broken". The
+    fallback is a constant series carrying the idle text instead."""
+    joined = ", ".join(f'"{l}"' for l in labels)
+    return (f'label_join({expr}, "now", " / ", {joined}) '
+            f'or on() label_replace(vector(0), "now", "{idle}", "", "")')
+
+
 def now_running(pid, y):
-    """Full-width strip naming the phase in progress (at the END of the range)."""
-    p = stat(pid, "now running (autorun plan / phase / attempt)", 0, y, 24, 3,
-             [(PHASE_EXPR, "{{plan}} / {{phase}} / attempt {{attempt}}")],
+    """Strips naming the autorun phase and the loadgen level in progress, at
+    the END of the selected range."""
+    p = stat(pid, "now running (autorun plan / phase / attempt)", 0, y, 14, 3,
+             [(_named(PHASE_EXPR, ["plan", "phase", "attempt"], "no autorun phase in progress"),
+               "{{now}}")],
              desc=("The autorun phase at the end of the selected time range, "
                    "from bench_phase_info. Empty between phases, outside an "
                    "autorun plan, and for runs older than the marker. The "
@@ -247,12 +270,69 @@ def now_running(pid, y):
                    "time: hover one for its plan, phase and attempt."),
              text_size=20)
     p["options"].update({"textMode": "name", "colorMode": "none", "graphMode": "none"})
-    p["fieldConfig"]["defaults"]["noValue"] = "no autorun phase in progress"
-    return p
+    lg = stat(pid + 100, "loadgen (level / stage)", 14, y, 10, 3,
+              [(_named("max by (label, phase) (loadgen_phase_info)", ["label", "phase"],
+                       "loadgen idle"), "{{now}}")],
+              desc=("The level loadgen is running (the runner's tag, e.g. "
+                    "bookdepth-10000) and its stage: preload, warmup, measure "
+                    "or drain. Only measure is in the published numbers; the "
+                    "green regions on the graphs are those windows. Idle "
+                    "between levels and while a phase deploys or settles."),
+              text_size=20)
+    lg["options"].update({"textMode": "name", "colorMode": "none", "graphMode": "none"})
+    return [p, lg]
+
+
+# "measured only" keeps a latency point only if loadgen was in its timed
+# window both now and one rate window ago, so the point's whole rate window is
+# measured traffic: the samples the published numbers come from. "all" also
+# shows preload, warmup and drain, which the report leaves out (the warmup's
+# first rate window is the spike at the start of every level).
+#
+# It is a mask, M = 1 inside the window and 0 outside, applied as X * M / M:
+# outside the window that is 0/0 = NaN, which breaks the line. Filtering with
+# `and` would drop the points instead, and Grafana would join across them.
+_MEASURE_MASK = ('(max(loadgen_phase_info{phase="measure"}) '
+                 'and on() max(loadgen_phase_info{phase="measure"} offset $__rate_interval) '
+                 'or on() vector(0))')
+MEASURED_ONLY = f"* on() {_MEASURE_MASK} / on() {_MEASURE_MASK}"
+ALL_SAMPLES = "* 1"
+WINDOW_VARIABLE = {
+    "name": "window",
+    "label": "latency samples",
+    "type": "custom",
+    "query": f"all : {ALL_SAMPLES},measured only : {MEASURED_ONLY}",
+    "options": [
+        {"text": "all", "value": ALL_SAMPLES, "selected": True},
+        {"text": "measured only", "value": MEASURED_ONLY, "selected": False},
+    ],
+    "current": {"text": "all", "value": ALL_SAMPLES, "selected": True},
+    "hide": 0,
+}
+# loadgen's timed windows, labelled with the runner's level tag
+# (bookdepth-10000, rate-60000, ...). Needs a loadgen that publishes its phase.
+MEASURED_ANNOTATION = {
+    "name": "measured windows (loadgen)",
+    "datasource": DS,
+    "enable": True,
+    "hide": False,
+    "iconColor": "rgba(80, 200, 120, 0.5)",
+    "expr": 'max by (label) (loadgen_phase_info{phase="measure"})',
+    "target": {"refId": "Measured", "expr": 'max by (label) (loadgen_phase_info{phase="measure"})',
+               "interval": "5s"},
+    "step": "5s",
+    "titleFormat": "{{label}}",
+    "textFormat": "measured window: {{label}}",
+    "tagKeys": "label",
+    "useValueForTime": False,
+}
 
 
 def dashboard(uid, title, panels, desc, tags, refresh="5s", time_from="now-15m",
               variables=None):
+    variables = list(variables or [])
+    if any("$window" in t.get("expr", "") for p in panels for t in p.get("targets", [])):
+        variables.insert(0, WINDOW_VARIABLE)
     return {
         "uid": uid,
         "title": title,
@@ -268,8 +348,8 @@ def dashboard(uid, title, panels, desc, tags, refresh="5s", time_from="now-15m",
         # window lands below the scrape interval and draws gaps.
         "timepicker": {"refresh_intervals": ["2s", "5s", "10s", "30s", "1m", "5m"]},
         "panels": panels,
-        "annotations": {"list": [GRAFANA_ANNOTATIONS, PHASE_ANNOTATION]},
-        "templating": {"list": variables or []},
+        "annotations": {"list": [GRAFANA_ANNOTATIONS, PHASE_ANNOTATION, MEASURED_ANNOTATION]},
+        "templating": {"list": variables},
     }
 
 
@@ -284,7 +364,7 @@ def dashboard(uid, title, panels, desc, tags, refresh="5s", time_from="now-15m",
 def overview():
     p, y = [], 0
 
-    p.append(now_running(9, y)); y += 3
+    p.extend(now_running(9, y)); y += 3
 
     p.append(row(1, "Headline: in-broker fan-out latency", y)); y += 1
     p.append(panel(

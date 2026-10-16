@@ -70,6 +70,9 @@ type liveMetrics struct {
 	pacingInterval float64
 	inbrokerFanout int
 	arm            string
+	// The run's -label (the runner's level tag, e.g. bookdepth-10000), so a
+	// dashboard can name and shade each level, not just each autorun phase.
+	label string
 
 	// Guarded by the caller's existing lateness mutex - see recordLateness.
 	// No mutex of its own on purpose: the send loop already takes one to append
@@ -180,9 +183,9 @@ func (m *liveMetrics) render(latenessMu *sync.Mutex) string {
 	phase := m.phase
 	m.phaseMu.Unlock()
 	if phase != "" {
-		add("# HELP loadgen_phase_info Which phase the run is in, as a label on a constant 1.\n")
+		add("# HELP loadgen_phase_info Which phase the run is in (preload, warmup, measure, drain), as a label on a constant 1.\n")
 		add("# TYPE loadgen_phase_info gauge\n")
-		add("loadgen_phase_info{phase=%q,arm=%q} 1\n", phase, m.arm)
+		add("loadgen_phase_info{phase=%q,arm=%q,label=%q} 1\n", phase, m.arm, m.label)
 	}
 	return string(b)
 }
