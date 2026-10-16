@@ -63,7 +63,8 @@
           "legendFormat": "{{now}}",
           "refId": "A",
           "editorMode": "code",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ],
       "description": "The autorun phase at the end of the selected time range, from bench_phase_info. Empty between phases, outside an autorun plan, and for runs older than the marker. The shaded regions on every graph are the same series over time: hover one for its plan, phase and attempt.",
@@ -124,7 +125,8 @@
           "legendFormat": "{{now}}",
           "refId": "A",
           "editorMode": "code",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ],
       "description": "The level loadgen is running (the runner's tag, e.g. bookdepth-10000) and its stage: preload, warmup, measure or drain. Only measure is in the published numbers; the green regions on the graphs are those windows. Idle between levels and while a phase deploys or settles.",

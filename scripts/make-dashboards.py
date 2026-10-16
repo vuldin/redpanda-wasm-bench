@@ -280,6 +280,12 @@ def now_running(pid, y):
                     "between levels and while a phase deploys or settles."),
               text_size=20)
     lg["options"].update({"textMode": "name", "colorMode": "none", "graphMode": "none"})
+    # Instant queries, evaluated at the end of the range. As range queries a
+    # stat lists every series with a value anywhere in the range, which in a
+    # recording (or any range spanning several phases) is every phase at once.
+    for panel_ in (p, lg):
+        for t in panel_["targets"]:
+            t["instant"], t["range"] = True, False
     return [p, lg]
 
 

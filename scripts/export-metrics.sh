@@ -187,6 +187,32 @@ bash "$WB" ssh monitor "sudo sh -c 'for d in $REMOTE_WORK/blk.*; do mv \"\$d\"/*
 # One import per window, so each becomes its own time-disjoint block. Do NOT
 # concatenate the dumps into a single import: per-series sample ordering is
 # only guaranteed within one window, and the importer needs it in order.
+
+# --- the run's structure, as series -----------------------------------------
+# A bundle can only draw what is in its TSDB - Grafana annotations live in
+# Grafana's database and do not travel - so autorun's phases (from
+# autorun.log) and the measured windows go in as bench_phase_info and
+# bench_window_info (scripts/bench-series.py), which the dashboards shade. That
+# block spans the whole run, so it is listed in data/bench-series.json and the
+# manifest's window-coverage check leaves it out. Best effort: without it the
+# bundle still works, just without the shading.
+SERIES_TMP="$(mktemp -d)"
+printf '%s\n' "$WINDOWS" > "$SERIES_TMP/windows"
+SERIES_BLOCKS=""
+if python3 "$HERE/bench-series.py" "$RESULTS" --windows "$SERIES_TMP/windows" > "$SERIES_TMP/series.om" \
+   && grep -q '^bench_' "$SERIES_TMP/series.om" \
+   && bash "$WB" ssh monitor "cat > $REMOTE_WORK/series.om" < "$SERIES_TMP/series.om" \
+   && bash "$WB" ssh monitor "sudo mkdir -p $REMOTE_WORK/series \
+        && sudo promtool tsdb create-blocks-from openmetrics -q $REMOTE_WORK/series.om $REMOTE_WORK/series >/dev/null \
+        && ls $REMOTE_WORK/series" </dev/null > "$SERIES_TMP/ls"; then
+  SERIES_BLOCKS="$(tr -d '\r' < "$SERIES_TMP/ls" | grep -E '^01[0-9A-Z]{24}$' | tr '\n' ' ')"
+  bash "$WB" ssh monitor "sudo sh -c 'mv $REMOTE_WORK/series/01* $REMOTE_WORK/data/'" </dev/null || SERIES_BLOCKS=""
+fi
+if [ -n "${SERIES_BLOCKS// /}" ]; then
+  echo "  phases and windows as series: block(s) $SERIES_BLOCKS"
+else
+  echo "  WARN: the phase/window series were not added (the bundle works, without phase shading)"
+fi
 say "blocks built"
 bash "$WB" ssh monitor "sudo promtool tsdb list $REMOTE_WORK/data 2>/dev/null | head -20" </dev/null | sed 's/^/  /'
 
@@ -203,6 +229,12 @@ rsync -az --delete --exclude 'tmp_*' -e "ssh -i ${BENCH_SSH_KEY:?set BENCH_SSH_K
   "ubuntu@$H:$REMOTE_WORK/data/" "$OUT/data/" || die "rsync of the blocks failed"
 bash "$WB" ssh monitor "sudo rm -rf $REMOTE_WORK" >/dev/null 2>&1 || true
 
+python3 - "$OUT/data/bench-series.json" $SERIES_BLOCKS <<'PYJ'
+import json, sys
+json.dump({"blocks": sys.argv[2:], "written_by": "scripts/bench-series.py"},
+          open(sys.argv[1], "w"), indent=2)
+PYJ
+rm -rf -- "${SERIES_TMP:?}"
 echo "  bundle data: $(du -sh "$OUT/data" | cut -f1)"
 
 # --- the viewer half -------------------------------------------------------

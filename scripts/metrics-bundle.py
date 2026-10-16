@@ -177,14 +177,29 @@ providers:
         d["time"] = {"from": iso(lo), "to": iso(hi)}
         d["refresh"] = ""          # nothing is being scraped; refreshing is noise
         d["timezone"] = "utc"
-        # One annotation per measured window, so the trials and ladder levels
-        # are visible as regions instead of having to be inferred from shape.
-        d.setdefault("annotations", {})["list"] = [{
+        # Keep the dashboards' own annotations (autorun phases from
+        # bench_phase_info, loadgen's measured windows) and add the export's
+        # windows, from bench_window_info. All three read series in ./data:
+        # this used to be a Grafana built-in annotation, which nothing in a
+        # bundle ever populated, so it showed nothing.
+        anns = [x for x in d.setdefault("annotations", {}).get("list", [])
+                if x.get("name") != "measured windows"]
+        anns.append({
             "name": "measured windows",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
             "enable": True,
-            "iconColor": "rgba(255, 96, 96, 1)",
-            "type": "dashboard",
-        }]
+            "hide": False,
+            "iconColor": "rgba(255, 96, 96, 0.2)",
+            "expr": "max by (window) (bench_window_info)",
+            "target": {"refId": "Windows", "expr": "max by (window) (bench_window_info)",
+                       "interval": "5s"},
+            "step": "5s",
+            "titleFormat": "{{window}}",
+            "textFormat": "exported window {{window}}",
+            "tagKeys": "window",
+            "useValueForTime": False,
+        })
+        d["annotations"]["list"] = anns
         d["description"] = (
             (d.get("description", "") or "")
             + "  RECORDING: fixed time range, nothing is being scraped. "
@@ -227,8 +242,17 @@ providers:
     #
     # Block boundaries come from each block's own meta.json, so this needs no
     # promtool and works wherever the bundle is assembled.
+    # The run-structure block (scripts/bench-series.py: phases and windows as
+    # series) spans the whole run, so counting it would make every window look
+    # covered and hide one that genuinely failed to export.
+    try:
+        series_blocks = set(json.loads((data_dir / "bench-series.json").read_text())["blocks"])
+    except (OSError, ValueError, KeyError):
+        series_blocks = set()
     covered = []
     for b in (data_dir.glob("01*") if data_dir.exists() else []):
+        if b.name in series_blocks:
+            continue
         meta = b / "meta.json"
         if not meta.is_file():
             continue
@@ -288,6 +312,7 @@ providers:
         # disk, not a restatement of the request.
         "windows": wins,
         "blocks": blocks,
+        "series_blocks": sorted(series_blocks),
         "data_bytes": size,
         "dashboards": retimed,
         "bench_repo_commit": git("rev-parse", "HEAD"),

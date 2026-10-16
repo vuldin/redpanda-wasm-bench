@@ -194,10 +194,65 @@ be zero, are in [MONITORING.md](MONITORING.md).
 - Before teardown the run calls `wb monitor export <run-dir>`: the measured
   windows (when the loadgen scrape target was up, padded 30s) become finished
   TSDB blocks plus a Grafana with the same dashboards. Afterwards:
-  `cd results/run-.../metrics-bundle && docker compose up`, then
-  http://localhost:3000; `./validate.sh` checks every panel returns data.
+  `cd results/run-.../metrics-bundle && docker compose up -d`, then
+  http://localhost:3000 ([Looking at a finished run](#looking-at-a-finished-run)).
 - Running by hand instead of through autorun: `wb monitor` (URL and
   reachability), `wb monitor export <results-dir>` before `wb teardown`.
+
+## Looking at a finished run
+
+The cluster's Prometheus and Grafana are gone after teardown. What survives is
+`metrics-bundle/` in the run directory: every measured window as Prometheus
+blocks, plus a Grafana with the same dashboards, set to the recording's time
+range. It needs Docker with Compose v2 and nothing else - no cluster, no AWS,
+no copy of this repo (so it can be zipped and sent to someone).
+
+```bash
+cd results/run-<date>-<time>-<plan>/metrics-bundle
+docker compose up -d          # Prometheus on :9090, Grafana on :3000
+# open http://localhost:3000  - anonymous viewer, opens on the overview
+./validate.sh                 # optional: every panel query returns data
+docker compose down           # stop it (the data stays)
+```
+
+What you see:
+
+- Shading on every graph: one region per autorun phase (hover for plan,
+  phase, attempt and outcome), one per exported window, and - for runs whose
+  loadgen publishes its stage - loadgen's measured windows in green. Each has
+  a toggle at the top of the dashboard.
+- The "now running" strip names the phase at the END of the selected range,
+  so zooming to a stretch of the run tells you what was running there.
+- "latency samples: measured only" keeps just the samples the published
+  numbers come from (needs the loadgen stage marker, so newer runs only).
+- Only the measured windows were exported (padded 30s), so the gaps between
+  them are empty by design: they were provisioning, deploys and settling.
+
+From an archived copy (`ARCHIVE_DIR`): check and unpack the tarball first, then
+use the `metrics-bundle/` inside it the same way.
+
+```bash
+cd <archive-dir> && sha256sum -c run-<...>.tar.gz.sha256 && tar xzf run-<...>.tar.gz
+```
+
+Things that trip people up:
+
+- One bundle at a time: they all use ports 3000 and 9090, so
+  `docker compose down` the previous one first.
+- Prometheus reads the blocks only at startup. After changing a bundle (below),
+  `docker compose down` and `up -d` again, and reload the browser tab: an open
+  tab keeps the dashboard it loaded.
+- A bundle exported before 2026-10-16 has no phase or window shading (the
+  phases were never in its data, and its window annotation never worked). Add
+  both, and refresh its dashboards to the current ones:
+
+  ```bash
+  scripts/bundle-add-phases.sh results/run-<date>-<time>-<plan>   # bundle stopped
+  ```
+
+  It builds the phases from the run's `autorun.log` with the bundle's own
+  Prometheus image, and is safe to re-run. It changes the copy you point it
+  at, not the archived tarball.
 
 ## The runners a phase can call
 

@@ -192,13 +192,18 @@ bundle too (`export-metrics.sh` matches `bench_.*` in every scope). The
 marker is best effort: it never fails a phase, and a cluster deployed before
 the textfile collector existed simply has none.
 
-For those older clusters, and for bundles of runs made before the marker,
-`scripts/annotate-phases.py` draws the same regions as Grafana annotations from
-the START / OK / FAIL lines in the run's `autorun.log`:
+Every exported bundle carries the phases whatever the cluster had: the export
+writes them from `autorun.log` as `bench_phase_info` too (see
+[Taking the metrics with you](#taking-the-metrics-with-you)), and
+`scripts/bundle-add-phases.sh` adds them to an older bundle.
+
+For a LIVE cluster deployed before the marker, `scripts/annotate-phases.py`
+draws the same regions as Grafana annotations from the START / OK / FAIL lines
+in the run's `autorun.log`:
 
 ```bash
-scripts/annotate-phases.py results/run-<date>-<plan>                         # live Grafana, from MONITORING.txt
-scripts/annotate-phases.py results/run-<date>-<plan> http://localhost:3000   # a bundle opened locally
+scripts/annotate-phases.py results/run-<date>-<plan>             # the run's live Grafana, from MONITORING.txt
+scripts/annotate-phases.py results/run-<date>-<plan> --follow    # keep the phase in progress shaded
 ```
 
 A phase still running is drawn up to now. Run it again to extend it; it
@@ -416,8 +421,9 @@ with nothing else running:
 ```bash
 ./scripts/wb monitor export           # newest results dir, or pass one
 cd results/reproduce-<id>/metrics-bundle
-docker compose up
+docker compose up -d                  # then http://localhost:3000
 ./validate.sh                         # every panel, checked
+docker compose down
 ```
 
 `reproduce.sh` does this automatically at the end of a run, and so does
@@ -431,6 +437,18 @@ For a durability trial to be in the bundle, its loadgen must have been
 scraped: export finds windows by when the `loadgen` target was up.
 `run-durability.sh` exposes loadgen's endpoint whenever a monitoring host
 exists.
+
+The bundle also carries the run's structure as series, because Grafana
+annotations live in Grafana's database and do not travel: `bench_phase_info`
+(every autorun phase attempt, from `autorun.log`) and `bench_window_info`
+(every exported window), written by `scripts/bench-series.py` into one extra
+block. The dashboards shade both, and the "now running" strip reads the phase
+at the end of the range, so a recording shows what was running where. That
+block spans the whole run, so it is listed in `data/bench-series.json` and the
+manifest's check that every window is covered by real data leaves it out.
+`scripts/bundle-add-phases.sh <run-dir>` adds it to a bundle exported before
+the export did, using the bundle's own Prometheus image. Opening a bundle, step
+by step: [Looking at a finished run](RUNNING-YOUR-OWN-TESTS.md#looking-at-a-finished-run).
 
 ### Why it exports from Prometheus and not Grafana
 

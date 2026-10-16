@@ -132,6 +132,44 @@ dur = {("redpanda", "broker0"): [(t, 1.95 if t in (10, 20) else 0.02) for t in r
 r = cs.analyse(up, dur, {"redpanda": 2.0})[0]
 expect("check-scrapes: timeouts vs fast failures, and the spacing",
        (r["failed"], r["timeouts"], r["fast_failures"], r["spacing"]) == (4, 2, 2, "every 10,000ms"))
+# bench-series.py: phases from autorun.log and windows as OpenMetrics.
+import json, subprocess, tempfile
+from pathlib import Path
+bs = load("bs", "scripts/bench-series.py")
+with tempfile.TemporaryDirectory() as td:
+    rd = Path(td) / "run-2026-10-16-121906-checkpoint-ab"; rd.mkdir()
+    (rd / "autorun.log").write_text(log + "[2026-10-16T12:40:20Z] OK inline-t1 in 2m0s\n")
+    text, nph, nwin = bs.render(rd, [("w1", 1792154000.0, 1792154010.0)], step=5)
+    lines = text.splitlines()
+    expect("bench-series: phases with plan/attempt/outcome, windows, # EOF",
+           nph == 3 and nwin == 1 and lines[-1] == "# EOF"
+           and any(l.startswith('bench_phase_info{plan="checkpoint-ab",phase="inline-t1",attempt="2",outcome="ok"') for l in lines)
+           and sum(l.startswith('bench_window_info{window="w1"}') for l in lines) == 3)
+
+    # metrics-bundle.py must still refuse a bundle with a missing window when
+    # the run-wide series block spans it.
+    def bundle(blocks, series):
+        out = Path(td) / f"b{len(blocks)}{len(series)}"; (out / "data").mkdir(parents=True)
+        for name, lo, hi in blocks + series:
+            (out / "data" / name).mkdir()
+            (out / "data" / name / "meta.json").write_text(json.dumps({"minTime": lo, "maxTime": hi}))
+        (out / "data" / "bench-series.json").write_text(json.dumps({"blocks": [n for n, _, _ in series]}))
+        wf = out / "windows"; wf.write_text("w1 1000 61000\nw2 100000 160000\n")
+        return subprocess.run(["python3", f"{root}/scripts/metrics-bundle.py", str(out), str(wf)],
+                              capture_output=True, text=True), out
+    series = [("01SERIES0000000000000000AA", 0, 200000)]
+    r, _ = bundle([("01REAL00000000000000000001", 1000, 61000)], series)
+    expect("metrics-bundle: a missing window is refused even with the series block spanning it",
+           r.returncode != 0 and "REFUSING" in (r.stdout + r.stderr))
+    r, out = bundle([("01REAL00000000000000000001", 1000, 61000), ("01REAL00000000000000000002", 100000, 160000)], series)
+    ok = r.returncode == 0
+    if ok:
+        m = json.loads((out / "manifest.json").read_text())
+        d = json.loads((out / "grafana/dashboards/wasm-bench/bench-overview.json").read_text())
+        names = [x["name"] for x in d["annotations"]["list"]]
+    expect("metrics-bundle: series block recorded; dashboards keep phases and gain windows",
+           ok and m["series_blocks"] == ["01SERIES0000000000000000AA"]
+           and {"autorun phase", "measured windows"} <= set(names))
 sys.exit(1 if bad else 0)
 PY
 
