@@ -676,7 +676,7 @@
       "gridPos": {
         "x": 0,
         "y": 22,
-        "w": 8,
+        "w": 12,
         "h": 8
       },
       "fieldConfig": {
@@ -726,66 +726,6 @@
       }
     },
     {
-      "id": 41,
-      "type": "timeseries",
-      "title": "reactor utilisation by shard, per broker",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 8,
-        "y": 22,
-        "w": 8,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 5,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "percentunit"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "rate(redpanda_cpu_busy_seconds_total[$__rate_interval])",
-          "legendFormat": "{{host}} shard {{shard}}",
-          "refId": "A",
-          "editorMode": "code",
-          "range": true
-        }
-      ],
-      "description": "The one panel here that is deliberately NOT aggregated over shards. Relay and transform work lands on specific shards, and a single saturated shard against 12 idle ones is the shape of this workload's ceiling. num_cores is 13 on r8id.8xlarge, not 32 - SMT is off and cores are reserved for the OS.",
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "mean",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
       "id": 42,
       "type": "timeseries",
       "title": "guest execution latency (one record through the guest)",
@@ -794,9 +734,9 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 16,
+        "x": 12,
         "y": 22,
-        "w": 8,
+        "w": 12,
         "h": 8
       },
       "fieldConfig": {
@@ -868,13 +808,73 @@
       }
     },
     {
+      "id": 41,
+      "type": "status-history",
+      "title": "reactor utilisation by shard (heatmap)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 30,
+        "w": 24,
+        "h": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 85
+          },
+          "color": {
+            "mode": "continuous-BlYlRd"
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "vectorized_reactor_utilization",
+          "legendFormat": "{{host}} s{{shard}}",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "description": "One row per broker shard, coloured by how busy its reactor is (0-100%). Deliberately NOT aggregated over shards: relay and transform work lands on specific shards, and one hot shard among idle ones is the shape of this workload's ceiling. num_cores is 13 on r8id.8xlarge, not 32 - SMT is off and cores are reserved for the OS. Reads the reactor's own utilisation gauge, not rate(redpanda_cpu_busy_seconds_total): that counter steps backwards between scrapes, Prometheus takes every step as a reset, and rate() then reported single shards at 1,400%.",
+      "maxDataPoints": 90,
+      "options": {
+        "showValue": "never",
+        "rowHeight": 0.95,
+        "colWidth": 0.95,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
       "id": 5,
       "type": "row",
       "title": "Module residency",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 30,
+        "y": 52,
         "w": 24,
         "h": 1
       },
@@ -890,7 +890,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 53,
         "w": 8,
         "h": 6
       },
@@ -961,7 +961,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 31,
+        "y": 53,
         "w": 8,
         "h": 6
       },
@@ -1021,7 +1021,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 31,
+        "y": 53,
         "w": 8,
         "h": 6
       },
@@ -1100,7 +1100,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 37,
+        "y": 59,
         "w": 24,
         "h": 1
       },
@@ -1116,7 +1116,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 38,
+        "y": 60,
         "w": 4,
         "h": 6
       },
@@ -1190,7 +1190,7 @@
       },
       "gridPos": {
         "x": 4,
-        "y": 38,
+        "y": 60,
         "w": 7,
         "h": 6
       },
@@ -1272,7 +1272,7 @@
       },
       "gridPos": {
         "x": 11,
-        "y": 38,
+        "y": 60,
         "w": 7,
         "h": 6
       },
@@ -1354,7 +1354,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 38,
+        "y": 60,
         "w": 6,
         "h": 6
       },
@@ -1436,7 +1436,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 44,
+        "y": 66,
         "w": 12,
         "h": 6
       },
@@ -1496,7 +1496,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 44,
+        "y": 66,
         "w": 12,
         "h": 6
       },

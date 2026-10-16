@@ -372,13 +372,73 @@
       }
     },
     {
+      "id": 23,
+      "type": "status-history",
+      "title": "OS CPU utilisation per CPU, $broker (heatmap)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 24,
+        "h": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 85
+          },
+          "color": {
+            "mode": "continuous-BlYlRd"
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "100 * sum by (host, cpu) (rate(node_cpu_seconds_total{role=\"broker\",host=~\"$broker\",mode=~\"user|system|iowait|softirq|irq|nice|steal\"}[$__rate_interval])) / sum by (host, cpu) (rate(node_cpu_seconds_total{role=\"broker\",host=~\"$broker\"}[$__rate_interval]))",
+          "legendFormat": "{{host}} cpu{{cpu}}",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "description": "Every logical CPU of the selected brokers, coloured by OS-level busy time (everything but idle). Shows which CPUs redpanda's reactors occupy, which the OS and interrupts use, and whether a co-located process pinned to spare cores actually ran there. Seastar polls while idle, so a reactor CPU can look busier here than its reactor-utilisation row on the overview: read the two together. Pick brokers with the variable at the top.",
+      "maxDataPoints": 90,
+      "options": {
+        "showValue": "never",
+        "rowHeight": 0.95,
+        "colWidth": 0.95,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
       "id": 3,
       "type": "row",
       "title": "loadgen live metrics (only up while a window is running)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 19,
+        "y": 33,
         "w": 24,
         "h": 1
       },
@@ -394,7 +454,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 20,
+        "y": 34,
         "w": 12,
         "h": 8
       },
@@ -476,7 +536,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 20,
+        "y": 34,
         "w": 12,
         "h": 8
       },
@@ -555,7 +615,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 28,
+        "y": 42,
         "w": 24,
         "h": 1
       },
@@ -571,7 +631,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 29,
+        "y": 43,
         "w": 12,
         "h": 6
       },
@@ -631,7 +691,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 29,
+        "y": 43,
         "w": 12,
         "h": 6
       },
@@ -686,6 +746,34 @@
     "list": []
   },
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "broker",
+        "label": "broker (per-CPU heatmap)",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": {
+          "query": "label_values(node_cpu_seconds_total{role=\"broker\"}, host)",
+          "refId": "broker"
+        },
+        "definition": "label_values(node_cpu_seconds_total{role=\"broker\"}, host)",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": [
+            "broker0"
+          ],
+          "value": [
+            "broker0"
+          ]
+        }
+      }
+    ]
   }
 }

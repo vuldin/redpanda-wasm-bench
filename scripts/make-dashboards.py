@@ -30,10 +30,35 @@ makes a 2s scrape defensible while a run is in flight.
 Usage: scripts/make-dashboards.py [outdir]
 """
 import json
+import re
 import sys
 from pathlib import Path
 
 DS = {"type": "prometheus", "uid": "prometheus"}
+
+# Metrics that are named like counters but must never go through rate(),
+# irate() or increase(). Each one is a value Prometheus sees step backwards,
+# takes as a counter reset, and turns into a spike. Generation fails if a panel
+# uses one; scripts/check-counter-resets.py finds new ones on a live cluster.
+NOT_COUNTERS = {
+    "redpanda_cpu_busy_seconds_total": (
+        "registered as a GAUGE (src/v/redpanda/application.cc, from "
+        "ss::engine().total_busy_time()) and steps backwards between scrapes: "
+        "100+ fake resets per broker in 20 minutes, rate() read 1,400% on one "
+        "shard. Use vectorized_reactor_utilization instead."),
+}
+_RATE_FN = re.compile(r"\b(rate|irate|increase)\s*\(\s*([a-zA-Z_:][a-zA-Z0-9_:]*)")
+
+
+def rate_misuse(d):
+    """[(panel title, metric, why)] for every rate()-family call over a NOT_COUNTERS metric."""
+    out = []
+    for pan in d.get("panels", []):
+        for t in pan.get("targets", []):
+            for _, m in _RATE_FN.findall(t.get("expr", "")):
+                if m in NOT_COUNTERS:
+                    out.append((pan.get("title", "?"), m, NOT_COUNTERS[m]))
+    return out
 
 # Stage histograms, in the order a record actually traverses them. The order is
 # the point: read top to bottom and you are following one record from the
@@ -140,12 +165,37 @@ def stat(pid, title, x, y, w, h, targets, unit=None, desc=None, thresholds=None,
     return p
 
 
+def heatmap(pid, title, x, y, w, h, expr, legend, desc=None, max_points=90):
+    """One row per series, one cell per time bucket, coloured blue (idle) to
+    red (saturated) on a fixed 0-100 scale - the layout that makes "one hot
+    shard among idle ones" or "one busy CPU" visible at a glance, which an
+    overlay of dozens of lines never does. A Grafana status-history panel,
+    with maxDataPoints bounding the cell count so wide time ranges stay
+    legible."""
+    p = panel(pid, title, x, y, w, h, [(expr, legend)], unit="percent",
+              desc=desc, kind="status-history")
+    p["maxDataPoints"] = max_points
+    d = p["fieldConfig"]["defaults"]
+    d["min"], d["max"], d["decimals"] = 0, 100, 0
+    d["color"] = {"mode": "continuous-BlYlRd"}
+    d["custom"] = {"lineWidth": 0, "fillOpacity": 85}
+    p["options"] = {
+        "showValue": "never",
+        "rowHeight": 0.95,
+        "colWidth": 0.95,
+        "legend": {"showLegend": True, "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "single", "sort": "none"},
+    }
+    return p
+
+
 def row(pid, title, y, collapsed=False):
     return {"id": pid, "type": "row", "title": title, "collapsed": collapsed,
             "gridPos": {"x": 0, "y": y, "w": 24, "h": 1}, "panels": []}
 
 
-def dashboard(uid, title, panels, desc, tags, refresh="5s", time_from="now-15m"):
+def dashboard(uid, title, panels, desc, tags, refresh="5s", time_from="now-15m",
+              variables=None):
     return {
         "uid": uid,
         "title": title,
@@ -162,7 +212,7 @@ def dashboard(uid, title, panels, desc, tags, refresh="5s", time_from="now-15m")
         "timepicker": {"refresh_intervals": ["2s", "5s", "10s", "30s", "1m", "5m"]},
         "panels": panels,
         "annotations": {"list": []},
-        "templating": {"list": []},
+        "templating": {"list": variables or []},
     }
 
 
@@ -281,7 +331,7 @@ def overview():
 
     p.append(row(4, "Where the broker CPU is going", y)); y += 1
     p.append(panel(
-        40, "guest CPU by function", 0, y, 8, 8,
+        40, "guest CPU by function", 0, y, 12, 8,
         [("sum by (function_name) (rate(redpanda_wasm_engine_cpu_seconds_total[$__rate_interval]))",
           "{{function_name}}")],
         unit="percentunit", legend_table=True,
@@ -291,18 +341,7 @@ def overview():
               "cost."),
     ))
     p.append(panel(
-        41, "reactor utilisation by shard, per broker", 8, y, 8, 8,
-        [("rate(redpanda_cpu_busy_seconds_total[$__rate_interval])",
-          "{{host}} shard {{shard}}")],
-        unit="percentunit", legend_table=True,
-        desc=("The one panel here that is deliberately NOT aggregated over "
-              "shards. Relay and transform work lands on specific shards, and "
-              "a single saturated shard against 12 idle ones is the shape of "
-              "this workload's ceiling. num_cores is 13 on r8id.8xlarge, not "
-              "32 - SMT is off and cores are reserved for the OS."),
-    ))
-    p.append(panel(
-        42, "guest execution latency (one record through the guest)", 16, y, 8, 8,
+        42, "guest execution latency (one record through the guest)", 12, y, 12, 8,
         [(hist_quantile("redpanda_transform_execution_latency_sec", q), lab)
          for q, lab in QUANTILES],
         unit="s", legend_table=True,
@@ -310,6 +349,20 @@ def overview():
               "any in-broker number is measured against."),
     ))
     y += 8
+    p.append(heatmap(
+        41, "reactor utilisation by shard (heatmap)", 0, y, 24, 22,
+        "vectorized_reactor_utilization", "{{host}} s{{shard}}",
+        desc=("One row per broker shard, coloured by how busy its reactor is "
+              "(0-100%). Deliberately NOT aggregated over shards: relay and "
+              "transform work lands on specific shards, and one hot shard "
+              "among idle ones is the shape of this workload's ceiling. "
+              "num_cores is 13 on r8id.8xlarge, not 32 - SMT is off and cores "
+              "are reserved for the OS. Reads the reactor's own utilisation "
+              "gauge, not rate(redpanda_cpu_busy_seconds_total): that counter "
+              "steps backwards between scrapes, Prometheus takes every step as "
+              "a reset, and rate() then reported single shards at 1,400%."),
+    ))
+    y += 22
 
     p.append(row(5, "Module residency", y)); y += 1
     p.append(panel(
@@ -556,6 +609,22 @@ def health():
         unit="bps", legend_table=True,
     ))
     y += 8
+    p.append(heatmap(
+        23, "OS CPU utilisation per CPU, $broker (heatmap)", 0, y, 24, 14,
+        ('100 * sum by (host, cpu) (rate(node_cpu_seconds_total{role="broker",host=~"$broker",'
+         'mode=~"user|system|iowait|softirq|irq|nice|steal"}[$__rate_interval])) / '
+         'sum by (host, cpu) (rate(node_cpu_seconds_total{role="broker",host=~"$broker"}'
+         '[$__rate_interval]))'),
+        "{{host}} cpu{{cpu}}",
+        desc=("Every logical CPU of the selected brokers, coloured by OS-level "
+              "busy time (everything but idle). Shows which CPUs redpanda's "
+              "reactors occupy, which the OS and interrupts use, and whether a "
+              "co-located process pinned to spare cores actually ran there. "
+              "Seastar polls while idle, so a reactor CPU can look busier here "
+              "than its reactor-utilisation row on the overview: read the two "
+              "together. Pick brokers with the variable at the top."),
+    ))
+    y += 14
 
     p.append(row(3, "loadgen live metrics (only up while a window is running)", y)); y += 1
     p.append(panel(
@@ -610,6 +679,17 @@ def health():
               "(METHODOLOGY 29) and nothing broker-side revealed it, so the "
               "client host panels come first."),
         tags=["wasm-bench"],
+        variables=[{
+            # Which brokers the per-CPU heatmap shows. One by default: a
+            # six-broker cluster is 192 logical CPUs, too many rows to read.
+            "name": "broker", "label": "broker (per-CPU heatmap)", "type": "query",
+            "datasource": DS,
+            "query": {"query": 'label_values(node_cpu_seconds_total{role="broker"}, host)',
+                      "refId": "broker"},
+            "definition": 'label_values(node_cpu_seconds_total{role="broker"}, host)',
+            "refresh": 2, "multi": True, "includeAll": True, "sort": 1,
+            "current": {"selected": True, "text": ["broker0"], "value": ["broker0"]},
+        }],
     )
 
 
@@ -626,6 +706,11 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
     for name, fn in DASHBOARDS.items():
         d = fn()
+        bad = rate_misuse(d)
+        if bad:
+            for title, m, why in bad:
+                print(f"REFUSED {name} / {title}: rate() over {m}\n    {why}", file=sys.stderr)
+            sys.exit(1)
         (outdir / name).write_text(json.dumps(d, indent=2) + "\n")
         n = sum(1 for x in d["panels"] if x["type"] != "row")
         print(f"  {name:24s} {d['uid']:28s} {n} panels")
