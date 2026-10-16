@@ -9,6 +9,8 @@
 #   topics:   they keep everything and read nothing foreign
 #   keyed:    they keep all their own events, plus whatever collides
 #   egress per event (broker fetch bytes): firehose > 2x topics
+#   no leadership changes in any level, and the leader balancer the runner
+#   paused is back on afterwards
 #
 #   REDPANDA_BIN=... WASM_DIR=... bench/local-gateways.sh
 #
@@ -87,6 +89,13 @@ if ! kill -0 "$(cat "$W/pid")" 2>/dev/null || grep -qE "Invalid instruction|Segm
   exit 1
 fi
 echo "  ok    the broker survived the series, no out_of_range"
+# The runner pauses the leader balancer for the sweep; its exit trap restores it.
+balancer="$("$W/rpk" cluster config get enable_leader_balancer 2>/dev/null | tr -d '[:space:]')"
+if [ "$balancer" != true ]; then
+  echo "  FAIL  enable_leader_balancer is '$balancer' after the run, want true (restored)"
+  exit 1
+fi
+echo "  ok    the leader balancer is back on after the run"
 
 python3 - "$W/results/summary.txt" <<'PY' && rc=0
 import sys
@@ -97,7 +106,7 @@ for line in open(sys.argv[1]):
     f = line.split()
     rows[f[0]] = dict(zip(["level", "arm", "gateways", "produced", "records", "bytes", "kept", "kept_fraction",
                            "bytes_per_gateway", "egress_bytes", "egress_per_event", "cpu_s", "cpu_us_per_kept",
-                           "p50_us", "p99_us", "p999_us", "clean"], f))
+                           "p50_us", "p99_us", "p999_us", "clean", "leader_changes"], f))
 bad = []
 def need(ok, what):
     print(("  ok    " if ok else "  FAIL  ") + what)
@@ -105,6 +114,7 @@ def need(ok, what):
 for lvl in ("firehose-4", "topics-4", "keyed-4", "keyed-8"):
     r = rows.get(lvl)
     need(r is not None and r["clean"] == "true", f"{lvl}: every event reached its gateway once")
+    need(r is not None and r.get("leader_changes") == "0", f"{lvl}: no leadership changes during the level")
 if len(bad) == 0:
     fh, tp, k4 = rows["firehose-4"], rows["topics-4"], rows["keyed-4"]
     need(abs(float(fh["kept_fraction"]) - 0.25) < 0.01, f"firehose keeps 1/4 (kept_fraction {fh['kept_fraction']})")

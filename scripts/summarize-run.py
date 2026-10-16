@@ -174,9 +174,11 @@ if gw:
       "(vectorized_kafka_handler_sent_bytes_total{handler=\"fetch\"}) per produced "
       "event; kept is the fraction of what gateways received that was theirs; "
       "CPU is the gateway processes' own. clean = every event reached its gateway "
-      "exactly once.\n")
+      "exactly once. leader_changes = raft leadership changes during the level "
+      "(should be 0: the runner pauses the leader balancer; summaries without the "
+      "column predate that).\n")
 cols = ["level", "produced", "kept_fraction", "bytes_per_gateway", "egress_per_event",
-        "cpu_us_per_kept", "p50_us", "p99_us", "p999_us", "clean"]
+        "cpu_us_per_kept", "p50_us", "p99_us", "p999_us", "clean", "leader_changes"]
 for s in gw:
     txt = read(s)
     hdr = next((l.split() for l in txt.splitlines() if l.startswith("level ")), None)

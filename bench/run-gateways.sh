@@ -24,6 +24,13 @@
 # latency: a demux sends each event to one gateway, so total output volume
 # equals input volume.
 #
+# The leader balancer is paused for the sweep, and every level records how many
+# raft leadership changes the brokers saw during its window (leader_changes).
+# A move of the events partition stalls the producer and the firehose readers
+# for ~5s and restarts the demux on the new leader, which replays from its last
+# offset commit: on 2026-10-16 that alone put a ~4.5s p99 on 7 of 10 levels and
+# duplicates on 3 of them.
+#
 # Runs on client0 from /opt/wasm-bench, through `wb run gateways KEY=VALUE...`.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,12 +83,26 @@ delete_level() {
     rpkc topic delete "$t" >/dev/null 2>&1 || true
   done
 }
+# Raft leadership changes of this run's own topics, summed over every broker so
+# far. Only these: the first idempotent produce of a run creates and elects the
+# internal id_allocator partition, which is no move.
+leader_changes() {
+  local total=0 u v
+  for u in ${ADMIN_URLS//,/ }; do
+    v="$(curl -sf --max-time 10 "$u/metrics" | awk -v t="topic=\"(gwevents|gw|gwk)-$RUN_ID" '/^vectorized_raft_leadership_changes\{/ && $0 ~ t {s += $NF} END {printf "%.0f", s}')"
+    total=$(( total + ${v:-0} ))
+  done
+  echo "$total"
+}
+
 trap 'delete_level; cfg_restore_all' EXIT
+# Restored by cfg_restore_all on exit.
+cfg_set enable_leader_balancer false
 
 {
   echo "# fingerprint: MODE=gateways RF=$RF write.caching=$WRITE_CACHING"
   echo "# rate=$RATE size=$SIZE duration=$DURATION events_partitions=$EVENTS_PARTITIONS acks=$ACKS arms=$ARMS gateway_levels=$GATEWAY_LEVELS keyed_extra=$KEYED_EXTRA_LEVELS keyed_partitions_per_gateway=$KEYED_PARTITIONS_PER_GATEWAY guest_sha256=$(sha256sum "$WASM" 2>/dev/null | cut -c1-64)"
-  echo "level arm gateways produced records bytes kept kept_fraction bytes_per_gateway egress_bytes egress_per_event cpu_s cpu_us_per_kept p50_us p99_us p999_us clean"
+  echo "level arm gateways produced records bytes kept kept_fraction bytes_per_gateway egress_bytes egress_per_event cpu_s cpu_us_per_kept p50_us p99_us p999_us clean leader_changes"
 } > "$SUMMARY"
 
 d_s="$(dur_s "$DURATION")"
@@ -130,7 +151,7 @@ for arm in $ARMS; do
     fi
     sleep "$SETTLE"
 
-    e0="$(fetch_bytes)"
+    e0="$(fetch_bytes)"; l0="$(leader_changes)"
     ./gateways consume -brokers "$BROKERS" -arm "$arm" -gateways "$gw_n" -source "$source" \
       -duration "$(( d_s + 120 ))s" -idle 15s -warmup 5s -out "$RESULTS_DIR/$tag.consume.json" \
       > "$RESULTS_DIR/$tag.consume.log" 2>&1 &
@@ -140,15 +161,15 @@ for arm in $ARMS; do
       -duration "$DURATION" -acks "$ACKS" -out "$RESULTS_DIR/$tag.produce.json" \
       > "$RESULTS_DIR/$tag.produce.log" 2>&1 || echo "WARN: producer exited non-zero (see $tag.produce.log)"
     wait "$cpid" || echo "WARN: consumer exited non-zero (see $tag.consume.log)"
-    e1="$(fetch_bytes)"
+    e1="$(fetch_bytes)"; l1="$(leader_changes)"
 
-    python3 - "$RESULTS_DIR/$tag.produce.json" "$RESULTS_DIR/$tag.consume.json" "$tag" "$arm" "$gw_n" "$(( e1 - e0 ))" >> "$SUMMARY" <<'PY'
+    python3 - "$RESULTS_DIR/$tag.produce.json" "$RESULTS_DIR/$tag.consume.json" "$tag" "$arm" "$gw_n" "$(( e1 - e0 ))" "$(( l1 - l0 ))" >> "$SUMMARY" <<'PY'
 import json, sys
-pf, cf, tag, arm, n, egress = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5]), int(sys.argv[6])
+pf, cf, tag, arm, n, egress, moves = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5]), int(sys.argv[6]), sys.argv[7]
 try:
     p, c = json.load(open(pf)), json.load(open(cf))
 except (OSError, ValueError) as e:
-    print(f"{tag} {arm} {n} - - - - - - - - - - - - - false")
+    print(f"{tag} {arm} {n} - - - - - - - - - - - - - false {moves}")
     sys.exit(0)
 lat = c.get("latency_micros") or {}
 produced = p["acked"]
@@ -159,9 +180,10 @@ print(" ".join(str(x) for x in [
     f"{c['bytes_per_gateway']:.0f}", egress, f"{egress / produced:.1f}" if produced else "-",
     f"{c['cpu_seconds']:.2f}", f"{c['cpu_micros_per_kept_event']:.2f}",
     f"{lat.get('p50', 0):.0f}", f"{lat.get('p99', 0):.0f}", f"{lat.get('p999', 0):.0f}",
-    str(clean).lower()]))
+    str(clean).lower(), moves]))
 PY
     tail -1 "$SUMMARY"
+    [ "$(( l1 - l0 ))" -gt 0 ] && echo "WARN: $(( l1 - l0 )) leadership change(s) during $tag - its latency and clean columns include them"
     delete_level
   done
 done
