@@ -432,6 +432,15 @@ it, so you can regenerate the tables (RESULTS.md in that plan's run directory).
 
 ## Gotchas that have cost real runs
 
+- Never redeploy a transform under a name it had before with MORE output
+  topics on a broker without the fix (josh-416, broker fork after
+  `eae35a38ab`). The broker cached the first deployment's per-output metrics
+  and the new processor indexed past them: the transform fails with
+  `std::out_of_range`, or the broker dies with SIGILL (one did on 2026-10-16,
+  three levels into `gateways.plan`). `run-gateways.sh` gives every level its
+  own transform name, and `bench/local-gateways.sh` fails if the broker does
+  not survive the series.
+
 - `wb run` returns the remote runner's exit code, so a failed phase is
   retried and recorded as failed - but a level can still be unclean with rc 0.
   Read RESULTS.md's clean column, not only the phase outcome.

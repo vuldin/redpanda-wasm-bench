@@ -67,9 +67,11 @@ fetch_bytes() {
 }
 
 delete_level() {
-  rpkc transform delete "gwdemux-$RUN_ID" --no-confirm >/dev/null 2>&1 || true
-  sleep 2
   local t
+  for t in $(rpkc transform list 2>/dev/null | awk -v r="$RUN_ID" 'NR>1 && $1 ~ "^gwdemux-" r {print $1}'); do
+    rpkc transform delete "$t" --no-confirm >/dev/null 2>&1 || true
+  done
+  sleep 2
   for t in $(rpkc topic list 2>/dev/null | awk -v r="$RUN_ID" 'NR>1 && ($1 ~ "^gwevents-" r || $1 ~ "^gw-" r "-" || $1 ~ "^gwk-" r) {print $1}'); do
     rpkc topic delete "$t" >/dev/null 2>&1 || true
   done
@@ -94,6 +96,12 @@ for arm in $ARMS; do
       continue
     fi
     tag="$arm-$gw_n"
+    # A transform name per level, never reused: redeploying a name with MORE
+    # output topics hits a broker bug (the per-name metrics probe is cached
+    # and keeps the first deployment's output count) that crashed a broker
+    # with SIGILL on 2026-10-16, or makes the transform fail with
+    # std::out_of_range (josh-416).
+    tname="gwdemux-$RUN_ID-$tag"
     echo "############ $tag : arm=$arm gateways=$gw_n rate=$RATE size=$SIZE ############"
     delete_level
     events="gwevents-$RUN_ID"
@@ -107,18 +115,18 @@ for arm in $ARMS; do
           rpkc topic create "gw-$RUN_ID-$i" -p 1 -r "$RF" -c "write.caching=$WRITE_CACHING" >/dev/null || { echo "FAIL: create gw-$RUN_ID-$i"; exit 1; }
           outs="${outs:+$outs,}gw-$RUN_ID-$i"
         done
-        bash "$BIN/deploy-transform.sh" "$ADMIN_URLS" "gwdemux-$RUN_ID" "$events" "$outs" "$WASM" \
+        bash "$BIN/deploy-transform.sh" "$ADMIN_URLS" "$tname" "$events" "$outs" "$WASM" \
           --env MODE=topics --env "TOPIC_PREFIX=gw-$RUN_ID-" || { echo "FAIL: deploy gateway-demux (topics)"; exit 1; }
         source="gw-$RUN_ID-" ;;
       keyed)
         p=$(( gw_n * KEYED_PARTITIONS_PER_GATEWAY ))
         rpkc topic create "gwk-$RUN_ID" -p "$p" -r "$RF" -c "write.caching=$WRITE_CACHING" >/dev/null || { echo "FAIL: create gwk-$RUN_ID"; exit 1; }
-        bash "$BIN/deploy-transform.sh" "$ADMIN_URLS" "gwdemux-$RUN_ID" "$events" "gwk-$RUN_ID" "$WASM" \
+        bash "$BIN/deploy-transform.sh" "$ADMIN_URLS" "$tname" "$events" "gwk-$RUN_ID" "$WASM" \
           --env MODE=keyed || { echo "FAIL: deploy gateway-demux (keyed)"; exit 1; }
         source="gwk-$RUN_ID" ;;
     esac
     if [ "$arm" != firehose ]; then
-      wait_for_transforms_running "gwdemux-$RUN_ID" || { echo "FAIL: gateway-demux never ran"; exit 1; }
+      wait_for_transforms_running "$tname" || { echo "FAIL: gateway-demux never ran"; exit 1; }
     fi
     sleep "$SETTLE"
 

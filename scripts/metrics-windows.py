@@ -164,6 +164,18 @@ def main():
 
     root = Path(a.results)
     wins, skipped = [], []
+    # cmd/gateways consumer reports carry their own absolute start/end, so
+    # they need neither run_id arithmetic nor the loadgen target (which a
+    # gateways run never starts). Kept apart from the loadgen windows so the
+    # Prometheus replacement below cannot drop them.
+    gw_wins = []
+    for p in sorted(root.rglob("*.consume.json")):
+        try:
+            d = json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if "arm" in d and d.get("start_unix_ms") and d.get("end_unix_ms"):
+            gw_wins.append((p.name[:-len(".consume.json")], d["start_unix_ms"] / 1000, d["end_unix_ms"] / 1000))
     for p in sorted(root.rglob("*.json")):
         try:
             d = json.loads(p.read_text())
@@ -202,6 +214,8 @@ def main():
                   "is wrong by however long setup took (about 150s for a "
                   "500-consumer fan-out level). The exported windows may miss "
                   "the traffic entirely.", file=sys.stderr)
+
+    wins += gw_wins
 
     if skipped:
         print(f"metrics-windows: {len(skipped)} report(s) had no usable "

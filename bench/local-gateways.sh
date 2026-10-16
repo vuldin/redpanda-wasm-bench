@@ -79,6 +79,14 @@ echo "--- bench/run-gateways.sh, scaled down"
     BIN="$W/tools" RF=1 RATE=2000 DURATION=8s SETTLE=2 GATEWAY_LEVELS=4 KEYED_EXTRA_LEVELS=8 \
     RESULTS_DIR="$W/results" bash "$HERE/run-gateways.sh" ) > "$W/run.log" 2>&1
 tail -8 "$W/run.log" | sed 's/^/  /'
+# The broker must have survived the whole series: on 2026-10-16 a redeploy of
+# one transform name with more output topics killed a broker (josh-416).
+if ! kill -0 "$(cat "$W/pid")" 2>/dev/null || grep -qE "Invalid instruction|Segmentation fault|out_of_range" "$W/broker.log"; then
+  echo "  FAIL  the broker died or a transform hit out_of_range (see $W/broker.log)"
+  grep -m3 -E "Invalid instruction|Segmentation fault|out_of_range" "$W/broker.log" | sed 's/^/    /'
+  exit 1
+fi
+echo "  ok    the broker survived the series, no out_of_range"
 
 python3 - "$W/results/summary.txt" <<'PY' && rc=0
 import sys
