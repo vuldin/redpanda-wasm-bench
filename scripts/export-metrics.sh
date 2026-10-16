@@ -250,7 +250,7 @@ cat <<EOM
   $OUT
 
   View it with no cluster:
-    cd $OUT && docker compose up
+    cd $OUT && docker compose up -d     (stop: docker compose down)
     open http://localhost:3000
 
   Check that every panel returns data:

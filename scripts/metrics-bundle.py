@@ -85,7 +85,9 @@ scrape_configs: []
 
     # ------------------------------------------------------------------- compose
     (out / "docker-compose.yml").write_text(f"""\
-# Bring the recording up:  docker compose up
+# Bring the recording up:  docker compose up -d   (stop: docker compose down)
+# Without -d, `up` stays attached to the containers' logs and looks idle - it is
+# not hung. If they were already running it only attaches.
 # Then open http://localhost:3000 - anonymous viewer, no login.
 #
 # Versions are pinned to the ones that produced ./data. TSDB format
@@ -343,10 +345,11 @@ The scraped metrics for one benchmark run's measured windows, with the
 dashboards that read them. No cluster, no Redpanda, nothing to provision.
 
 ```bash
-docker compose up
+docker compose up -d      # stop it later with: docker compose down
 ```
 
-Then open <http://localhost:3000>. It lands on the bench overview with the
+Then open <http://localhost:3000>. (Without `-d`, `up` stays attached to the
+containers' quiet logs and looks hung while it is serving.) It lands on the bench overview with the
 recorded range already selected. Anonymous viewer access is on; `admin` /
 `wasmbench` if you want to edit.
 
