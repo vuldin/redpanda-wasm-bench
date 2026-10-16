@@ -11,8 +11,8 @@ attempt to each wasm-bench dashboard. A phase still running is drawn up to
 now. Re-running updates this run's annotations in place - creates new phases,
 extends or closes the running one, removes only what no longer exists - so a
 dashboard refreshing mid-update never sees a partial set. --follow does that
-every N seconds (default 10) until the run's DONE file appears, so a live
-run's current phase is shaded while it runs.
+every N seconds (default 10) until the run's DONE file appears or its
+teardown has run, so a live run's current phase is shaded while it runs.
 
   scripts/annotate-phases.py <run-dir> [grafana-url] [--follow [seconds]]
 
@@ -98,6 +98,11 @@ def main():
             print(f"annotate-phases: {e}; retrying in {follow}s", file=sys.stderr)
         if (run_dir / "DONE").exists():
             return draw(args)
+        # Teardown destroys the monitoring host with Grafana on it; after
+        # that every call just times out.
+        if (run_dir / "TEARDOWN-RESULT").exists():
+            print("annotate-phases: the run tore down its cluster - nothing left to update")
+            return 0
         time.sleep(follow)
 
 
