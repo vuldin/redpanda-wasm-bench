@@ -52,7 +52,9 @@ A few things worth knowing before you read anything off these:
   legibility rather than defended as methodology.
 - The relay stage panels need `relay_stage_metrics_enabled`, which is off by
   default because each stage costs a clock read on the relay hot path.
-  `wb reproduce` turns it on for the in-broker arm.
+  `wb reproduce` turns it on for the in-broker arm. Leave it off
+  (`RELAY_STAGE_METRICS=false`) when the quantity under test is per-record CPU
+  cost: several clock reads per record are a measurable share of that work.
 - The `loadgen` scrape target is down between runs. loadgen is a per-window
   batch process, not a service, so that's correct rather than broken.
 - `wb monitor check` is the one to run if a panel looks empty. It asks

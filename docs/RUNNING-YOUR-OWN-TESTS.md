@@ -158,8 +158,17 @@ refer to `$RUN_DIR`.
 
 Credentials: the run exports your role credentials once at start, so it
 survives the SSO token expiring; the role credentials' own expiry (often 8-12h
-after login) is the real limit, and `start` refuses if they will not outlive
-the deadline. Log in fresh before a long plan.
+after login) is the real limit, and `start` refuses a plan they cannot cover.
+A fresh `aws sso login` does not always renew them: the AWS CLI keeps serving
+cached role credentials from `~/.aws/cli/cache` until those expire. Check
+before starting:
+
+```bash
+aws configure export-credentials --format env | grep EXPIRATION   # add --profile <your-profile> if you use one
+```
+
+If the expiry did not move after a login, delete the cached role-credentials
+file in `~/.aws/cli/cache` and check again; the next call fetches new ones.
 
 ## Watching a run, and keeping the metrics
 
@@ -248,33 +257,74 @@ nothing; exclude it.
   come from something in the records. `rust/src/bin/book-matcher.rs` shows one
   way (per-producer sequence lanes) and logs `STATE restored|gap|stats` lines
   to the transform log topic, which the durability runner collects.
+- Size the region to what is in use. Each checkpoint (every 5s) copies the
+  whole registered region, not just what you wrote, and replicates it through
+  the input partition's raft group; restore scales the same way. Register only
+  the bytes in use and register again as the state grows - a new registration
+  replaces the old one. book-matcher's `SNAPSHOT_MODE=live` does this and keeps
+  the region current after every record, so nothing is ever re-serialised. The
+  region must fit within `data_transforms_state_snapshot_max_size` (4 MiB by
+  default, 64 KiB-64 MiB; plans raise it with `-e transform_snapshot_max_size`)
+  and the guest's memory limit (`-e transform_memory_limit`); both are applied
+  at deploy and need the broker restart the deploy does.
+- No snapshot means an empty restart, not a replay. Without a restored region,
+  a restarted transform resumes from its committed offset with nothing in it.
+  Rebuilding state from the topic takes a fresh deploy with
+  `scripts/deploy-transform.sh --from-start`, which is what `REPLAY=1` times.
+- The in-broker relay never leaves the node: each input partition and its
+  relay consumer's partition must be led from the same broker, or the relay
+  delivers nothing (the e2 pre-check reports PRECHECK-FAILED). With more
+  brokers than RF, two single-partition topics can get replica sets that share
+  no broker; the harness then moves replicas before transferring leadership
+  (`colocate_leadership` in `bench/lib-cluster.sh`). A runner of your own
+  should do the same, or create the output topic with the input topic's
+  replica assignment.
 
-## What we know (2026-10-15)
+## What we know so far
 
-From the 2026-10-15 runs (results are not checked in; the internal write-up
-has the full tables):
+Results are not checked in; each finding below names the plan that produces
+it, so you can regenerate the tables (RESULTS.md in that plan's run directory).
 
 - The depth-tolerant book holds 10,000 resting orders per side at the same
   latency as an empty book (~500us p50, ~1ms p99.9 at 30k orders/sec); the
-  reference sorted-Vec book saturates by 1,000.
+  reference sorted-Vec book saturates by 1,000 (`book-durability.plan`).
+- On one cluster with the same book and order flow, in-broker execution has
+  the lowest p50 and the lowest p99.99 of every deployment at fan-out 1-50:
+  ~440-520us and 1.6-3.2ms, against 1.3-3.0ms and 4.0-7.8ms for an external
+  client and 0.9-2.3ms and 2.7-9.6ms co-located on the broker host. Most of
+  the in-broker tail is the client's `acks=all` produce; the relay to
+  in-broker consumers adds 0.4-0.6ms at p99.99, halved by
+  `data_transforms_scheduling_group_shares=1000` (`state-and-jitter.plan`).
+- One partition's clean ceiling with a 1,000-deep book is 60-90k orders/sec
+  (`state-and-jitter.plan`, rate phase).
 - With the broker default (graceful transfer off), planned moves lose state
-  like crashes: the last 1-3s of acknowledged orders in 7 of 8 trials. With
-  `data_transforms_graceful_transfer_timeout_ms=5000`, no acknowledged order
-  was lost in 13 real moves; a residual 0.07-0.5s gap remains because the
-  guest re-serialises its region every 500ms and nothing tells it the broker is
-  about to checkpoint.
-- A broker kill loses the last ~3.5-4s (the snapshot and the committed offset
-  are written independently); failover is 6.5-10s. Those kills ran with the
-  victim restarted by systemd within seconds (what is now `KILL_MODE=systemd`);
-  leadership still moved to a surviving replica in every six-broker trial.
-- Snapshot restore is 1-14ms; replaying ~800k records to rebuild the same
-  book is ~10s.
-- Whole-region snapshots every 500ms push p99.9 to 10-18ms at depth 1k-10k.
+  like crashes. With `data_transforms_graceful_transfer_timeout_ms=5000` and
+  book-matcher's live region, every move restored every acknowledged order
+  (`book-durability.plan`, `state-and-jitter.plan`).
+- A broker kill can lose the last few seconds: the snapshot (5s) and the
+  committed offset (3s) are independent, so the loss depends on where the
+  kill lands - some trials lose nothing, others the last 1-3s. With the dead
+  broker held down, a transform runs again on a surviving replica in ~1s
+  (`production-shape.plan`, `KILL_MODE=down`).
+- With the live region, state costs nothing at depth 1,000 (p99.9 ~1ms, as
+  with no state); at 10,000 the broker's checkpoint still adds ~3ms at p99.9
+  (`state-and-jitter.plan`; `checkpoint-ab.plan` measures the broker change
+  aimed at that).
 
 ## Gotchas that have cost real runs
 
-- `wb run e2` exits 0 even when the remote runner failed. Check the phase
-  log and the run's `summary.txt`, not the phase outcome alone.
+- `wb run` returns the remote runner's exit code, so a failed phase is
+  retried and recorded as failed - but a level can still be unclean with rc 0.
+  Read RESULTS.md's clean column, not only the phase outcome.
+- Don't rebuild the broker in `REDPANDA_SRC` while a run is in progress. Every
+  `wb run` phase checks that each broker runs exactly your local build (the
+  binary gate) and refuses to measure otherwise, so a mid-run rebuild fails
+  every later phase. Build in a separate checkout (`git worktree add`) or wait.
+- A p99.99 needs at least 100,000 samples; RESULTS.md prints n/a below that.
+  30-second windows only support p99.9, so compare tails only between arms
+  measured with windows of similar length.
+- Durability trials are bimodal (see "What we know"): run several and report
+  the distribution, never a single trial.
 - Admin API calls that act on a partition must reach its leader:
   `transfer_leadership` sent elsewhere without following redirects silently
   does nothing. Deploys can return 503 `Leader not available` from a
@@ -288,3 +338,17 @@ has the full tables):
   scraped metrics. autorun exports first; by hand, run
   `wb monitor export <results-dir>` before `wb teardown`.
 - Read [METHODOLOGY.md](METHODOLOGY.md) before quoting any number.
+
+## Changing the bench
+
+- Every fix or new test lands in the repo as a script, plan or gate step, with
+  the docs updated in the same change. One-off scripts and hand-written plans
+  under `results/` do not count.
+- Nothing committed may assume one machine: no home paths, key names, AWS
+  profiles or account ids. Settings go through `scripts/lib-env.sh` and
+  `wb.local.env`. Check a change from a fresh clone with no `wb.local.env`
+  (for example `env -i HOME=<empty dir> PATH=$PATH scripts/wb doctor`).
+- Never commit built binaries, and keep third-party and customer names out of
+  files and commit messages.
+- New or changed plan: run `bench/local-plan-smoke.sh plans/<plan>.plan`
+  before paying for a cluster, then the offline gate.

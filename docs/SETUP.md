@@ -103,8 +103,10 @@ machine. Capacity for them isn't guaranteed in any region, so
 | `EXTERNAL_LADDER` | `1 10 50 500` | external consumer counts for the traditional arm |
 | `DURATION` / `WARMUP` / `DRAIN` | `30s` / `10s` / `30s` | |
 | `broker_placement_group` | `true` | brokers in a cluster placement group, so rack distance stops being a variable in the produce leg. Single-AZ only, and capacity is harder to find - the probe asks inside a throwaway group so a refusal is still fast |
-| `REGIONS` | `us-east-1 us-east-2 us-west-2 eu-west-1` | tried in order. `us-east-1` first because that's where the published numbers came from, and region is part of a result's fingerprint |
+| `REGIONS` | `us-east-1 us-east-2 us-west-2 eu-west-1` | tried in order. `us-east-1` first because that's where the published numbers came from, and region is part of a result's fingerprint. The six-broker plans export `us-west-2` first, where every six-broker series ran |
 | `GROUPS_PER_INSTANCE` | `84` | measured safe, see `scripts/size-clients.sh` for why not 99 |
+| `OVERLAY_MAX_AGE_DAYS` | `1` | generated `terraform/region.auto.tfvars` / `clients.auto.tfvars` older than this are refused, so a run never inherits an old region or fleet size. autorun regenerates the region for every plan; by hand, re-run `scripts/select-region.sh` / `scripts/size-clients.sh`, or set `ALLOW_STALE_OVERLAYS=1` to reuse them on purpose |
+| `relay_enabled`, `relay_port` | off, `9093` | the external TCP relay (not the in-broker one): when enabled it listens on `relay_port` + shard id, one port per shard, so open the whole range to reach it from outside the cluster. In-broker relay consumers need neither |
 
 ### Region selection
 

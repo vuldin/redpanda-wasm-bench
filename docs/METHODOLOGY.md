@@ -48,6 +48,13 @@ are history rather than instructions. Each one says which it is.
   `GET /v1/partitions/{ns}/{topic}/{partition}`'s `.replicas[].core`.
 - Any number from a heavy-contention scenario comes from at least two or three
   trials rather than one (#12). Report the range.
+- Arms you compare ran on the same cluster, in the same run. Two clusters
+  built from the same tfvars have measured 40-70% apart on per-invocation
+  guest CPU with identical code, rate and build, so a difference smaller than
+  that between runs on different clusters is not evidence. That is why plans
+  interleave the arms they compare.
+- A p99.99 comes from at least 100,000 samples (RESULTS.md prints n/a below
+  that), and tails are only compared between windows of similar length.
 - If the run changed any `needs_restart` property, so the `data_transforms_*`
   sizing ones, `relay_enabled` or `relay_port`, the cluster was restarted
   afterwards and `rpk cluster config status` shows no pending restart (#13).
@@ -131,13 +138,13 @@ of every double-digit millisecond number this benchmark ever produced.
 Set `kgo.ProducerLinger(0)`. `loadgen` defaults `-linger-ms` to 0 and records
 it in the fingerprint.
 
-One thing to know before you copy that default into a throughput test: linger
-0 is correct for latency and wrong for throughput at RF>1. With linger 0 every
-produce is a tiny request, and at RF=3 each one awaits a quorum
-acknowledgement, so client throughput collapses to roughly one request per
-quorum round trip. Set 1-5ms to measure the broker instead, and accept that
-the produce stage then reports a batching artifact rather than a per-record
-latency.
+Keep linger 0 for throughput tests as well, and raise offered load with
+`PRODUCERS` instead. A client linger adds roughly its own length to every
+produce and also groups records within one transform invocation. An earlier
+version of this entry said linger 0 caps throughput at RF>1 and recommended
+1-5ms; that came from a harness defect (topics deleted under a live run by an
+orphaned runner's cleanup) and has not been reproduced: rate sweeps at
+linger 0 with two producers run clean well past 60,000 orders/sec at RF=3.
 
 ### 6. Per-record fsync
 
@@ -701,6 +708,10 @@ over HTTP. Enabling the `smp` metrics needs a Redpanda code change rather than
 a config or scrape change. Before building a plan on a seastar metric, check
 for `metric_disabled` at its registration site.
 
+
+Some histograms are registered `skip_when_empty`, `vectorized_reactor_stalls`
+among them. For those, an entry in `missing_families` means zero events in the
+window, not that the metric is unavailable.
 ### 25. `git revert` of a commit that bundled several changes removes all of them
 
 A change didn't boot, so it was reverted. The revert didn't compile:

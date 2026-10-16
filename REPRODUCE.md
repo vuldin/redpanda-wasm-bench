@@ -218,8 +218,11 @@ Work through these in order:
 
 1. Is every row `clean:true` with pacing held? An unclean row isn't a slow
    result, it's no result.
-2. Same module? Run `make checksum` in the clients repo. These runs used
-   `94c3d0177a754b9f0c1df80c10dea298`.
+2. Same module? Run `make verify-published` in the clients repo (`make
+   restore-published` puts the published modules back in `bin/`). These runs
+   used `94c3d0177a754b9f0c1df80c10dea298`. A rebuild from current source does
+   not reproduce the published module; never regenerate a file under
+   `rust/testdata/published-modules/` - add a new one under its own md5.
 3. Same instance types and region? See above.
 4. Enough client instances? `size-clients.sh` derives this. Running the
    500-consumer level on fewer than 8 clients measures your load generator.

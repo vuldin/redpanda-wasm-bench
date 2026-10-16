@@ -38,6 +38,15 @@ REGIONS="us-east-1 us-east-2 us-west-2" ./scripts/select-region.sh
 SKIP_PROVISION=true ./scripts/wb reproduce
 ```
 
+## Changing a cluster property
+
+Use `scripts/wb set <property> <value>`, not `rpk cluster config set`. For a
+`needs_restart` property it rolls the brokers and confirms the value is live;
+rpk only updates the desired config, and `rpk cluster config get` then echoes
+a value that is not in effect (see METHODOLOGY #13). Runners that change
+properties for one sweep (`TRANSFORM_SHARES`, `CHECKPOINT_INLINE`,
+`RELAY_STAGE_METRICS`) verify the read-back and restore the old value.
+
 ## Teardown
 
 ```bash

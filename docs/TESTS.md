@@ -258,6 +258,13 @@ client2 onward carry background consumer groups evenly sharded.
 The measured consumer is loadgen itself, so total consumers of the fills topic
 is 1 plus the background groups.
 
+The co-located placements (`PLACEMENTS=loopback`, `loopback-isolated`) run the
+matcher on a broker host. The brokers listen only on their private address,
+so a client there gets connection refused on 127.0.0.1:9092; it dials the
+broker's own private IP instead, which Linux routes over `lo` without touching
+the NIC. Rebinding the broker to 0.0.0.0 would change the broker for one arm
+only.
+
 ## Invocation
 
 ```bash
@@ -265,7 +272,7 @@ cd redpanda-wasm-bench             # wherever you cloned it
 ./scripts/wb doctor               # always first
 
 # rate sweep at production replication settings
-./scripts/wb run e2 MODE=rate RF=3 WRITE_CACHING=true FLUSH_MS=100 LINGER_MS=2 \
+./scripts/wb run e2 MODE=rate RF=3 WRITE_CACHING=true FLUSH_MS=100 LINGER_MS=0 PRODUCERS=2 \
   RATE_LEVELS="1000 5000 10000 20000" DURATION=30s WARMUP=10s DRAIN=40s
 
 # strict per-level isolation
