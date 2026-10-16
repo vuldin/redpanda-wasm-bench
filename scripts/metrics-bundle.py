@@ -203,8 +203,11 @@ providers:
             "enable": False,
             "hide": False,
             "iconColor": "rgba(255, 96, 96, 0.2)",
-            "expr": "max by (window) (bench_window_info)",
-            "target": {"refId": "Windows", "expr": "max by (window) (bench_window_info)",
+            # max_over_time, not a plain selector: imported series carry no
+            # staleness markers, so a plain one runs on for the 5m lookback
+            # (see make-dashboards.py PHASE_FRESH).
+            "expr": "max by (window) (max_over_time(bench_window_info[11s]))",
+            "target": {"refId": "Windows", "expr": "max by (window) (max_over_time(bench_window_info[11s]))",
                        "interval": "5s"},
             "step": "5s",
             "titleFormat": "{{window}}",

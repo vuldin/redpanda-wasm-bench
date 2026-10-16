@@ -189,7 +189,10 @@ bench_phase_info{plan="checkpoint-ab",phase="inline-t1",attempt="1"} 1
 to `/var/lib/node_exporter/textfile/bench_phase.prom` on the monitoring host,
 and removes it when the phase ends. node_exporter's textfile collector serves
 it, Prometheus scrapes it with the monitoring host's node target, and the
-dashboards query `max by (plan, phase, attempt) (bench_phase_info)`. Because it
+dashboards query `max by (plan, phase, attempt) (max_over_time(bench_phase_info[11s]))`.
+The short window matters in a bundle: series imported into one carry no
+staleness markers, so a plain selector would keep each phase "running" for
+Prometheus's 5-minute lookback after it ended, overlapping the next. Because it
 is scraped like any other metric, the phase boundaries are in an exported
 bundle too (`export-metrics.sh` matches `bench_.*` in every scope). The
 marker is best effort: it never fails a phase, and a cluster deployed before

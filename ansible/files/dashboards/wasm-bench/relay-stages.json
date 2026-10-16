@@ -840,10 +840,10 @@
         "enable": true,
         "hide": false,
         "iconColor": "rgba(130, 110, 220, 0.6)",
-        "expr": "max by (plan, phase, attempt) (bench_phase_info)",
+        "expr": "max by (plan, phase, attempt) (max_over_time(bench_phase_info[11s]))",
         "target": {
           "refId": "Anno",
-          "expr": "max by (plan, phase, attempt) (bench_phase_info)",
+          "expr": "max by (plan, phase, attempt) (max_over_time(bench_phase_info[11s]))",
           "interval": "10s"
         },
         "step": "10s",
@@ -861,10 +861,10 @@
         "enable": false,
         "hide": false,
         "iconColor": "rgba(80, 200, 120, 0.5)",
-        "expr": "max by (label) (loadgen_phase_info{phase=\"measure\"})",
+        "expr": "max by (label) (max_over_time(loadgen_phase_info{phase=\"measure\"}[3s]))",
         "target": {
           "refId": "Measured",
-          "expr": "max by (label) (loadgen_phase_info{phase=\"measure\"})",
+          "expr": "max by (label) (max_over_time(loadgen_phase_info{phase=\"measure\"}[3s]))",
           "interval": "5s"
         },
         "step": "5s",
@@ -881,7 +881,7 @@
         "name": "window",
         "label": "latency samples",
         "type": "custom",
-        "query": "all : * 1,measured only : * on() (max(loadgen_phase_info{phase=\"measure\"}) and on() max(loadgen_phase_info{phase=\"measure\"} offset $__rate_interval) or on() vector(0)) / on() (max(loadgen_phase_info{phase=\"measure\"}) and on() max(loadgen_phase_info{phase=\"measure\"} offset $__rate_interval) or on() vector(0))",
+        "query": "all : * 1,measured only : * on() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0)) / on() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0))",
         "options": [
           {
             "text": "all",
@@ -890,7 +890,7 @@
           },
           {
             "text": "measured only",
-            "value": "* on() (max(loadgen_phase_info{phase=\"measure\"}) and on() max(loadgen_phase_info{phase=\"measure\"} offset $__rate_interval) or on() vector(0)) / on() (max(loadgen_phase_info{phase=\"measure\"}) and on() max(loadgen_phase_info{phase=\"measure\"} offset $__rate_interval) or on() vector(0))",
+            "value": "* on() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0)) / on() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0))",
             "selected": false
           }
         ],

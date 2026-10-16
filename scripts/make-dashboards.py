@@ -229,7 +229,17 @@ GRAFANA_ANNOTATIONS = {
     "name": "Annotations & Alerts",
     "type": "dashboard",
 }
-PHASE_EXPR = "max by (plan, phase, attempt) (bench_phase_info)"
+# Marker series are read through max_over_time over a short window, never as a
+# plain selector. A plain selector keeps returning a series' last sample for
+# Prometheus's 5-minute lookback unless a staleness marker ended it. Scraped
+# series get one; series imported into a bundle (bench-series.py, and the
+# export's own dumps) do not, so every phase ran ~5 minutes into the next one
+# in recordings (2026-10-16). The windows are two sample intervals plus a
+# little: the phase marker is sampled every 5s (node scrape; bench-series.py
+# step), loadgen every 1s.
+PHASE_FRESH, LOADGEN_FRESH = "11s", "3s"
+PHASE_EXPR = f"max by (plan, phase, attempt) (max_over_time(bench_phase_info[{PHASE_FRESH}]))"
+MEASURE_EXPR = f'max_over_time(loadgen_phase_info{{phase="measure"}}[{LOADGEN_FRESH}])'
 PHASE_ANNOTATION = {
     "name": "autorun phase",
     "datasource": DS,
@@ -271,7 +281,7 @@ def now_running(pid, y):
              text_size=20)
     p["options"].update({"textMode": "name", "colorMode": "none", "graphMode": "none"})
     lg = stat(pid + 100, "loadgen (level / stage)", 14, y, 10, 3,
-              [(_named("max by (label, phase) (loadgen_phase_info)", ["label", "phase"],
+              [(_named(f"max by (label, phase) (max_over_time(loadgen_phase_info[{LOADGEN_FRESH}]))", ["label", "phase"],
                        "loadgen idle"), "{{now}}")],
               desc=("The level loadgen is running (the runner's tag, e.g. "
                     "bookdepth-10000) and its stage: preload, warmup, measure "
@@ -298,8 +308,8 @@ def now_running(pid, y):
 # It is a mask, M = 1 inside the window and 0 outside, applied as X * M / M:
 # outside the window that is 0/0 = NaN, which breaks the line. Filtering with
 # `and` would drop the points instead, and Grafana would join across them.
-_MEASURE_MASK = ('(max(loadgen_phase_info{phase="measure"}) '
-                 'and on() max(loadgen_phase_info{phase="measure"} offset $__rate_interval) '
+_MEASURE_MASK = (f'(max({MEASURE_EXPR}) '
+                 f'and on() max(max_over_time(loadgen_phase_info{{phase="measure"}}[{LOADGEN_FRESH}] offset $__rate_interval)) '
                  'or on() vector(0))')
 MEASURED_ONLY = f"* on() {_MEASURE_MASK} / on() {_MEASURE_MASK}"
 ALL_SAMPLES = "* 1"
@@ -326,8 +336,8 @@ MEASURED_ANNOTATION = {
     "enable": False,
     "hide": False,
     "iconColor": "rgba(80, 200, 120, 0.5)",
-    "expr": 'max by (label) (loadgen_phase_info{phase="measure"})',
-    "target": {"refId": "Measured", "expr": 'max by (label) (loadgen_phase_info{phase="measure"})',
+    "expr": f"max by (label) ({MEASURE_EXPR})",
+    "target": {"refId": "Measured", "expr": f"max by (label) ({MEASURE_EXPR})",
                "interval": "5s"},
     "step": "5s",
     "titleFormat": "{{label}}",

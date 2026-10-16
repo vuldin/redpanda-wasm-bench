@@ -50,6 +50,21 @@ expect("now-running strips always return a series (idle fallback)",
        all("or on() label_replace(vector(0)" in t["expr"]
            for p in md.overview()["panels"] if p["id"] in (9, 109) for t in p["targets"]))
 
+# Marker series must be read through max_over_time: imported (bundle) series
+# have no staleness markers, so a plain selector ran every phase ~5 minutes
+# into the next one in recordings.
+import re as _re
+# A read is plain when the name (and its optional {labels}) is not followed by a
+# [range]. Both alternatives are anchored so the label group cannot be skipped.
+marker = _re.compile(r"\b(?:bench_phase_info|bench_window_info|loadgen_phase_info)(?:\{[^}]*\}(?!\[)|(?![\[{\w]))")
+exprs = [t["expr"] for fn in md.DASHBOARDS.values() for p in fn()["panels"] for t in p.get("targets", [])]
+exprs += [a["expr"] for fn in md.DASHBOARDS.values() for a in fn()["annotations"]["list"] if "expr" in a]
+exprs += [md.MEASURED_ONLY]
+plain = [e for e in exprs if marker.search(e)]
+expect("marker series are never read with a plain selector (5m lookback in bundles)", plain == [])
+expect("the bundle's window annotation is windowed too",
+       "max_over_time(bench_window_info[" in open(f"{root}/scripts/metrics-bundle.py").read())
+
 planted = {"panels": [{"title": "planted", "targets": [
     {"expr": "sum by (shard) (irate( redpanda_cpu_busy_seconds_total[$__rate_interval]))"}]}]}
 expect("generator refuses a planted irate() over the busy-time gauge",
