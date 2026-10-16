@@ -20,6 +20,8 @@
 #
 # 6 brokers + 3 clients + monitoring, ~$55/hr; ~30 min of phases.
 
+TEST="Relay delivery: precommit vs committed"
+TEST_ABOUT="What waiting for the output quorum (RELAY_DELIVERY=committed) costs in-broker consumers, against delivering before the write (precommit)."
 TOPOLOGY=six-broker
 # Region preference for autorun's region selection (first with capacity wins).
 # us-west-2 first: every six-broker series so far ran in us-west-2a, and the
@@ -33,8 +35,16 @@ E2=(ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 ACKS=all RF=3
     MODE=bookdepth BOOKDEPTH_LEVELS=1000 DURATION=60s)
 
 for t in 1 2; do
+  about "trial $t of 2: fan-out 1, precommit" \
+    "Depth 1,000, 60s, delivered before the output write. Watch the headline latency."
   phase "fo1-precommit-t$t" 5 run e2 "${E2[@]}" FANOUT=1 RELAY_DELIVERY=precommit
+  about "trial $t of 2: fan-out 1, committed" \
+    "The same, delivered once the output quorum acknowledged. Compare its headline latency with the precommit phase before it."
   phase "fo1-committed-t$t" 5 run e2 "${E2[@]}" FANOUT=1 RELAY_DELIVERY=committed
 done
+about "fan-out 20, precommit" \
+  "20 subscribers per order. Watch the headline latency and relay throughput."
 phase fo20-precommit 5 run e2 "${E2[@]}" FANOUT=20 RELAY_DELIVERY=precommit
+about "fan-out 20, committed" \
+  "The same, commit-gated. Compare with the phase before it."
 phase fo20-committed 5 run e2 "${E2[@]}" FANOUT=20 RELAY_DELIVERY=committed

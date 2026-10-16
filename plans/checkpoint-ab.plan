@@ -16,6 +16,8 @@
 # 6 brokers + 3 clients + monitoring, ~$55/hr; ~45 min of phases, ~1.4h in all.
 # Needs a broker with data_transforms_state_checkpoint_inline.
 
+TEST="Checkpoint: inline vs background"
+TEST_ABOUT="Does the broker's guest-state checkpoint still stall produces once it no longer forces a flush or blocks the transform loop?"
 TOPOLOGY=six-broker
 # Region preference for autorun's region selection (first with capacity wins).
 # us-west-2 first: every six-broker series so far ran in us-west-2a, and the
@@ -28,8 +30,14 @@ E2=(ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 ACKS=all RF=3
     LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=1 GUEST=book-matcher CANCEL_FRACTION=0.3
     DURATION=90s MODE=bookdepth 'BOOKDEPTH_LEVELS=1000 10000' FANOUT=20)
 
+about "baseline: no state" \
+  "Depth 1,000 and 10,000 with no snapshot: the floor to compare against. Watch the headline latency."
 phase off 7 run e2 "${E2[@]}" STATE=off
 for t in 1 2 3; do
+  about "trial $t of 3: checkpoint inline (the original)" \
+    "Live snapshot region, checkpoint replicated inline with a forced flush. Look for spikes every 5s in the headline latency."
   phase "inline-t$t" 7 run e2 "${E2[@]}" STATE=snapshot SNAPSHOT_MODE=live CHECKPOINT_INLINE=true
+  about "trial $t of 3: checkpoint in the background" \
+    "Replicated in the background without a forced flush. Compare its 5s spikes with the inline phase before it."
   phase "background-t$t" 7 run e2 "${E2[@]}" STATE=snapshot SNAPSHOT_MODE=live CHECKPOINT_INLINE=false
 done

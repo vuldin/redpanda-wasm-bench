@@ -35,6 +35,8 @@
 # quotes, 1,000 resting orders per side, 30% of input records cancels plus as
 # many passive inserts, 650 B records, RF=3, acks=all, single AZ.
 
+TEST="State cost and tail sources"
+TEST_ABOUT="Durable state without the tail, and where the in-broker tail comes from, with every deployment compared on one cluster."
 TOPOLOGY=six-broker
 # Region preference for autorun's region selection (first with capacity wins).
 # us-west-2 first: every six-broker series so far ran in us-west-2a, and the
@@ -48,31 +50,51 @@ E2=(ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 ACKS=all RF=3
     DURATION=90s)
 
 # 1. Snapshot cost: off, then full and live interleaved.
+about "baseline: no state" \
+  "Depth 1,000 and 10,000, fan-out 20. Watch the headline latency."
 phase snap-off 7 run e2 "${E2[@]}" STATE=off MODE=bookdepth 'BOOKDEPTH_LEVELS=1000 10000' FANOUT=20
 for t in 1 2; do
+  about "trial $t of 2: full snapshot" \
+    "The whole book re-serialised every 500ms. Look for spikes in the headline latency."
   phase "snap-full-t$t" 7 run e2 "${E2[@]}" STATE=snapshot SNAPSHOT_MODE=full MODE=bookdepth 'BOOKDEPTH_LEVELS=1000 10000' FANOUT=20
+  about "trial $t of 2: live snapshot" \
+    "The region kept current slot by slot. Compare with the full snapshot before it."
   phase "snap-live-t$t" 7 run e2 "${E2[@]}" STATE=snapshot SNAPSHOT_MODE=live MODE=bookdepth 'BOOKDEPTH_LEVELS=1000 10000' FANOUT=20
 done
 
 # 2. Graceful planned moves with the live region.
+about "graceful moves with the live region" \
+  "Maintenance and transfer with a 5s graceful drain: nothing should be left out. Watch the stateful-transforms row of the overview."
 phase graceful-live 20 run durability 'ACTIONS=maintenance transfer' DEPTHS=1000 TRIALS=2 \
   GRACEFUL_MS=5000 STATE=snapshot SNAPSHOT_MODE=live OUT=@RUN_DIR@/graceful-live
 
 # 3. Every deployment, one cluster, two trials.
 for t in 1 2; do
+  about "trial $t of 2: in-broker, precommit, fan-out 1 to 50" \
+    "Fresh topics per level, depth 1,000. Watch the headline latency."
   phase "inbroker-precommit-t$t" 16 run e2 "${E2[@]}" STATE=off MODE=fanout 'FANOUT_LEVELS=1 10 20 50' \
     FRESH_TOPICS_PER_LEVEL=1 BOOK_DEPTH=1000 RELAY_DELIVERY=precommit
+  about "trial $t of 2: in-broker, committed, fan-out 1 to 50" \
+    "The same, commit-gated. Compare with the precommit phase before it."
   phase "inbroker-committed-t$t" 16 run e2 "${E2[@]}" STATE=off MODE=fanout 'FANOUT_LEVELS=1 10 20 50' \
     FRESH_TOPICS_PER_LEVEL=1 BOOK_DEPTH=1000 RELAY_DELIVERY=committed
+  about "trial $t of 2: traditional deployments, fan-out 1 to 50" \
+    "External, co-located and isolated cores with the same module and book. Its latency is in the client results; the broker charts show only the cluster side."
   phase "traditional-t$t" 35 run traditional 'PLACEMENTS=external loopback loopback-isolated' 'FANOUT_LADDER=1 10 20 50' \
     GUEST_MODULE=book-matcher.wasm BOOK_DEPTH=1000 CANCEL_FRACTION=0.3 ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 DURATION=90s
 done
 
 # 4. Scheduler share A/B, interleaved.
 for t in 1 2; do
+  about "trial $t of 2: transforms scheduler share 100 (default)" \
+    "Fan-out 20, depth 1,000. Watch the relay stages dashboard."
   phase "shares-default-t$t" 4 run e2 "${E2[@]}" STATE=off MODE=bookdepth BOOKDEPTH_LEVELS=1000 FANOUT=20
+  about "trial $t of 2: transforms scheduler share 1000" \
+    "Ten times the share. Compare the relay stages with the default phase before it."
   phase "shares-1000-t$t" 4 run e2 "${E2[@]}" STATE=off MODE=bookdepth BOOKDEPTH_LEVELS=1000 FANOUT=20 TRANSFORM_SHARES=1000
 done
 
 # 5. Tail against rate.
+about "tail against rate: 30k, 60k, 90k orders/sec" \
+  "Production book, two producers. Watch the headline latency and broker CPU."
 phase rate-tail 10 run e2 "${E2[@]}" STATE=off MODE=rate BOOK_DEPTH=1000 PRODUCERS=2 FANOUT=20 'RATE_LEVELS=30000 60000 90000'

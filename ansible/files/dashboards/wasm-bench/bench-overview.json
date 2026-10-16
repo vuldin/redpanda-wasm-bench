@@ -27,7 +27,7 @@
     {
       "id": 9,
       "type": "stat",
-      "title": "now running (autorun plan / phase / attempt)",
+      "title": "now running: test - phase N of M: what it is",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -35,6 +35,68 @@
       "gridPos": {
         "x": 0,
         "y": 0,
+        "w": 24,
+        "h": 3
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "label_replace(label_join(max by (plan, phase, attempt, step, steps, test, title, about, display) (max_over_time(bench_phase_info[11s])), \"now\", \" / \", \"plan\", \"phase\", \"attempt\"), \"now\", \"$1\", \"display\", \"(.+)\") or on() label_replace(vector(0), \"now\", \"no autorun phase in progress\", \"\", \"\")",
+          "legendFormat": "{{now}}",
+          "refId": "A",
+          "editorMode": "code",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "description": "The autorun phase at the end of the selected time range, from bench_phase_info: the test (the plan's TEST), the phase's place in the plan and its title. Empty between phases and outside an autorun plan; a run from before the titles shows plan / phase / attempt instead. The shaded regions on every graph are the same series over time: hover one for its title and description.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "text": {
+          "titleSize": 14,
+          "valueSize": 20
+        }
+      }
+    },
+    {
+      "id": 209,
+      "type": "stat",
+      "title": "what this phase is for",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 3,
         "w": 14,
         "h": 3
       },
@@ -59,7 +121,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "label_join(max by (plan, phase, attempt) (max_over_time(bench_phase_info[11s])), \"now\", \" / \", \"plan\", \"phase\", \"attempt\") or on() label_replace(vector(0), \"now\", \"no autorun phase in progress\", \"\", \"\")",
+          "expr": "label_replace(label_replace(max by (plan, phase, attempt, step, steps, test, title, about, display) (max_over_time(bench_phase_info[11s])), \"now\", \"no description (this plan predates them)\", \"\", \"\"), \"now\", \"$1\", \"about\", \"(.+)\") or on() label_replace(vector(0), \"now\", \"no autorun phase in progress\", \"\", \"\")",
           "legendFormat": "{{now}}",
           "refId": "A",
           "editorMode": "code",
@@ -67,7 +129,7 @@
           "instant": true
         }
       ],
-      "description": "The autorun phase at the end of the selected time range, from bench_phase_info. Empty between phases, outside an autorun plan, and for runs older than the marker. The shaded regions on every graph are the same series over time: hover one for its plan, phase and attempt.",
+      "description": "The phase's description from its plan (the `about` line before it), including which charts answer its question. Not every chart applies to every test: the matcher latency panels stay empty for a test that runs no matcher.",
       "options": {
         "reduceOptions": {
           "calcs": [
@@ -82,7 +144,7 @@
         "justifyMode": "auto",
         "text": {
           "titleSize": 14,
-          "valueSize": 20
+          "valueSize": 14
         }
       }
     },
@@ -96,7 +158,7 @@
       },
       "gridPos": {
         "x": 14,
-        "y": 0,
+        "y": 3,
         "w": 10,
         "h": 3
       },
@@ -155,7 +217,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 3,
+        "y": 6,
         "w": 24,
         "h": 1
       },
@@ -171,7 +233,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 4,
+        "y": 7,
         "w": 12,
         "h": 8
       },
@@ -253,7 +315,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 4,
+        "y": 7,
         "w": 12,
         "h": 8
       },
@@ -332,7 +394,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 12,
+        "y": 15,
         "w": 24,
         "h": 1
       },
@@ -348,7 +410,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 13,
+        "y": 16,
         "w": 6,
         "h": 5
       },
@@ -422,7 +484,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 13,
+        "y": 16,
         "w": 6,
         "h": 5
       },
@@ -483,7 +545,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 13,
+        "y": 16,
         "w": 12,
         "h": 5
       },
@@ -562,7 +624,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 18,
+        "y": 21,
         "w": 24,
         "h": 1
       },
@@ -578,7 +640,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 19,
+        "y": 22,
         "w": 6,
         "h": 5
       },
@@ -652,7 +714,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 19,
+        "y": 22,
         "w": 6,
         "h": 5
       },
@@ -726,7 +788,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 19,
+        "y": 22,
         "w": 12,
         "h": 5
       },
@@ -783,7 +845,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 24,
+        "y": 27,
         "w": 24,
         "h": 1
       },
@@ -799,7 +861,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 25,
+        "y": 28,
         "w": 12,
         "h": 8
       },
@@ -859,7 +921,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 25,
+        "y": 28,
         "w": 12,
         "h": 8
       },
@@ -941,7 +1003,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 33,
+        "y": 36,
         "w": 24,
         "h": 22
       },
@@ -998,7 +1060,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 55,
+        "y": 58,
         "w": 24,
         "h": 1
       },
@@ -1014,7 +1076,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 56,
+        "y": 59,
         "w": 8,
         "h": 6
       },
@@ -1085,7 +1147,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 56,
+        "y": 59,
         "w": 8,
         "h": 6
       },
@@ -1145,7 +1207,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 56,
+        "y": 59,
         "w": 8,
         "h": 6
       },
@@ -1224,7 +1286,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 62,
+        "y": 65,
         "w": 24,
         "h": 1
       },
@@ -1240,7 +1302,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 63,
+        "y": 66,
         "w": 4,
         "h": 6
       },
@@ -1314,7 +1376,7 @@
       },
       "gridPos": {
         "x": 4,
-        "y": 63,
+        "y": 66,
         "w": 7,
         "h": 6
       },
@@ -1396,7 +1458,7 @@
       },
       "gridPos": {
         "x": 11,
-        "y": 63,
+        "y": 66,
         "w": 7,
         "h": 6
       },
@@ -1478,7 +1540,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 63,
+        "y": 66,
         "w": 6,
         "h": 6
       },
@@ -1560,7 +1622,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 69,
+        "y": 72,
         "w": 12,
         "h": 6
       },
@@ -1620,7 +1682,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 69,
+        "y": 72,
         "w": 12,
         "h": 6
       },
@@ -1705,15 +1767,15 @@
         "enable": true,
         "hide": false,
         "iconColor": "rgba(130, 110, 220, 0.6)",
-        "expr": "max by (plan, phase, attempt) (max_over_time(bench_phase_info[11s]))",
+        "expr": "max by (plan, phase, attempt, step, steps, test, title, about, display) (max_over_time(bench_phase_info[11s]))",
         "target": {
           "refId": "Anno",
-          "expr": "max by (plan, phase, attempt) (max_over_time(bench_phase_info[11s]))",
+          "expr": "max by (plan, phase, attempt, step, steps, test, title, about, display) (max_over_time(bench_phase_info[11s]))",
           "interval": "10s"
         },
         "step": "10s",
-        "titleFormat": "{{phase}}",
-        "textFormat": "plan {{plan}}, phase {{phase}}, attempt {{attempt}}",
+        "titleFormat": "{{display}}",
+        "textFormat": "{{about}} (plan {{plan}}, phase {{phase}}, attempt {{attempt}})",
         "tagKeys": "plan,phase",
         "useValueForTime": false
       },

@@ -238,7 +238,13 @@ GRAFANA_ANNOTATIONS = {
 # little: the phase marker is sampled every 5s (node scrape; bench-series.py
 # step), loadgen every 1s.
 PHASE_FRESH, LOADGEN_FRESH = "11s", "3s"
-PHASE_EXPR = f"max by (plan, phase, attempt) (max_over_time(bench_phase_info[{PHASE_FRESH}]))"
+# The marker's labels: plan and phase are ids (the plan file, the phase's
+# name in it); test, title and about say in words what is being run and why;
+# step / steps place the phase in the plan; display is the line shown at the
+# top of the overview. Markers from before the descriptions carry only plan,
+# phase and attempt; every query below falls back to those.
+PHASE_LABELS = "plan, phase, attempt, step, steps, test, title, about, display"
+PHASE_EXPR = f"max by ({PHASE_LABELS}) (max_over_time(bench_phase_info[{PHASE_FRESH}]))"
 MEASURE_EXPR = f'max_over_time(loadgen_phase_info{{phase="measure"}}[{LOADGEN_FRESH}])'
 PHASE_ANNOTATION = {
     "name": "autorun phase",
@@ -249,8 +255,8 @@ PHASE_ANNOTATION = {
     "expr": PHASE_EXPR,
     "target": {"refId": "Anno", "expr": PHASE_EXPR, "interval": "10s"},
     "step": "10s",
-    "titleFormat": "{{phase}}",
-    "textFormat": "plan {{plan}}, phase {{phase}}, attempt {{attempt}}",
+    "titleFormat": "{{display}}",
+    "textFormat": "{{about}} (plan {{plan}}, phase {{phase}}, attempt {{attempt}})",
     "tagKeys": "plan,phase",
     "useValueForTime": False,
 }
@@ -267,20 +273,41 @@ def _named(expr, labels, idle):
             f'or on() label_replace(vector(0), "now", "{idle}", "", "")')
 
 
+def _phase_text(label, fallback):
+    """The marker's `label` as the `now` label, or `fallback` when the marker
+    predates it: label_replace leaves `now` alone when `label` is empty."""
+    return f'label_replace({fallback}, "now", "$1", "{label}", "(.+)")'
+
+
+NO_PHASE = 'label_replace(vector(0), "now", "no autorun phase in progress", "", "")'
+
+
 def now_running(pid, y):
-    """Strips naming the autorun phase and the loadgen level in progress, at
-    the END of the selected range."""
-    p = stat(pid, "now running (autorun plan / phase / attempt)", 0, y, 14, 3,
-             [(_named(PHASE_EXPR, ["plan", "phase", "attempt"], "no autorun phase in progress"),
-               "{{now}}")],
+    """Strips naming the test and phase in progress (with its place in the
+    plan), what that phase is for, and the loadgen level - at the END of the
+    selected range. Two rows, 6 high in all."""
+    which = _phase_text("display", f'label_join({PHASE_EXPR}, "now", " / ", "plan", "phase", "attempt")')
+    p = stat(pid, "now running: test - phase N of M: what it is", 0, y, 24, 3,
+             [(f"{which} or on() {NO_PHASE}", "{{now}}")],
              desc=("The autorun phase at the end of the selected time range, "
-                   "from bench_phase_info. Empty between phases, outside an "
-                   "autorun plan, and for runs older than the marker. The "
-                   "shaded regions on every graph are the same series over "
-                   "time: hover one for its plan, phase and attempt."),
+                   "from bench_phase_info: the test (the plan's TEST), the "
+                   "phase's place in the plan and its title. Empty between "
+                   "phases and outside an autorun plan; a run from before the "
+                   "titles shows plan / phase / attempt instead. The shaded "
+                   "regions on every graph are the same series over time: "
+                   "hover one for its title and description."),
              text_size=20)
     p["options"].update({"textMode": "name", "colorMode": "none", "graphMode": "none"})
-    lg = stat(pid + 100, "loadgen (level / stage)", 14, y, 10, 3,
+    what = _phase_text("about", f'label_replace({PHASE_EXPR}, "now", "no description (this plan predates them)", "", "")')
+    ab = stat(pid + 200, "what this phase is for", 0, y + 3, 14, 3,
+              [(f"{what} or on() {NO_PHASE}", "{{now}}")],
+              desc=("The phase's description from its plan (the `about` line "
+                    "before it), including which charts answer its question. "
+                    "Not every chart applies to every test: the matcher "
+                    "latency panels stay empty for a test that runs no matcher."),
+              text_size=14)
+    ab["options"].update({"textMode": "name", "colorMode": "none", "graphMode": "none"})
+    lg = stat(pid + 100, "loadgen (level / stage)", 14, y + 3, 10, 3,
               [(_named(f"max by (label, phase) (max_over_time(loadgen_phase_info[{LOADGEN_FRESH}]))", ["label", "phase"],
                        "loadgen idle"), "{{now}}")],
               desc=("The level loadgen is running (the runner's tag, e.g. "
@@ -293,10 +320,10 @@ def now_running(pid, y):
     # Instant queries, evaluated at the end of the range. As range queries a
     # stat lists every series with a value anywhere in the range, which in a
     # recording (or any range spanning several phases) is every phase at once.
-    for panel_ in (p, lg):
+    for panel_ in (p, ab, lg):
         for t in panel_["targets"]:
             t["instant"], t["range"] = True, False
-    return [p, lg]
+    return [p, ab, lg]
 
 
 # "measured only" keeps a latency point only if loadgen was in its timed
@@ -387,7 +414,7 @@ def dashboard(uid, title, panels, desc, tags, refresh="5s", time_from="now-15m",
 def overview():
     p, y = [], 0
 
-    p.extend(now_running(9, y)); y += 3
+    p.extend(now_running(9, y)); y += 6
 
     p.append(row(1, "Headline: in-broker fan-out latency", y)); y += 1
     p.append(panel(

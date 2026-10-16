@@ -101,16 +101,30 @@ that found snapshot persistence silently not working in a real broker.
 A plan is a small bash file in `plans/`:
 
 ```bash
+TEST="Book durability"   # what is being tested, in a few words
+TEST_ABOUT="Does the book survive a broker kill at depth?"
 TOPOLOGY=six-broker      # or single-az, multi-az, highcore (terraform/*.tfvars)
 DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_snapshot_max_size=16777216)
 
+about "TITLE" "what the phase is for, and which charts answer it"   # describes the next phase
 phase NAME EST_MINUTES <wb arguments...>
+
+about "depth sweep, no state" "Depth 0 and 1,000. Watch the headline latency."
 phase depth 10 run e2 MODE=bookdepth GUEST=book-matcher 'BOOKDEPTH_LEVELS=0 1000'
+about "broker kills" "SIGKILL the input leader. Watch the stateful-transforms row."
 phase kill  35 run durability ACTIONS=kill 'DEPTHS=1000 10000' OUT=@RUN_DIR@/kill
 ```
 
 - Each phase is one `wb` invocation. Quote a `KEY=VALUE` whose value has
   spaces. `@RUN_DIR@` becomes the run's directory.
+- NAME is the phase's id: it names the phase's log and results, so keep it
+  short and stable. What people read is the `about` line before it: a title
+  ("trial 1 of 3: checkpoint in 64 KiB chunks") and what the phase is for,
+  including which charts answer it. `TEST` and `TEST_ABOUT` say what the plan
+  as a whole tests. All of it is shown by `check`, logged as each phase starts
+  ("== phase 3 of 16: ..."), and shown at the top of the Grafana overview as
+  "<test> - phase 3 of 16: <title>", with the description under it. A phase
+  without an `about` is titled by its name. No double quotes in the text.
 - Estimates matter: a phase starts only if it fits before the teardown
   reserve, and is killed at 1.5x its estimate. `autorun.sh check PLAN` prints
   the phases and whether the total fits the cap.
@@ -432,6 +446,15 @@ it, so you can regenerate the tables (RESULTS.md in that plan's run directory).
 
 ## Gotchas that have cost real runs
 
+- Pause the leader balancer for anything that measures one partition's
+  traffic over a fixed window. On 2026-10-16 it moved the gateway series'
+  single events partition about once a minute (15 moves in 17 minutes): each
+  move stalled the producer and the firehose readers for ~5s and restarted the
+  demux on the new leader, which replayed from its last offset commit. That
+  put a ~4.5s p99 on 7 of 10 levels and duplicates on 3, in both runs, and it
+  looked like a property of the arms. `run-gateways.sh` now pauses it (restored
+  on exit) and records `leader_changes` per level, which should be 0;
+  `run-traditional-sharded.sh` and `run-durability.sh` already paused it.
 - Never redeploy a transform under a name it had before with MORE output
   topics on a broker without the fix (josh-416, broker fork after
   `eae35a38ab`). The broker cached the first deployment's per-output metrics

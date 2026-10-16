@@ -21,6 +21,8 @@
 #
 # 6 brokers + 3 clients + monitoring, ~$55/hr; ~40 min of phases, ~1h20 in all.
 
+TEST="Gateway filtering"
+TEST_ABOUT="What each FIX gateway pays in broker egress and its own CPU to get only its own events: every gateway reading the whole topic (firehose) against the in-broker gateway-demux."
 TOPOLOGY=six-broker
 # Region preference for autorun's region selection (first with capacity wins).
 # us-west-2 first: every six-broker series so far ran in us-west-2a, and the
@@ -32,5 +34,7 @@ GW=(RATE=30000 SIZE=650 DURATION=60s RF=3 WRITE_CACHING=true ACKS=-1
     'GATEWAY_LEVELS=2 4 8' KEYED_EXTRA_LEVELS=20 KEYED_PARTITIONS_PER_GATEWAY=4)
 
 for t in 1 2; do
+  about "trial $t of 2: firehose, topics and keyed at 2 to 20 gateways" \
+    "60s per level at 30k events/sec. Watch network out by broker on the measurement-health dashboard. No matcher runs, so the matcher latency panels stay empty."
   phase "gateways-t$t" 20 run gateways "${GW[@]}"
 done

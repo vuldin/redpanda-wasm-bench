@@ -11,6 +11,8 @@
 # path every published number came from). If a phase fails, the phase log
 # says why; `wb reproduce` with SKIP_PROVISION=true is the manual equivalent.
 
+TEST="Published comparison"
+TEST_ABOUT="The REPRODUCE.md numbers: in-broker wasm against a traditional external deployment, then the resilience series."
 TOPOLOGY=single-az
 # The published configuration: the playbook defaults.
 DEPLOY_ARGS=()
@@ -30,5 +32,9 @@ pre_up() {
 export SKIP_PROVISION=true EXTERNAL_LADDER
 export OUT_LOCAL="$RUN_DIR/reproduce"
 
+about "in-broker vs external (wb reproduce)" \
+  "The published comparison end to end. Its latency is in the client results; the broker charts show only the cluster side."
 phase reproduce 100 reproduce
+about "resilience under leadership moves" \
+  "Maintenance and explicit transfers under load. Watch the headline latency and transform lag around each move."
 phase resilience 45 run resilience

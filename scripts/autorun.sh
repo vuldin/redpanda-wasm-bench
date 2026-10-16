@@ -62,12 +62,25 @@ die() { echo "autorun: $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 # plans
 # ---------------------------------------------------------------------------
-PHASE_NAMES=() PHASE_EST=() PHASE_CMD=()
+PHASE_NAMES=() PHASE_EST=() PHASE_CMD=() PHASE_TITLE=() PHASE_ABOUT=()
 TOPOLOGY="" DEPLOY_ARGS=()
+# What the plan is testing, for people watching it: TEST names it in a few
+# words, TEST_ABOUT says what question it answers. Shown by `check`, logged at
+# the start, and carried on the dashboards' phase marker.
+TEST="" TEST_ABOUT=""
+NEXT_TITLE="" NEXT_ABOUT=""
+# about TITLE [WHAT]: describes the NEXT phase - a short title ("trial 1 of 2:
+# whole checkpoint") and what it is for. Optional; a phase without one is
+# titled by its name.
+about() {
+  [ $# -ge 1 ] && [ $# -le 2 ] || die "plan: about needs TITLE [DESCRIPTION] (got $# arguments)"
+  NEXT_TITLE="$1" NEXT_ABOUT="${2:-}"
+}
 phase() {
   [ $# -ge 3 ] || die "plan: phase needs NAME EST_MINUTES WB_ARGS... (got: $*)"
   case "$2" in ''|*[!0-9]*) die "plan: phase $1: estimate '$2' is not whole minutes" ;; esac
   PHASE_NAMES+=("$1"); PHASE_EST+=("$2")
+  PHASE_TITLE+=("${NEXT_TITLE:-$1}"); PHASE_ABOUT+=("$NEXT_ABOUT"); NEXT_TITLE="" NEXT_ABOUT=""
   local c; printf -v c '%q ' "${@:3}"; PHASE_CMD+=("$c")
 }
 load_plan() {
@@ -86,6 +99,19 @@ load_plan() {
   local n; for n in "${PHASE_NAMES[@]}"; do
     case "$n" in *[!A-Za-z0-9._-]*) die "plan: phase name '$n' must be [A-Za-z0-9._-]" ;; esac
   done
+}
+# One line of plan-phases.tsv text: no tabs or newlines.
+one_line() { local v="${1//$'\t'/ }"; printf '%s' "${v//$'\n'/ }"; }
+# The run's phases for the metrics export (bench-series.py): a header with the
+# test, then step, name, estimate, title and description per phase.
+write_plan_phases() {
+  {
+    printf '# test\t%s\t%s\n' "$(one_line "${TEST:-$PLAN_NAME}")" "$(one_line "$TEST_ABOUT")"
+    local i; for i in "${!PHASE_NAMES[@]}"; do
+      printf '%s\t%s\t%s\t%s\t%s\n' "$((i + 1))" "${PHASE_NAMES[$i]}" "${PHASE_EST[$i]}" \
+        "$(one_line "${PHASE_TITLE[$i]}")" "$(one_line "${PHASE_ABOUT[$i]}")"
+    done
+  } > "$RUN_DIR/plan-phases.tsv"
 }
 plan_minutes() { local t=0 e; for e in "${PHASE_EST[@]}"; do t=$((t + e)); done; echo "$t"; }
 
@@ -112,23 +138,41 @@ creds_expiry_epoch() {
 # ---------------------------------------------------------------------------
 # The dashboards' phase marker: a node_exporter textfile on the monitoring
 # host, so Prometheus records which phase is running as
-# bench_phase_info{plan,phase,attempt} 1. Being a scraped series, the phase
+# bench_phase_info{plan,phase,attempt,step,steps,test,title,about,display} 1,
+# where display is the line the dashboards show ("<test> - phase 2 of 5:
+# <title>"). The provisioning phases have no step. Being a scraped series, the phase
 # boundaries are in an exported bundle too, not only in the live Grafana. Best
 # effort and never fatal: a cluster deployed before the textfile collector
 # existed has no directory, and the marker is skipped without a warning.
 # The directory is ansible's node_exporter_textfile_dir; overridden only by the
 # self-test, whose stub `wb ssh` runs the command locally.
 PHASE_MARK_DIR="${PHASE_MARK_DIR:-/var/lib/node_exporter/textfile}"
-phase_marker() { # phase_marker NAME ATTEMPT | phase_marker clear
+# A label value in the exposition format: backslash and quote escaped, one line.
+label_value() { local v; v="$(one_line "$1")"; v="${v//\\/\\\\}"; printf '%s' "${v//\"/\\\"}"; }
+# phase_marker NAME ATTEMPT | phase_marker clear. CUR_STEP is the phase's
+# 1-based position in the plan, empty for provisioning.
+phase_marker() {
   grep -q 'Grafana' "$RUN_DIR/MONITORING.txt" 2>/dev/null || return 0
   local f="$PHASE_MARK_DIR/bench_phase.prom" cmd
   if [ "$1" = clear ]; then
     cmd="rm -f $f"
   else
-    local plan="${PLAN_NAME:-}"
-    local line; line="$(printf 'bench_phase_info{plan="%s",phase="%s",attempt="%s"} 1' \
-      "${plan//[^A-Za-z0-9_.-]/_}" "${1//[^A-Za-z0-9_.-]/_}" "${2//[^0-9]/}")"
-    cmd="[ -d $PHASE_MARK_DIR ] || exit 0; printf '%s\\n' '# TYPE bench_phase_info gauge' '$line' > $f.tmp && mv $f.tmp $f"
+    local plan="${PLAN_NAME:-}" step="${CUR_STEP:-}" steps="${#PHASE_NAMES[@]}" title="$1" about="" display
+    local test="${TEST:-$plan}"
+    if [ -n "$step" ]; then
+      title="${PHASE_TITLE[$((step - 1))]}" about="${PHASE_ABOUT[$((step - 1))]}"
+      display="$test - phase $step of $steps: $title"
+    else
+      steps="" about="provisioning and readiness, before the plan's phases"
+      display="$test - setup: $1"
+    fi
+    [ "${2:-1}" -gt 1 ] && display="$display (attempt $2)"
+    local line; line="$(printf 'bench_phase_info{plan="%s",phase="%s",attempt="%s",step="%s",steps="%s",test="%s",title="%s",about="%s",display="%s"} 1' \
+      "${plan//[^A-Za-z0-9_.-]/_}" "${1//[^A-Za-z0-9_.-]/_}" "${2//[^0-9]/}" "$step" "$steps" \
+      "$(label_value "$test")" "$(label_value "$title")" "$(label_value "$about")" "$(label_value "$display")")"
+    # Base64, so no quote in a title or description can break the remote command.
+    local b64; b64="$(printf '%s\n%s\n' '# TYPE bench_phase_info gauge' "$line" | base64 -w0)"
+    cmd="[ -d $PHASE_MARK_DIR ] || exit 0; echo $b64 | base64 -d > $f.tmp && mv $f.tmp $f"
   fi
   timeout 30 "$WB" ssh monitor "$cmd" < /dev/null > /dev/null 2>&1 \
     || log "WARN: could not update the phase marker on the monitoring host"
@@ -353,6 +397,8 @@ run() {
   PLAN_NAME="$(basename "$plan" .plan)"
   echo $$ > "$RUN_DIR/autorun.pid"
   log "autorun run pid=$$ plan=$plan existing_cluster=$existing hard_deadline=$(date -u -d @"$HARD_DEADLINE_EPOCH" +%FT%TZ) phase_end=$(date -u -d @"$PHASE_END" +%FT%TZ)"
+  log "test: ${TEST:-$PLAN_NAME}${TEST_ABOUT:+ - $TEST_ABOUT} (${#PHASE_NAMES[@]} phases)"
+  write_plan_phases
 
   if [ "$existing" = 0 ]; then
     local h; h="$(heads)"
@@ -409,7 +455,10 @@ run() {
 
   local i
   for i in "${!PHASE_NAMES[@]}"; do
+    CUR_STEP=$((i + 1))
+    log "== phase $CUR_STEP of ${#PHASE_NAMES[@]}: ${PHASE_NAMES[$i]} - ${PHASE_TITLE[$i]}${PHASE_ABOUT[$i]:+. ${PHASE_ABOUT[$i]}}"
     run_phase "${PHASE_NAMES[$i]}" "${PHASE_EST[$i]}" "${PHASE_CMD[$i]}"
+    CUR_STEP=""
     hygiene
   done
   finish "all phases attempted"
@@ -496,9 +545,14 @@ cmd_check() {
   load_plan "$plan"
   local total; total=$(plan_minutes)
   echo "plan: $plan  topology=${TOPOLOGY:-<unset>}  deploy: ${DEPLOY_ARGS[*]:-<defaults>}"
-  printf '  %-34s %5s  %s\n' PHASE MIN "WB ARGS"
+  echo "test: ${TEST:-$(basename "$plan" .plan)}"
+  [ -n "$TEST_ABOUT" ] && echo "      $TEST_ABOUT"
+  local steps="${#PHASE_NAMES[@]}"
+  printf '  %-6s %-26s %4s  %s\n' STEP PHASE MIN "TITLE / what it is for / wb args"
   local i; for i in "${!PHASE_NAMES[@]}"; do
-    printf '  %-34s %5s  %s\n' "${PHASE_NAMES[$i]}" "${PHASE_EST[$i]}" "${PHASE_CMD[$i]}"
+    printf '  %-6s %-26s %4s  %s\n' "$((i + 1))/$steps" "${PHASE_NAMES[$i]}" "${PHASE_EST[$i]}" "${PHASE_TITLE[$i]}"
+    [ -n "${PHASE_ABOUT[$i]}" ] && printf '  %-6s %-26s %4s  %s\n' "" "" "" "${PHASE_ABOUT[$i]}"
+    printf '  %-6s %-26s %4s  wb %s\n' "" "" "" "${PHASE_CMD[$i]}"
   done
   local need cap; need=$(plan_need_minutes 0); cap=$(cap_minutes 0)
   echo "  phases: $total min; + provisioning ~25-35 min + teardown reserve ${RESERVE_MIN} min = ~${need} min"

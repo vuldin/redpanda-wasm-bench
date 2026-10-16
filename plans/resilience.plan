@@ -11,11 +11,17 @@
 # Stateless relay latency during moves. For whether a STATEFUL guest's
 # book survives the same moves (and broker kills), see book-durability.plan.
 
+TEST="Resilience under leadership moves"
+TEST_ABOUT="Does an in-broker deployment survive leadership moving, what does a move cost in latency, and how long until it is normal again?"
 TOPOLOGY=single-az
 DEPLOY_ARGS=()
 
 # Four arms: {maintenance, transfer} x graceful drain {unset, 200ms}.
+about "maintenance and transfer, graceful drain off vs 200ms" \
+  "Four arms. Watch the headline latency and transform lag around each move."
 phase resilience-drain-ab 30 run resilience 'ACTIONS=maintenance transfer' DRAIN_AB=1
 # Eight arms: the same, crossed with module residency {0, 8} - the series the
 # published figures in docs/RESILIENCE.md come from.
+about "the same, crossed with module residency 0 vs 8" \
+  "Eight arms: the published docs/RESILIENCE.md figures. Also watch processor create latency."
 phase resilience-residency 60 run resilience 'ACTIONS=maintenance transfer' DRAIN_AB=1 'RESIDENCY_LEVELS=0 8'

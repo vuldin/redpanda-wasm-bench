@@ -160,8 +160,23 @@ with tempfile.TemporaryDirectory() as td:
     lines = text.splitlines()
     expect("bench-series: phases with plan/attempt/outcome, windows, # EOF",
            nph == 3 and nwin == 1 and lines[-1] == "# EOF"
-           and any(l.startswith('bench_phase_info{plan="checkpoint-ab",phase="inline-t1",attempt="2",outcome="ok"') for l in lines)
+           and any(l.startswith('bench_phase_info{plan="checkpoint-ab",phase="inline-t1",attempt="2",') and 'outcome="ok"' in l for l in lines)
            and sum(l.startswith('bench_window_info{window="w1"}') for l in lines) == 3)
+    # No plan-phases.tsv (a run from before it): numbered in start order, the
+    # plan as the test, names as titles.
+    expect("bench-series: an old run's phases numbered in start order",
+           any('step="2",steps="2",test="checkpoint-ab",title="inline-t1",about=""' in l
+               and 'display="checkpoint-ab - phase 2 of 2: inline-t1 (attempt 2)"' in l for l in lines))
+    # With it: the plan's own test, titles and descriptions, quotes escaped.
+    (rd / "plan-phases.tsv").write_text(
+        "# test\tCheckpoint A/B\tDoes it stall?\n"
+        "1\toff\t7\tno state\tThe \"baseline\".\n"
+        "2\tinline-t1\t7\ttrial 1: inline\tCheckpoint inline.\n"
+        "3\tbackground-t1\t7\ttrial 1: background\t\n")
+    text, _, _ = bs.render(rd, [], step=5)
+    expect("bench-series: titles, descriptions and N of M from plan-phases.tsv",
+           any('phase="off",attempt="1",step="1",steps="3",test="Checkpoint A/B",title="no state",about="The \\"baseline\\"."' in l
+               and 'display="Checkpoint A/B - phase 1 of 3: no state"' in l for l in text.splitlines()))
 
     # loadgen's stages, rebuilt from a phase log's runner headers and loadgen lines.
     plog = """############ bookdepth-1000 : rate=30000

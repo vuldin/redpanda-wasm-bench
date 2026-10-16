@@ -21,6 +21,8 @@
 # inserts, 650 B records (production orders run 512 B - 1 KB), RF=3,
 # acks=all, single AZ.
 
+TEST="Production shape"
+TEST_ABOUT="The in-broker matcher against the traditional deployments with the production book and order flow, plus the rate sweep and broker kills."
 TOPOLOGY=six-broker
 # Region preference for autorun's region selection (first with capacity wins).
 # us-west-2 first: every six-broker series so far ran in us-west-2a, and the
@@ -34,19 +36,27 @@ E2=(ORDERS_PER_RECORD=15 RATE=30000 FANOUT=20 PAYLOAD=650 ACKS=all RF=3
 
 # 1. In-broker, fan-out 20, depth 1,000, 3-minute windows (~360k samples each).
 for t in 1 2; do
+  about "trial $t of 2: in-broker, 3-minute windows" \
+    "Fan-out 20, depth 1,000, long enough that p99.99 is real. Watch the headline latency."
   phase "inbroker-tail-t$t" 9 run e2 "${E2[@]}" MODE=bookdepth BOOKDEPTH_LEVELS=1000 DURATION=180s
 done
 
 # 2. The traditional arms with the same module, book and order flow.
+about "traditional: external, co-located, isolated cores" \
+  "The same module and book outside the broker, fan-out 1 to 50. Its latency is in the client results; the broker charts show only the cluster side."
 phase traditional-production 45 run traditional \
   'PLACEMENTS=external loopback loopback-isolated' 'FANOUT_LADDER=1 10 20 50' \
   GUEST_MODULE=book-matcher.wasm BOOK_DEPTH=1000 CANCEL_FRACTION=0.3 \
   ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 DURATION=30s
 
 # 3. Rate with the production book (two producers so the client can offer 200k).
+about "rate sweep, 30k to 200k orders/sec" \
+  "Production book, two producers. Watch the headline latency, transform lag and broker CPU."
 phase rate-production 14 run e2 "${E2[@]}" MODE=rate BOOK_DEPTH=1000 DURATION=30s PRODUCERS=2 \
   'RATE_LEVELS=30000 60000 120000 200000'
 
 # 4. Kills with the victim held down for 20s.
+about "broker kills, victim held down 20s" \
+  "A surviving replica must take over the book. Watch the stateful-transforms row of the overview."
 phase kill-held-down 30 run durability ACTIONS=kill 'DEPTHS=1000 10000' TRIALS=2 KILL_MODE=down \
   OUT=@RUN_DIR@/kill-held-down

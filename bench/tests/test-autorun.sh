@@ -51,6 +51,9 @@ chmod +x "$T/wb"
 cat > "$T/test.plan" <<'PLAN'
 TOPOLOGY=single-az
 DEPLOY_ARGS=(-e x=1)
+TEST="Self test"
+TEST_ABOUT="Exercises autorun against a stub wb."
+about "trial 1: the \"first\" one" "Checks that a quote in a description survives the marker."
 phase first 1 run e2 'LEVELS=0 100' MARK
 phase second 1 run durability FAILONCE=1 OUT=@RUN_DIR@/second
 phase third 1 run e2 LAST
@@ -65,6 +68,7 @@ base() { env DRY_RUN=1 EST_UNIT_S=0 WB="$T/wb" STUB_LOG="$1" RUN_DIR="$2" ARCHIV
 # 1: check
 out="$(bash "$AUTORUN" check "$T/test.plan" 2>&1)"
 check "check lists all phases" "echo \"\$out\" | grep -q 'third' && echo \"\$out\" | grep -q 'no cap: runs until the plan is done'"
+check "check: the test, step counts, titles and descriptions" "echo \"\$out\" | grep -q '^test: Self test' && echo \"\$out\" | grep -qE '^  1/3 +first +1  trial 1: the \"first\" one' && echo \"\$out\" | grep -q 'a quote in a description' && echo \"\$out\" | grep -qE '^  3/3 +third +1  third\$'"
 out_cap="$(CAP_HOURS=3 bash "$AUTORUN" check "$T/test.plan" 2>&1)"
 check "check: CAP_HOURS is an opt-in limit" "echo \"\$out_cap\" | grep -q 'fits CAP_HOURS=3'"
 
@@ -84,7 +88,11 @@ check "@RUN_DIR@ substituted" "grep -q 'OUT=$R3/second' '$T/s3'"
 check "retry: one teardown" "[ \"\$(wc -l < '$T/s3.teardowns')\" = 1 ]"
 
 # 8: phase marker (run 3): set during each phase, gone afterwards
-check "marker: set while 'first' ran" "grep -q '^bench_phase_info{plan=\"test\",phase=\"first\",attempt=\"1\"} 1\$' '$T/s3.marker'"
+check "marker: set while 'first' ran" "grep -q '^bench_phase_info{plan=\"test\",phase=\"first\",attempt=\"1\",step=\"1\",steps=\"3\",test=\"Self test\",' '$T/s3.marker'"
+check "marker: title and display escaped, step of steps" "grep -qF 'title=\"trial 1: the \\\"first\\\" one\"' '$T/s3.marker' && grep -qF 'display=\"Self test - phase 1 of 3: trial 1: the \\\"first\\\" one\"} 1' '$T/s3.marker'"
+check "marker: a retry says so in display" "grep -q 'display=\"Self test - phase 2 of 3: second (attempt 2)\"' '$T/s3.marker'"
+check "plan-phases.tsv: test header and one row per phase" "head -1 '$R3/plan-phases.tsv' | grep -q \$'^# test\\tSelf test\\tExercises' && [ \"\$(grep -vc '^#' '$R3/plan-phases.tsv')\" = 3 ]"
+check "log: each phase announced with its step" "grep -q '== phase 3 of 3: third - third' '$R3/autorun.log'"
 check "marker: retry carries attempt 2" "grep -q 'phase=\"second\",attempt=\"2\"' '$T/s3.marker'"
 check "marker: typed as a gauge" "grep -q '^# TYPE bench_phase_info gauge\$' '$T/s3.marker'"
 check "marker: removed after the last phase" "[ ! -e '$T/textfile/bench_phase.prom' ] && [ ! -e '$T/textfile/bench_phase.prom.tmp' ]"

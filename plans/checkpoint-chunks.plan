@@ -32,6 +32,8 @@
 #
 # 6 brokers + 3 clients + monitoring, ~$55/hr; ~1h50 of phases, ~2.3h in all.
 
+TEST="Checkpoint chunking"
+TEST_ABOUT="Is the depth-10,000 checkpoint stall head-of-line blocking in the input partition's raft log, and does splitting the checkpoint fix it? Plus partition scale-out and committed relay at fan-out 50."
 TOPOLOGY=six-broker
 # Region preference for autorun's region selection (first with capacity wins).
 # us-west-2 first: every six-broker series so far ran in us-west-2a, and the
@@ -46,13 +48,23 @@ E2=(ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 ACKS=all RF=3
 LIVE=(STATE=snapshot SNAPSHOT_MODE=live CHECKPOINT_INLINE=false)
 
 # --- the checkpoint question, interleaved so drift lands on every arm --------
+about "baseline: no state" \
+  "Depth 1,000 and 10,000 with no snapshot: the floor for the stalls column. Watch the headline latency."
 phase off 7 run e2 "${E2[@]}" STATE=off
 for t in 1 2 3; do
+  about "trial $t of 3: whole checkpoint, one record" \
+    "The ~2 MB checkpoint as one raft entry every 5s. Look for produce stalls every 5s in the headline latency."
   phase "whole-t$t" 7 run e2 "${E2[@]}" "${LIVE[@]}" CHECKPOINT_INTERVAL_MS=5000 CHECKPOINT_CHUNK_BYTES=0
+  about "trial $t of 3: checkpoint in 64 KiB chunks" \
+    "The same checkpoint as 64 KiB records. If the stall is head-of-line blocking, the 5s spikes are gone."
   phase "chunk64k-t$t" 7 run e2 "${E2[@]}" "${LIVE[@]}" CHECKPOINT_INTERVAL_MS=5000 CHECKPOINT_CHUNK_BYTES=65536
 done
 for t in 1 2; do
+  about "trial $t of 2: checkpoint in 16 KiB chunks" \
+    "Smaller chunks: does the tail fall further than with 64 KiB?"
   phase "chunk16k-t$t" 7 run e2 "${E2[@]}" "${LIVE[@]}" CHECKPOINT_INTERVAL_MS=5000 CHECKPOINT_CHUNK_BYTES=16384
+  about "trial $t of 2: whole checkpoint every 30s" \
+    "One record, six times less often: separates the cost per checkpoint from its size."
   phase "interval30s-t$t" 7 run e2 "${E2[@]}" "${LIVE[@]}" CHECKPOINT_INTERVAL_MS=30000 CHECKPOINT_CHUNK_BYTES=0
 done
 
@@ -61,7 +73,11 @@ PART=(ORDERS_PER_RECORD=15 PAYLOAD=650 ACKS=all RF=3 WARMUP=10s DRAIN=30s
       WRITE_CACHING=true LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=4
       GUEST=book-matcher STATE=off CANCEL_FRACTION=0.3 DURATION=60s FANOUT=1
       MODE=partitions 'PARTITION_LEVELS=1 2 4 8')
+about "scale-out across input partitions at 120k orders/sec" \
+  "1, 2, 4 and 8 partitions, empty book, no state. Watch relay throughput and the reactor heatmap."
 phase partitions-120k 12 run e2 "${PART[@]}" RATE=120000
+about "scale-out across input partitions at 240k orders/sec" \
+  "The same at twice the rate. Watch relay throughput, transform lag and the reactor heatmap."
 phase partitions-240k 12 run e2 "${PART[@]}" RATE=240000
 
 # --- josh-410: commit-gated relay at fan-out 50 -----------------------------
@@ -69,7 +85,11 @@ FO50=(ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 ACKS=all RF=3
       WARMUP=10s DRAIN=30s RELAY_STAGE_METRICS=true WRITE_CACHING=true
       LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=1 GUEST=book-matcher STATE=off CANCEL_FRACTION=0.3
       MODE=bookdepth BOOKDEPTH_LEVELS=1000 DURATION=60s FANOUT=50)
+about "fan-out 50, precommit (the reference)" \
+  "Depth 1,000, 50 subscribers. Watch the headline latency and transform lag."
 phase fo50-precommit 6 run e2 "${FO50[@]}" RELAY_DELIVERY=precommit
 for t in 1 2; do
+  about "trial $t of 2: fan-out 50, committed" \
+    "Commit-gated delivery at 50 subscribers: is the steady transform lag gone? Watch transform lag."
   phase "fo50-committed-t$t" 6 run e2 "${FO50[@]}" RELAY_DELIVERY=committed
 done

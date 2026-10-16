@@ -840,15 +840,15 @@
         "enable": true,
         "hide": false,
         "iconColor": "rgba(130, 110, 220, 0.6)",
-        "expr": "max by (plan, phase, attempt) (max_over_time(bench_phase_info[11s]))",
+        "expr": "max by (plan, phase, attempt, step, steps, test, title, about, display) (max_over_time(bench_phase_info[11s]))",
         "target": {
           "refId": "Anno",
-          "expr": "max by (plan, phase, attempt) (max_over_time(bench_phase_info[11s]))",
+          "expr": "max by (plan, phase, attempt, step, steps, test, title, about, display) (max_over_time(bench_phase_info[11s]))",
           "interval": "10s"
         },
         "step": "10s",
-        "titleFormat": "{{phase}}",
-        "textFormat": "plan {{plan}}, phase {{phase}}, attempt {{attempt}}",
+        "titleFormat": "{{display}}",
+        "textFormat": "{{about}} (plan {{plan}}, phase {{phase}}, attempt {{attempt}})",
         "tagKeys": "plan,phase",
         "useValueForTime": false
       },

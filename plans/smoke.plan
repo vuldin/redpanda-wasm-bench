@@ -6,6 +6,8 @@
 #
 # Three brokers in one AZ. Expect roughly $30-40 all in.
 
+TEST="Smoke test"
+TEST_ABOUT="Does your build, keys and AWS account work end to end, before you spend on a full plan?"
 TOPOLOGY=single-az
 DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
 
@@ -13,6 +15,12 @@ E2=(ORDERS_PER_RECORD=15 RATE=30000 FANOUT=20 PAYLOAD=650 ACKS=all RF=3
     DURATION=30s WARMUP=10s DRAIN=30s RELAY_STAGE_METRICS=true WRITE_CACHING=true LINGER_MS=0 SAMPLE_EVERY=10
     PRODUCERS=1 MODE=bookdepth GUEST=book-matcher CANCEL_FRACTION=0.3)
 
+about "matcher at depth 0 and 1,000" \
+  "30s at 30k orders/sec with 30% cancels, no state. Watch the headline latency and the transform-health stats."
 phase smoke-depth 6 run e2 "${E2[@]}" STATE=off 'BOOKDEPTH_LEVELS=0 1000'
+about "one graceful leadership transfer" \
+  "Moves the matcher's input leader with a 5s graceful drain and checks the book survives. Watch the stateful-transforms row of the overview."
 phase smoke-graceful-transfer 8 run durability ACTIONS=transfer DEPTHS=1000 TRIALS=1 GRACEFUL_MS=5000 OUT=@RUN_DIR@/smoke-transfer
+about "one broker kill" \
+  "SIGKILLs the input partition's leader at depth 1,000 and checks what the book recovers. Watch the stateful-transforms row of the overview."
 phase smoke-kill 8 run durability ACTIONS=kill DEPTHS=1000 TRIALS=1 OUT=@RUN_DIR@/smoke-kill

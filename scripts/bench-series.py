@@ -6,7 +6,9 @@ drawn, and Grafana annotations live in Grafana's own database, which a bundle
 does not carry. So the run's structure goes in as two series the dashboards
 already draw as shaded regions:
 
-  bench_phase_info{plan, phase, attempt, outcome} 1    from <run-dir>/autorun.log
+  bench_phase_info{plan, phase, attempt, outcome,      from <run-dir>/autorun.log
+                   step, steps, test, title, about,    and plan-phases.tsv
+                   display} 1
   bench_window_info{window} 1                          from the export's windows
   loadgen_phase_info{label, phase} 1                   from each phase's log
 
@@ -55,6 +57,42 @@ def phases(log_text):
             a, t0 = open_.pop(name)
             out.append((name, a, t0, epoch(ts), "ok" if kind == "OK" else "failed"))
     return sorted(out, key=lambda p: p[2])
+
+
+def plan_phases(run_dir, plan, ps):
+    """(test, {phase: (step, title, about)}, steps): what the live marker
+    carries, from the plan-phases.tsv autorun writes at the start of a run.
+    A run from before that file gets the plan's name as its test, its phases
+    numbered in the order they first started, and their names as titles."""
+    f = run_dir / "plan-phases.tsv"
+    test, info = plan, {}
+    if f.exists():
+        for line in f.read_text().splitlines():
+            cols = line.split("\t")
+            if line.startswith("# test"):
+                test = (cols[1:2] or [plan])[0] or plan
+            elif len(cols) >= 5 and not line.startswith("#"):
+                info[cols[1]] = (cols[0], cols[3] or cols[1], cols[4])
+    else:
+        for name, *_ in ps:
+            if not name.startswith("P0-") and name not in info:
+                info[name] = (str(len(info) + 1), name, "")
+    return test, info, len(info)
+
+
+def phase_labels(plan, name, attempt, test, info, steps):
+    """The display labels for one phase attempt; the same text autorun's
+    phase_marker writes for a live run."""
+    if name in info:
+        step, title, about = info[name]
+        display = f"{test} - phase {step} of {steps}: {title}"
+    else:
+        step, steps, title = "", "", name
+        about = "provisioning and readiness, before the plan's phases"
+        display = f"{test} - setup: {name}"
+    if int(attempt) > 1:
+        display += f" (attempt {attempt})"
+    return {"step": step, "steps": steps, "test": test, "title": title, "about": about, "display": display}
 
 
 GO_DUR = re.compile(r"(\d+(?:\.\d+)?)(h|ms|us|µs|ns|m|s)")
@@ -134,8 +172,10 @@ def render(run_dir, windows, step=5.0):
     if ps:
         lines.append("# TYPE bench_phase_info gauge")
         lines.append("# HELP bench_phase_info Autorun phase in progress (from autorun.log).")
+        test, info, steps = plan_phases(run_dir, plan, ps)
         for name, attempt, t0, t1, outcome in ps:
             lines += series("bench_phase_info", {"plan": plan, "phase": name, "attempt": attempt,
+                                                 **phase_labels(plan, name, attempt, test, info, steps),
                                                  "outcome": outcome, "source": "autorun-log"}, t0, t1, step)
     stages = []
     for name, *_ in ps:
