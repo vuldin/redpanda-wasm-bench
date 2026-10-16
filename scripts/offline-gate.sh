@@ -91,6 +91,11 @@ fi
 
 echo ""
 heads="bench=$(git -C "$ROOT" rev-parse HEAD) clients=$(git -C "$CLIENTS_REPO" rev-parse HEAD) broker=$(git -C "$REDPANDA_SRC" rev-parse HEAD)"
+# A pass is only worth recording if it names three commits. A checkout that
+# vanished mid-gate (a removed worktree, 2026-10-16) left rev-parse empty and
+# the gate recorded "bench= clients=... broker=...".
+[[ "$heads" =~ ^bench=[0-9a-f]{40}\ clients=[0-9a-f]{40}\ broker=[0-9a-f]{40}$ ]] \
+  || bad "could not read all three commits ($heads)"
 if [ "$fail" = 0 ]; then
   mkdir -p "$(dirname "$GATE_FILE")"
   echo "$heads" >> "$GATE_FILE"
