@@ -413,7 +413,22 @@ it, so you can regenerate the tables (RESULTS.md in that plan's run directory).
   produce leg, and replicating the checkpoint in the background does not
   remove it (`checkpoint-ab.plan`): the ~2 MB region goes through the input
   partition's own raft log as one entry, so produces queue behind it.
-  `checkpoint-chunks.plan` tests splitting it.
+  Splitting it fixes that (`checkpoint-chunks.plan`, three trials):
+  `data_transforms_state_checkpoint_chunk_bytes=16384` gives p99.9 1.05ms and
+  a produce-leg p99.99 of 1.85-2.15ms with no periodic stalls - the same as no
+  state at all (0.99ms, 2.35ms) - against 3.7-5.2ms and 6.4-7.1ms with one
+  record per checkpoint; 64 KiB chunks give ~1.25ms. A 30s interval instead
+  only makes the stall rarer: p99.9 drops to ~1.1ms but the p99.99 stays
+  ~6ms, and a crash restores an older snapshot.
+- Spreading input across partitions cuts the tail (1 -> 8 partitions at
+  120k orders/sec: p99.9 6.3 -> 1.4ms), and 4 partitions held 240k at p50
+  1.2ms. The in-broker relay delivers within a broker only, so with
+  partitions led by brokers that host no relay consumer the in-broker arm
+  loses those receipts (half at 4 and 8 partitions here); measure scale-out
+  with receipts from the output topic (`checkpoint-chunks.plan`).
+- Commit-gated relay delivery at fan-out 50 was clean in 2/2 trials (p50
+  ~0.78ms, p99.9 1.4-2.0ms against 0.47ms and 1.0ms precommit), not the
+  steady lag seen once before (`checkpoint-chunks.plan`).
 
 ## Gotchas that have cost real runs
 
