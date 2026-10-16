@@ -317,12 +317,16 @@ WINDOW_VARIABLE = {
     "name": "window",
     "label": "latency samples",
     "type": "custom",
-    "query": f"all : {ALL_SAMPLES},measured only : {MEASURED_ONLY}",
+    "query": f"measured only : {MEASURED_ONLY},all : {ALL_SAMPLES}",
+    # Measured only by default: that is what RESULTS.md is computed from, and
+    # "all" puts each level's preload/warmup spike (5-25ms against a ~1ms
+    # steady state) on the chart, which also flattens the y-axis. Older runs
+    # get loadgen's stage marker from bench-series.py, so this works on them.
     "options": [
-        {"text": "all", "value": ALL_SAMPLES, "selected": True},
-        {"text": "measured only", "value": MEASURED_ONLY, "selected": False},
+        {"text": "measured only", "value": MEASURED_ONLY, "selected": True},
+        {"text": "all", "value": ALL_SAMPLES, "selected": False},
     ],
-    "current": {"text": "all", "value": ALL_SAMPLES, "selected": True},
+    "current": {"text": "measured only", "value": MEASURED_ONLY, "selected": True},
     "hide": 0,
 }
 # loadgen's timed windows, labelled with the runner's level tag

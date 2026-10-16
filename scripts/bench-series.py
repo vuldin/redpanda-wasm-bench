@@ -8,6 +8,13 @@ already draw as shaded regions:
 
   bench_phase_info{plan, phase, attempt, outcome} 1    from <run-dir>/autorun.log
   bench_window_info{window} 1                          from the export's windows
+  loadgen_phase_info{label, phase} 1                   from each phase's log
+
+The last is loadgen's own stage marker (preload, warmup, measure, drain per
+level), rebuilt from the timestamped lines loadgen prints and the runner's
+level headers, which every phase log keeps. A run whose loadgen published the
+marker has it already; this gives older runs the same thing, so the
+dashboards' "measured only" view works on them too.
 
 one sample every STEP seconds while each is in progress. The live marker
 autorun writes on the monitoring host (scripts/autorun.sh phase_marker) is the
@@ -48,6 +55,44 @@ def phases(log_text):
             a, t0 = open_.pop(name)
             out.append((name, a, t0, epoch(ts), "ok" if kind == "OK" else "failed"))
     return sorted(out, key=lambda p: p[2])
+
+
+GO_DUR = re.compile(r"(\d+(?:\.\d+)?)(h|ms|us|µs|ns|m|s)")
+STAGE = re.compile(r"^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) loadgen: "
+                   r"(preloading|warmup|timed window|sent \d+ orders in \S+, draining receipts for (\S+))")
+LEVEL = re.compile(r"^#{6,} (\S+) :")
+
+
+def go_seconds(s):
+    """Seconds in a Go duration string ("30s", "1m30s", "500ms")."""
+    mult = {"h": 3600, "m": 60, "s": 1, "ms": 1e-3, "us": 1e-6, "µs": 1e-6, "ns": 1e-9}
+    return sum(float(n) * mult[u] for n, u in GO_DUR.findall(s))
+
+
+def loadgen_stages(log_text):
+    """[(level label, stage, start_s, end_s)] from one phase log's loadgen lines.
+
+    A stage runs until the next one starts; drain runs for the duration loadgen
+    announced. loadgen's log timestamps are second-granular, UTC on the bench
+    hosts."""
+    out, label, cur = [], None, None
+    for line in log_text.splitlines():
+        m = LEVEL.match(line)
+        if m:
+            label = m[1]
+            continue
+        m = STAGE.match(line)
+        if not m or label is None:
+            continue
+        t = datetime.strptime(m[1], "%Y/%m/%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+        stage = {"preloading": "preload", "warmup": "warmup", "timed window": "measure"}.get(m[2], "drain")
+        if cur:
+            out.append((cur[0], cur[1], cur[2], t))
+        cur = (label, stage, t)
+        if stage == "drain":
+            out.append((label, "drain", t, t + go_seconds(m[3] or "0s")))
+            cur = None
+    return out
 
 
 def windows_from(path):
@@ -92,6 +137,19 @@ def render(run_dir, windows, step=5.0):
         for name, attempt, t0, t1, outcome in ps:
             lines += series("bench_phase_info", {"plan": plan, "phase": name, "attempt": attempt,
                                                  "outcome": outcome, "source": "autorun-log"}, t0, t1, step)
+    stages = []
+    for name, *_ in ps:
+        f = run_dir / f"{name}.log"
+        if f.exists():
+            stages += loadgen_stages(f.read_text(errors="replace"))
+    if stages:
+        # 1s samples, like loadgen's own scrape: the dashboards read this
+        # series over a 3s window.
+        lines.append("# TYPE loadgen_phase_info gauge")
+        lines.append("# HELP loadgen_phase_info loadgen stage per level (rebuilt from the phase logs).")
+        for label, stage, t0, t1 in sorted(stages, key=lambda s: (s[0], s[1], s[2])):
+            lines += series("loadgen_phase_info", {"label": label, "phase": stage,
+                                                   "source": "phase-log"}, t0, t1, 1.0)
     if windows:
         lines.append("# TYPE bench_window_info gauge")
         lines.append("# HELP bench_window_info Measured window captured by the metrics export.")

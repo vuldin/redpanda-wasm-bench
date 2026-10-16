@@ -91,8 +91,9 @@ docker compose down           # when you are done
 ```
 
 Every graph is shaded by autorun phase (more layers are toggles at the top),
-the strip at the top names the phase at the end of the selected range, and the "latency
-samples" switch hides warmup and drain. Only the measured windows hold data,
+the strip at the top names the phase at the end of the selected range, and
+latency shows only the measured samples by default (the "latency samples"
+switch brings back each level's start-up spike). Only the measured windows hold data,
 so the gaps between them are empty by design. One bundle at a time (they share
 ports 3000 and 9090). A bundle exported before 2026-10-16 has no phase
 shading: stop it, run `scripts/bundle-add-phases.sh results/run-...`, and

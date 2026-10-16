@@ -225,8 +225,11 @@ What you see:
   dashboard.
 - The "now running" strip names the phase at the END of the selected range,
   so zooming to a stretch of the run tells you what was running there.
-- "latency samples: measured only" keeps just the samples the published
-  numbers come from (needs the loadgen stage marker, so newer runs only).
+- Latency panels open on "latency samples: measured only": the samples the
+  published numbers come from, without each level's preload and warmup spike
+  (which also flattened the y-axis). Switch to "all" to see those. Bundles of
+  older runs get the loadgen stages this needs from their phase logs, via
+  `scripts/bundle-add-phases.sh`.
 - Only the measured windows were exported (padded 30s), so the gaps between
   them are empty by design: they were provisioning, deploys and settling.
 

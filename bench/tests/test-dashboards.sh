@@ -44,6 +44,8 @@ expect("latency queries keep NaN (no >= 0 filter) and carry $window",
 expect("spanNulls is off on every time series panel",
        all(p["fieldConfig"]["defaults"]["custom"].get("spanNulls") is False
            for fn in md.DASHBOARDS.values() for p in fn()["panels"] if p.get("type") == "timeseries"))
+expect("latency samples default to measured only",
+       md.WINDOW_VARIABLE["current"]["value"] == md.MEASURED_ONLY)
 expect("measured-only is a NaN mask (X * M / M), not an `and` filter",
        md.MEASURED_ONLY.startswith("* on() ") and " / on() " in md.MEASURED_ONLY and md.ALL_SAMPLES == "* 1")
 expect("now-running strips always return a series (idle fallback)",
@@ -160,6 +162,19 @@ with tempfile.TemporaryDirectory() as td:
            nph == 3 and nwin == 1 and lines[-1] == "# EOF"
            and any(l.startswith('bench_phase_info{plan="checkpoint-ab",phase="inline-t1",attempt="2",outcome="ok"') for l in lines)
            and sum(l.startswith('bench_window_info{window="w1"}') for l in lines) == 3)
+
+    # loadgen's stages, rebuilt from a phase log's runner headers and loadgen lines.
+    plog = """############ bookdepth-1000 : rate=30000
+2026/10/16 12:38:21 loadgen: preloading 1000 resting orders per side (134 records) before warmup
+2026/10/16 12:38:24 loadgen: warmup 10s at 30000 orders/sec across 1 producer(s) (fixed pacing, linger 0ms)
+2026/10/16 12:38:36 loadgen: timed window 1m30s at 30000 orders/sec
+2026/10/16 12:40:06 loadgen: sent 180000 orders in 1m30.001s, draining receipts for 30s
+"""
+    st = [(l, p, int(t1 - t0)) for l, p, t0, t1 in bs.loadgen_stages(plog)]
+    expect("bench-series: loadgen stages from a phase log (preload, warmup, 90s measure, 30s drain)",
+           st == [("bookdepth-1000", "preload", 3), ("bookdepth-1000", "warmup", 12),
+                  ("bookdepth-1000", "measure", 90), ("bookdepth-1000", "drain", 30)])
+    expect("bench-series: Go durations", (bs.go_seconds("1m30s"), bs.go_seconds("500ms")) == (90, 0.5))
 
     # metrics-bundle.py must still refuse a bundle with a missing window when
     # the run-wide series block spans it.

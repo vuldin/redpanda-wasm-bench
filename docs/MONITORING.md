@@ -230,19 +230,25 @@ empty rate window, plus `spanNulls: false`. The NaN has to stay: filtering it
 out leaves no points in the gap, and Grafana 11.6 joins across missing points
 (its `insertNulls` setting did not change that when tried).
 
-The spike at the start of each level is real, but it is warmup. The first rate
-window after a deploy or preload holds the first, slowest records. loadgen
-drops its warmup from the published numbers; the broker's histograms do not.
-The **latency samples** switch at the top of each dashboard picks between:
+The spike at the start of each level is real, but it is the level's start-up:
+loadgen preloads the book (a burst of resting orders) and warms up before its
+timed window, and the first rate window holds those queued records, 5-25ms
+against a ~1ms steady state. loadgen leaves both out of the published numbers;
+the broker's histograms do not. The **latency samples** switch at the top of
+each dashboard picks between:
 
-- **all**: every sample the broker recorded, warmup and drain included;
-- **measured only**: points whose whole rate window lies inside loadgen's
+- **measured only** (the default): points whose whole rate window lies inside loadgen's
   timed window (`loadgen_phase_info{phase="measure"}` now and one rate window
   ago). These are the samples the published numbers come from, so use this
   when comparing a chart with `RESULTS.md`. It is a 1/0 mask applied as
   `X * M / M`, so that outside the window the value is 0/0 = NaN and the line
-  breaks there too. Needs a loadgen that publishes its phase, so it shows
-  nothing on a cluster deployed before it did.
+  breaks there too. It needs loadgen's stage marker: a current loadgen
+  publishes it live, and every bundle has it, rebuilt by `bench-series.py`
+  from the timestamped lines loadgen prints into each phase log - so older
+  runs get it too. A live cluster deployed before the marker shows nothing
+  here; switch to "all".
+- **all**: every sample the broker recorded, preload, warmup and drain
+  included.
 
 ### overview
 
