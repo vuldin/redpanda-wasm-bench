@@ -83,17 +83,10 @@ delete_level() {
     rpkc topic delete "$t" >/dev/null 2>&1 || true
   done
 }
-# Raft leadership changes of this run's own topics, summed over every broker so
-# far. Only these: the first idempotent produce of a run creates and elects the
-# internal id_allocator partition, which is no move.
-leader_changes() {
-  local total=0 u v
-  for u in ${ADMIN_URLS//,/ }; do
-    v="$(curl -sf --max-time 10 "$u/metrics" | awk -v t="topic=\"(gwevents|gw|gwk)-$RUN_ID" '/^vectorized_raft_leadership_changes\{/ && $0 ~ t {s += $NF} END {printf "%.0f", s}')"
-    total=$(( total + ${v:-0} ))
-  done
-  echo "$total"
-}
+# Raft leadership changes of this run's own topics only: the first idempotent
+# produce of a run creates and elects the internal id_allocator partition,
+# which is no move.
+leader_changes() { raft_leader_changes "(gwevents|gw|gwk)-$RUN_ID"; }
 
 trap 'delete_level; cfg_restore_all' EXIT
 # Restored by cfg_restore_all on exit.

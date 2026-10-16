@@ -69,6 +69,19 @@ cfg_restore_all() {
   done <<< "$CFG_SAVED"
 }
 
+# Raft leadership changes of the topics whose name matches the extended regex
+# $1, summed over every broker (ADMIN_URLS) so far. A runner samples it before
+# and after a measured window: anything but 0 means a partition moved inside
+# the window, and its latency and delivery include the move.
+raft_leader_changes() {
+  local pat="$1" total=0 u v
+  for u in ${ADMIN_URLS//,/ }; do
+    v="$(curl -sf --max-time 10 "$u/metrics" | awk -v t="topic=\"$pat" '/^vectorized_raft_leadership_changes\{/ && $0 ~ t {s += $NF} END {printf "%.0f", s}')"
+    total=$(( total + ${v:-0} ))
+  done
+  echo "$total"
+}
+
 # --- teardown ---------------------------------------------------------------
 
 # Remove artifacts belonging to THIS run only.

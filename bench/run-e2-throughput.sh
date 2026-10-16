@@ -323,6 +323,13 @@ echo "=== node $PIN_NODE has $NUM_SHARDS shards; producer on core $PIN_CORE, con
 echo "=== disabling core balancing so the pins hold for this run ==="
 cfg_set core_balancing_continuous false
 cfg_set core_balancing_on_core_count_change false
+# And the leader balancer, for the same reason one level up: the runner
+# co-locates the input and relay partitions' leaders, and a balancer move
+# inside a window both breaks that and stalls the producer for seconds. In the
+# gateway series (2026-10-16) it moved the input leader about once a minute
+# and put a ~4.5s p99 on most levels. Every level records leader_changes (of
+# this run's topics) during its window, which should be 0.
+cfg_set enable_leader_balancer false
 
 # NOTE: data_transforms_max_instances_per_core and
 # data_transforms_per_function_memory_limit are needs_restart:yes. Setting them
@@ -684,7 +691,9 @@ EOF
   #                  against the usual 650B payload, so the mass series is a
   #                  record-size sweep too unless this is on the page
   #   total_p999us - the tail figure this round exists to produce
-  echo "level offered/s achieved/s cores relay_p50us relay_p99us total_p50us match_us/inv match_us/order probe_us/inv dropped clean opr records/s bytes/s total_p999us"
+  #   leader_changes - raft leadership changes of this run's topics during
+  #                  the measured window (0 unless something moved them)
+  echo "level offered/s achieved/s cores relay_p50us relay_p99us total_p50us match_us/inv match_us/order probe_us/inv dropped clean opr records/s bytes/s total_p999us leader_changes"
 } > "$RESULTS_DIR/summary.txt"
 
 if [ "$MODE" = "fanout" ]; then
@@ -931,13 +940,14 @@ for level in $SWEEP; do
     echo "    -input-topic below matches $orders; producer input and relay ntp are" >&2
     echo "    node-co-located (the relay has no cross-node hop); both transforms" >&2
     echo "    report running. Skipping this level rather than recording noise." >&2
-    printf "%s %s PRECHECK-FAILED - - - - - - - - false %s - - -\n" "$level" "$this_rate" "$this_opr" >> "$RESULTS_DIR/summary.txt"
+    printf "%s %s PRECHECK-FAILED - - - - - - - - false %s - - - -\n" "$level" "$this_rate" "$this_opr" >> "$RESULTS_DIR/summary.txt"
     sleep "$SETTLE"
     continue
   fi
   echo "    ok: $pre_recv receipts"
 
   bash "$SCRAPE" snap "$ADMIN_URLS" "$RESULTS_DIR/${tag}.before.json"
+  lc0="$(raft_leader_changes "[^\"]*$RUN_ID")"
 
   echo "--- loadgen: arm=$CONSUMER_ARM -input-topic $orders ${recv_args[*]} -rate $this_rate -orders-per-record $this_opr -producers $PRODUCERS -linger-ms $LINGER_MS -acks $ACKS ---"
   "$BIN/loadgen" \
@@ -955,6 +965,8 @@ for level in $SWEEP; do
     -label "$tag" -out "$RESULTS_DIR/${tag}.json" || true
 
   bash "$SCRAPE" snap "$ADMIN_URLS" "$RESULTS_DIR/${tag}.after.json"
+  lchg=$(( $(raft_leader_changes "[^\"]*$RUN_ID") - lc0 ))
+  [ "$lchg" -gt 0 ] && echo "WARN: $lchg leadership change(s) during $tag - its latency and clean columns include them"
   [ "$CONSUMER_ARM" = "external" ] && stop_external_fanout
 
   # A level that dies (loadgen crash, broker wedge) must not take the rest of
@@ -962,7 +974,7 @@ for level in $SWEEP; do
   # aborted sweep costs a whole cluster session to redo.
   if [ ! -s "$RESULTS_DIR/${tag}.json" ]; then
     echo "!!! level $tag produced no report; recording it as failed and continuing"
-    printf "%s %s FAILED - - - - - - - - false %s - - -\n" "$level" "$this_rate" "$this_opr" >> "$RESULTS_DIR/summary.txt"
+    printf "%s %s FAILED - - - - - - - - false %s - - - %s\n" "$level" "$this_rate" "$this_opr" "$lchg" >> "$RESULTS_DIR/summary.txt"
     sleep "$SETTLE"
     continue
   fi
@@ -1062,9 +1074,9 @@ for level in $SWEEP; do
   recps=$(jq -r '.rates.achieved_records_per_sec // "n/a"' "$RESULTS_DIR/${tag}.json")
   byteps=$(jq -r '((.rates.offered_envelopes_per_sec // 0) * 2 * (.config.input_bytes_per_record // 0)) | if . > 0 then . else "n/a" end' "$RESULTS_DIR/${tag}.json")
   tp999=$(jq -r '.total.p999_micros // "n/a"' "$RESULTS_DIR/${tag}.json")
-  printf "%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n" \
+  printf "%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n" \
     "$level" "$this_rate" "$achieved" "${cores_used:-?}" "$rp50" "$rp99" "$tp50" "$minv" "$mord" "$pinv" "$dropped" "$clean" \
-    "$this_opr" "$recps" "$byteps" "$tp999" \
+    "$this_opr" "$recps" "$byteps" "$tp999" "$lchg" \
     >> "$RESULTS_DIR/summary.txt"
 
   if [ "$clean" != "true" ]; then
