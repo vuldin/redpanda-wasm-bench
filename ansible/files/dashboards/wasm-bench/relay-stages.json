@@ -858,7 +858,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "enable": true,
+        "enable": false,
         "hide": false,
         "iconColor": "rgba(80, 200, 120, 0.5)",
         "expr": "max by (label) (loadgen_phase_info{phase=\"measure\"})",

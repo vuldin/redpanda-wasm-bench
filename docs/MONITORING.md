@@ -163,7 +163,10 @@ Every time-series panel on all three dashboards is shaded with one region per
 autorun phase attempt (the "autorun phase" toggle at the top hides them).
 Hover a region for its plan, phase and attempt. A second annotation, "measured
 windows (loadgen)", shades each level's timed window in green, labelled with
-the runner's level tag (`bookdepth-10000`, `rate-60000`, ...).
+the runner's level tag (`bookdepth-10000`, `rate-60000`, ...). It is off by
+default, as is a bundle's "measured windows" (the exported windows): each sits
+inside a phase, and overlapping shaded layers blur the phase boundaries. Turn
+one on with its toggle when you want it.
 
 The overview opens on two strips that describe the END of the selected range:
 

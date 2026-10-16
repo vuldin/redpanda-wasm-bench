@@ -168,9 +168,18 @@ providers:
     # ---------------------------------------------------------------- dashboards
     src = ROOT / "ansible" / "files" / "dashboards"
     dst = out / "grafana" / "dashboards"
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.copytree(src, dst)
+    # Refresh the CONTENTS, never the directory itself. Grafana bind-mounts
+    # ./grafana/dashboards, and a mount follows the directory it was given: a
+    # deleted-and-recreated one leaves a running bundle's Grafana on the old,
+    # gone directory, logging "readdirent /var/lib/grafana/dashboards: no such
+    # file or directory" every 10s until restarted (2026-10-16).
+    dst.mkdir(parents=True, exist_ok=True)
+    for old in list(dst.iterdir()):
+        if old.is_dir():
+            shutil.rmtree(old)
+        else:
+            old.unlink()
+    shutil.copytree(src, dst, dirs_exist_ok=True)
     retimed = []
     for p in sorted(dst.rglob("*.json")):
         d = json.loads(p.read_text())
@@ -186,10 +195,12 @@ providers:
         # bundle ever populated, so it showed nothing.
         anns = [x for x in d.setdefault("annotations", {}).get("list", [])
                 if x.get("name") != "measured windows"]
+        # Off by default, like loadgen's windows: one sits inside every phase,
+        # and overlapping layers blur the phase boundaries. Toggle at the top.
         anns.append({
             "name": "measured windows",
             "datasource": {"type": "prometheus", "uid": "prometheus"},
-            "enable": True,
+            "enable": False,
             "hide": False,
             "iconColor": "rgba(255, 96, 96, 0.2)",
             "expr": "max by (window) (bench_window_info)",

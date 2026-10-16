@@ -218,9 +218,11 @@ docker compose down           # stop it (the data stays)
 What you see:
 
 - Shading on every graph: one region per autorun phase (hover for plan,
-  phase, attempt and outcome), one per exported window, and - for runs whose
-  loadgen publishes its stage - loadgen's measured windows in green. Each has
-  a toggle at the top of the dashboard.
+  phase, attempt and outcome). Two more layers are off by default, because
+  each sits inside a phase and overlapping layers blur the boundaries: the
+  exported windows, and - for runs whose loadgen publishes its stage -
+  loadgen's measured windows per level. Their toggles are at the top of the
+  dashboard.
 - The "now running" strip names the phase at the END of the selected range,
   so zooming to a stretch of the run tells you what was running there.
 - "latency samples: measured only" keeps just the samples the published
@@ -243,9 +245,10 @@ Things that trip people up:
   `docker compose ps` shows whether it is running.
 - One bundle at a time: they all use ports 3000 and 9090, so
   `docker compose down` the previous one first.
-- Prometheus reads the blocks only at startup. After changing a bundle (below),
+- Prometheus reads the blocks only at startup. After adding blocks (below),
   `docker compose down` and `up -d` again, and reload the browser tab: an open
-  tab keeps the dashboard it loaded.
+  tab keeps the dashboard it loaded. Refreshed dashboards alone are picked up
+  by a running Grafana within ~10s.
 - A bundle exported before 2026-10-16 has no phase or window shading (the
   phases were never in its data, and its window annotation never worked). Add
   both, and refresh its dashboards to the current ones:

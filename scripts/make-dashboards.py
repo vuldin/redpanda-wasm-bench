@@ -317,10 +317,13 @@ WINDOW_VARIABLE = {
 }
 # loadgen's timed windows, labelled with the runner's level tag
 # (bookdepth-10000, rate-60000, ...). Needs a loadgen that publishes its phase.
+# Off by default: each level's window sits inside its phase, and two shaded
+# layers on top of each other read as one muddy one. The toggle is at the top
+# of every dashboard.
 MEASURED_ANNOTATION = {
     "name": "measured windows (loadgen)",
     "datasource": DS,
-    "enable": True,
+    "enable": False,
     "hide": False,
     "iconColor": "rgba(80, 200, 120, 0.5)",
     "expr": 'max by (label) (loadgen_phase_info{phase="measure"})',

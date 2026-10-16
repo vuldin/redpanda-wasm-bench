@@ -90,8 +90,8 @@ docker compose up -d          # Prometheus on :9090, Grafana on :3000
 docker compose down           # when you are done
 ```
 
-Every graph is shaded by autorun phase and by exported window, the strip at
-the top names the phase at the end of the selected range, and the "latency
+Every graph is shaded by autorun phase (more layers are toggles at the top),
+the strip at the top names the phase at the end of the selected range, and the "latency
 samples" switch hides warmup and drain. Only the measured windows hold data,
 so the gaps between them are empty by design. One bundle at a time (they share
 ports 3000 and 9090). A bundle exported before 2026-10-16 has no phase
