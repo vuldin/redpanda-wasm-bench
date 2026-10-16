@@ -103,7 +103,11 @@ for s in e2:
         continue
     cols = [c for c in WANT if c in hdr]
     mode = (re.search(r"MODE=(\S+)", txt) or [None, ""])[1]
-    extra = ["p99us", "p9999us", "samples"]
+    # The two legs the end-to-end tail decomposes into: the client's acks=all
+    # produce (replication; the same in every deployment) and the in-broker
+    # relay to the consumer (broker clock). Where the e2e p99.99 comes from
+    # is the jitter question, so both are reported next to it.
+    extra = ["p99us", "p9999us", "produce_p9999us", "relay_p9999us", "samples"]
     w("")
     w("| " + " | ".join(cols + extra) + " |")
     w("|" + "---|" * (len(cols) + len(extra)))
@@ -123,10 +127,13 @@ for s in e2:
             cells.append(v)
         rep_json = os.path.join(os.path.dirname(s), f"{mode}-{r[0]}.json")
         try:
-            t = json.load(open(rep_json)).get("total") or {}
-            cells += [f"{t.get('p99_micros', 0):,.0f}", p9999(t), f"{t.get('samples', 0):,}"]
+            rep = json.load(open(rep_json))
+            t = rep.get("total") or {}
+            cells += [f"{t.get('p99_micros', 0):,.0f}", p9999(t),
+                      p9999(rep.get("produce") or {}), p9999(rep.get("relay_consume") or {}),
+                      f"{t.get('samples', 0):,}"]
         except (OSError, ValueError):
-            cells += ["-", "-", "-"]
+            cells += ["-", "-", "-", "-", "-"]
         w("| " + " | ".join(cells) + " |")
     w("")
 

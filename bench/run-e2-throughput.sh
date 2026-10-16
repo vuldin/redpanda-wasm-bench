@@ -148,11 +148,22 @@ READ_LINGER_US="${READ_LINGER_US:-0}"
 RATE="${RATE:-10000}"
 PAYLOAD="${PAYLOAD:-0}"
 GUEST="${GUEST:-matcher}"
-# book-matcher only: guest-state persistence (off|snapshot) and how often the
-# guest re-serialises its book into the shared region. STATE=off is the
-# no-durability baseline of the same binary.
+# book-matcher only: guest-state persistence (off|snapshot). STATE=off is the
+# no-durability baseline of the same binary. SNAPSHOT_MODE: live (the guest
+# keeps the region current slot by slot and registers only what is in use) or
+# full (re-serialise the whole book every SNAPSHOT_EVERY_MS into a fixed 4 MiB
+# registration - the original format, which put p99.9 at 10-18ms).
 STATE="${STATE:-off}"
+SNAPSHOT_MODE="${SNAPSHOT_MODE:-live}"
 SNAPSHOT_EVERY_MS="${SNAPSHOT_EVERY_MS:-500}"
+# CPU shares for the transforms scheduling group (broker
+# data_transforms_scheduling_group_shares, default 100 against 1000 for kafka,
+# fetch and produce). Unset leaves the cluster's value alone; set, it applies
+# for the run and is restored afterwards.
+TRANSFORM_SHARES="${TRANSFORM_SHARES:-}"
+# loadgen -timeline-ms: per-interval latency and lag buckets in the report, so
+# a stall can be placed in time. 0 turns it off.
+TIMELINE_MS="${TIMELINE_MS:-500}"
 # Fraction of input RECORDS that are cancels, with as many passive inserts
 # (loadgen -cancel-fraction). 0 is the historical traffic.
 CANCEL_FRACTION="${CANCEL_FRACTION:-0}"
@@ -445,7 +456,8 @@ deploy_producer() {
       echo "--- deploying producer $name (book-matcher STATE=$STATE) ---"
       bash "$BIN/deploy-transform.sh" "$ADMIN_URLS" "$name" "$orders" "$fills" "$wasm" \
         --env RISK_LIMIT=0 --env "STATE=$STATE" --env "SEQ_LANES=$PRODUCERS" \
-        --env "SNAPSHOT_EVERY_MS=$SNAPSHOT_EVERY_MS" --env "RELAY_DELIVERY=$RELAY_DELIVERY" >/dev/null || return 1
+        --env "SNAPSHOT_EVERY_MS=$SNAPSHOT_EVERY_MS" --env "SNAPSHOT_MODE=$SNAPSHOT_MODE" \
+        --env "RELAY_DELIVERY=$RELAY_DELIVERY" >/dev/null || return 1
       wait_for_transforms_running "$name"
       return ;;
     *) echo "unknown guest $guest" >&2; return 1 ;;
@@ -646,7 +658,7 @@ EOF
   echo "# fanout_shards=${FANOUT_SHARDS:-all($NUM_SHARDS)} fanout_shard_base=$FANOUT_SHARD_BASE"
   echo "# producer_acks=$ACKS"
   echo "# orders_per_record=$ORDERS_PER_RECORD mass_levels=${MASS_LEVELS} book_depth=$BOOK_DEPTH bookdepth_levels=${BOOKDEPTH_LEVELS}"
-  echo "# cancel_fraction=$CANCEL_FRACTION state=$STATE snapshot_every_ms=$SNAPSHOT_EVERY_MS relay_delivery=$RELAY_DELIVERY guest_sha256=$(guest_sha256 "$GUEST")"
+  echo "# cancel_fraction=$CANCEL_FRACTION state=$STATE snapshot_mode=$SNAPSHOT_MODE snapshot_every_ms=$SNAPSHOT_EVERY_MS relay_delivery=$RELAY_DELIVERY transform_shares=${TRANSFORM_SHARES:-cluster} guest_sha256=$(guest_sha256 "$GUEST")"
   echo "# fresh_topics_per_level=$FRESH_TOPICS_PER_LEVEL settle=${SETTLE}s"
   echo "# admin_endpoints_scraped=$(echo "$ADMIN_URLS" | tr ',' '\n' | grep -c .)"
   # New columns are APPENDED, never inserted: a summary.txt from an earlier
@@ -683,6 +695,10 @@ fi
 if [ -n "${RELAY_STAGE_METRICS:-}" ]; then
   echo "--- relay stage metrics for this sweep: $RELAY_STAGE_METRICS ---"
   cfg_set relay_stage_metrics_enabled "$RELAY_STAGE_METRICS"
+fi
+if [ -n "$TRANSFORM_SHARES" ]; then
+  echo "--- transforms scheduling group shares for this sweep: $TRANSFORM_SHARES ---"
+  cfg_set data_transforms_scheduling_group_shares "$TRANSFORM_SHARES"
 fi
 
 # READ_LINGER_US used to be applied ONLY in MODE=readlinger, while every mode
@@ -910,6 +926,7 @@ for level in $SWEEP; do
     -guest-sha256 "$(guest_sha256 "$this_guest")" \
     -linger-ms "$LINGER_MS" -acks "$ACKS" -producers "$PRODUCERS" \
     -drain "$DRAIN" -admin-url "$ADMIN_URLS" -transform-name "$want_producer" \
+    -timeline-ms "$TIMELINE_MS" \
     -label "$tag" -out "$RESULTS_DIR/${tag}.json" || true
 
   bash "$SCRAPE" snap "$ADMIN_URLS" "$RESULTS_DIR/${tag}.after.json"

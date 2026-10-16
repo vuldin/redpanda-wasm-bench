@@ -39,6 +39,9 @@ CANCEL_FRACTION="${CANCEL_FRACTION:-0.3}"
 PAYLOAD="${PAYLOAD:-650}"
 RF="${RF:-3}"
 SNAPSHOT_EVERY_MS="${SNAPSHOT_EVERY_MS:-500}"
+# live | full: see run-e2-throughput.sh. live keeps the region current after
+# every record, so a forced (drain) checkpoint has nothing to miss.
+SNAPSHOT_MODE="${SNAPSHOT_MODE:-live}"
 # snapshot | off. off is the no-durability control: same binary, no region
 # registered, so a restarted processor comes back with an empty book.
 STATE="${STATE:-snapshot}"
@@ -166,7 +169,7 @@ run_trial() {
     || { say "  FAIL: topic create"; return 1; }
   local req=""; [ "$STATE" = snapshot ] && req="--require-state-recovery"
   C "bash ./deploy-transform.sh $ADMIN_URLS $name $orders $fills ./book-matcher.wasm $req \
-      --env RISK_LIMIT=0 --env STATE=$STATE --env SEQ_LANES=$PRODUCERS --env SNAPSHOT_EVERY_MS=$SNAPSHOT_EVERY_MS" \
+      --env RISK_LIMIT=0 --env STATE=$STATE --env SEQ_LANES=$PRODUCERS --env SNAPSHOT_EVERY_MS=$SNAPSHOT_EVERY_MS --env SNAPSHOT_MODE=$SNAPSHOT_MODE" \
     >> "$base.deploy.txt" 2>&1 || { say "  FAIL: deploy (see $base.deploy.txt)"; cleanup_trial "$name" "$orders" "$fills"; return 1; }
   wait_running "$name" 90 || { say "  FAIL: transform never running"; cleanup_trial "$name" "$orders" "$fills"; return 1; }
   placement "$orders" "$base.placement-before.json"
@@ -315,7 +318,7 @@ replay_arm() {
   say "  REPLAY-VERDICT $tag ${v:-<no verdict>}"
 }
 
-say "# durability run $(date -u +%FT%TZ) state=$STATE graceful_transfer_ms=${GRACEFUL_MS:-null} kill_mode=$KILL_MODE actions=[$ACTIONS] depths=[$DEPTHS] trials=$TRIALS rate=$RATE opr=$OPR producers=$PRODUCERS cancel_fraction=$CANCEL_FRACTION rf=$RF snapshot_every_ms=$SNAPSHOT_EVERY_MS per_wave=$PER_WAVE waves=$WAVES kill_down_s=$KILL_DOWN_S replay=$REPLAY"
+say "# durability run $(date -u +%FT%TZ) state=$STATE snapshot_mode=$SNAPSHOT_MODE graceful_transfer_ms=${GRACEFUL_MS:-null} kill_mode=$KILL_MODE actions=[$ACTIONS] depths=[$DEPTHS] trials=$TRIALS rate=$RATE opr=$OPR producers=$PRODUCERS cancel_fraction=$CANCEL_FRACTION rf=$RF snapshot_every_ms=$SNAPSHOT_EVERY_MS per_wave=$PER_WAVE waves=$WAVES kill_down_s=$KILL_DOWN_S replay=$REPLAY"
 say "# guest sha256=$(C 'sha256sum book-matcher.wasm' | cut -d' ' -f1)"
 say "# broker cfg: $(C "$RPKR cluster config get data_transforms_per_function_memory_limit; $RPKR cluster config get data_transforms_state_snapshot_max_size; $RPKR cluster config get data_transforms_max_instances_per_core" | tr '\n' ' ')"
 # The leader balancer would move the partition on its own mid-trial and
