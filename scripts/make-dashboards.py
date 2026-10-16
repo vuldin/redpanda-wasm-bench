@@ -165,6 +165,16 @@ def stat(pid, title, x, y, w, h, targets, unit=None, desc=None, thresholds=None,
     return p
 
 
+def pad_label(expr, label):
+    """Add <label>_pad, the label zero-padded to two digits, so a heatmap's
+    rows (which arrive sorted as text) run s0, s1 ... s9, s10 instead of
+    s0, s1, s10, s11, s12, s2."""
+    # Reduced to (host, <label>_pad): Prometheus orders series by their whole
+    # label set, so leaving the original label on would sort by it first.
+    return (f'max by (host, {label}_pad) (label_replace(label_replace({expr}, '
+            f'"{label}_pad", "$1", "{label}", "(.*)"), "{label}_pad", "0$1", "{label}", "([0-9])"))')
+
+
 def heatmap(pid, title, x, y, w, h, expr, legend, desc=None, max_points=90):
     """One row per series, one cell per time bucket, coloured blue (idle) to
     red (saturated) on a fixed 0-100 scale - the layout that makes "one hot
@@ -194,6 +204,53 @@ def row(pid, title, y, collapsed=False):
             "gridPos": {"x": 0, "y": y, "w": 24, "h": 1}, "panels": []}
 
 
+# Which autorun phase was running, from the marker autorun writes on the
+# monitoring host (scripts/autorun.sh phase_marker). One shaded region per
+# phase attempt on every time-series panel. It is a scraped series, so it is in
+# an exported bundle too; a run older than the marker simply shows none.
+# Grafana's own annotations for this dashboard, listed explicitly because
+# scripts/annotate-phases.py draws an older run's phases with them.
+GRAFANA_ANNOTATIONS = {
+    "builtIn": 1,
+    "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+    "enable": True,
+    "hide": True,
+    "iconColor": "rgba(0, 211, 255, 1)",
+    "name": "Annotations & Alerts",
+    "type": "dashboard",
+}
+PHASE_EXPR = "max by (plan, phase, attempt) (bench_phase_info)"
+PHASE_ANNOTATION = {
+    "name": "autorun phase",
+    "datasource": DS,
+    "enable": True,
+    "hide": False,
+    "iconColor": "rgba(130, 110, 220, 0.6)",
+    "expr": PHASE_EXPR,
+    "target": {"refId": "Anno", "expr": PHASE_EXPR, "interval": "10s"},
+    "step": "10s",
+    "titleFormat": "{{phase}}",
+    "textFormat": "plan {{plan}}, phase {{phase}}, attempt {{attempt}}",
+    "tagKeys": "plan,phase",
+    "useValueForTime": False,
+}
+
+
+def now_running(pid, y):
+    """Full-width strip naming the phase in progress (at the END of the range)."""
+    p = stat(pid, "now running (autorun plan / phase / attempt)", 0, y, 24, 3,
+             [(PHASE_EXPR, "{{plan}} / {{phase}} / attempt {{attempt}}")],
+             desc=("The autorun phase at the end of the selected time range, "
+                   "from bench_phase_info. Empty between phases, outside an "
+                   "autorun plan, and for runs older than the marker. The "
+                   "shaded regions on every graph are the same series over "
+                   "time: hover one for its plan, phase and attempt."),
+             text_size=20)
+    p["options"].update({"textMode": "name", "colorMode": "none", "graphMode": "none"})
+    p["fieldConfig"]["defaults"]["noValue"] = "no autorun phase in progress"
+    return p
+
+
 def dashboard(uid, title, panels, desc, tags, refresh="5s", time_from="now-15m",
               variables=None):
     return {
@@ -211,7 +268,7 @@ def dashboard(uid, title, panels, desc, tags, refresh="5s", time_from="now-15m",
         # window lands below the scrape interval and draws gaps.
         "timepicker": {"refresh_intervals": ["2s", "5s", "10s", "30s", "1m", "5m"]},
         "panels": panels,
-        "annotations": {"list": []},
+        "annotations": {"list": [GRAFANA_ANNOTATIONS, PHASE_ANNOTATION]},
         "templating": {"list": variables or []},
     }
 
@@ -226,6 +283,8 @@ def dashboard(uid, title, panels, desc, tags, refresh="5s", time_from="now-15m",
 # ===========================================================================
 def overview():
     p, y = [], 0
+
+    p.append(now_running(9, y)); y += 3
 
     p.append(row(1, "Headline: in-broker fan-out latency", y)); y += 1
     p.append(panel(
@@ -351,7 +410,7 @@ def overview():
     y += 8
     p.append(heatmap(
         41, "reactor utilisation by shard (heatmap)", 0, y, 24, 22,
-        "vectorized_reactor_utilization", "{{host}} s{{shard}}",
+        pad_label("vectorized_reactor_utilization", "shard"), "{{host}} s{{shard_pad}}",
         desc=("One row per broker shard, coloured by how busy its reactor is "
               "(0-100%). Deliberately NOT aggregated over shards: relay and "
               "transform work lands on specific shards, and one hot shard "
@@ -611,18 +670,19 @@ def health():
     y += 8
     p.append(heatmap(
         23, "OS CPU utilisation per CPU, $broker (heatmap)", 0, y, 24, 14,
-        ('100 * sum by (host, cpu) (rate(node_cpu_seconds_total{role="broker",host=~"$broker",'
-         'mode=~"user|system|iowait|softirq|irq|nice|steal"}[$__rate_interval])) / '
-         'sum by (host, cpu) (rate(node_cpu_seconds_total{role="broker",host=~"$broker"}'
-         '[$__rate_interval]))'),
-        "{{host}} cpu{{cpu}}",
+        pad_label('100 * sum by (host, cpu) (rate(node_cpu_seconds_total{role="broker",host=~"$broker",'
+                  'mode=~"user|system|iowait|softirq|irq|nice|steal"}[$__rate_interval])) / '
+                  'sum by (host, cpu) (rate(node_cpu_seconds_total{role="broker",host=~"$broker"}'
+                  '[$__rate_interval]))', "cpu"),
+        "{{host}} cpu{{cpu_pad}}",
         desc=("Every logical CPU of the selected brokers, coloured by OS-level "
               "busy time (everything but idle). Shows which CPUs redpanda's "
               "reactors occupy, which the OS and interrupts use, and whether a "
               "co-located process pinned to spare cores actually ran there. "
               "Seastar polls while idle, so a reactor CPU can look busier here "
               "than its reactor-utilisation row on the overview: read the two "
-              "together. Pick brokers with the variable at the top."),
+              "together. Pick brokers with the variable at the top. cpu16-31 "
+              "only have data until the deploy turns SMT off."),
     ))
     y += 14
 

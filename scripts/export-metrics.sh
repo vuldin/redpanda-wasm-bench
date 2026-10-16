@@ -61,8 +61,8 @@ die() { echo "export-metrics: $*" >&2; exit 1; }
 
 case "$SCOPE" in
   full)       MATCH='' ;;
-  public)     MATCH='{__name__=~"redpanda_.*|node_.*|loadgen_.*|up|scrape_.*"}' ;;
-  dashboards) MATCH='{__name__=~"redpanda_relay_.*|redpanda_transform_.*|redpanda_wasm_.*|redpanda_cpu_.*|node_cpu_.*|node_load1|node_network_.*|loadgen_.*|up|scrape_duration_seconds"}' ;;
+  public)     MATCH='{__name__=~"redpanda_.*|node_.*|loadgen_.*|bench_.*|up|scrape_.*"}' ;;
+  dashboards) MATCH='{__name__=~"redpanda_relay_.*|redpanda_transform_.*|redpanda_wasm_.*|redpanda_cpu_.*|node_cpu_.*|node_load1|node_network_.*|loadgen_.*|bench_.*|up|scrape_duration_seconds"}' ;;
   *) die "METRICS_EXPORT_SCOPE must be full, public or dashboards (got '$SCOPE')" ;;
 esac
 

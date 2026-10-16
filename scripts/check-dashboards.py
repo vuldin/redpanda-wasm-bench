@@ -42,6 +42,8 @@ ALLOWED_EMPTY = {
                        "counters only exist once a transform has pushed",
     "redpanda_transform_": "transform metrics only exist while a transform is "
                            "deployed and running",
+    "bench_phase_info": "autorun's phase marker only exists while an autorun "
+                        "phase is running",
 }
 
 
@@ -57,6 +59,8 @@ ALLOWED_EMPTY = {
 RECORDING_ALLOWED_EMPTY = {
     "loadgen_": ALLOWED_EMPTY["loadgen_"],
     "redpanda_wasm_binary_resident": ALLOWED_EMPTY["redpanda_wasm_binary_resident"],
+    "bench_phase_info": ("a recording made before the phase marker existed "
+                         "has none, and a window can fall between phases"),
     "redpanda_transform_processor_create_latency": (
         "processor create latency is only recorded when a processor is created, "
         "which may not happen inside a measured window"),
@@ -89,6 +93,20 @@ def allowed_empty(expr, recording=False):
         if prefix in expr:
             return why
     return None
+
+
+def variable_defaults(d):
+    """{name: value} for the dashboard's template variables, at their defaults.
+
+    Grafana substitutes these before a query leaves the browser; Prometheus
+    has never heard of $broker, so a query sent with it unexpanded matches
+    nothing and the panel reads as broken when it is not."""
+    out = {}
+    for v in d.get("templating", {}).get("list", []):
+        cur = v.get("current", {}).get("value", ".+")
+        vals = cur if isinstance(cur, list) else [cur]
+        out[v["name"]] = ".+" if "$__all" in vals or not vals else "|".join(vals)
+    return out
 
 
 def query(base, expr, at=None):
@@ -142,12 +160,17 @@ def main():
     for f in files:
         d = json.loads(f.read_text())
         print(f"\n=== {f.relative_to(ddir)}  ({d.get('title')}) ===")
+        variables = variable_defaults(d)
         for pan in d.get("panels", []):
             for t in pan.get("targets", []):
                 expr = t["expr"]
                 # Grafana expands this from the panel's step and the
                 # datasource interval; Prometheus does not know it.
                 concrete = expr.replace("$__rate_interval", "30s")
+                # Longest name first, so $broker never eats the front of $brokers.
+                for name in sorted(variables, key=len, reverse=True):
+                    concrete = concrete.replace("${" + name + "}", variables[name])
+                    concrete = concrete.replace("$" + name, variables[name])
                 # Any instant with real data is enough: a panel works if
                 # the recording contains its data somewhere, not if it happens
                 # to be non-empty at one arbitrary moment.

@@ -6,6 +6,10 @@ prometheus_version: "3.5.0"
 grafana_version: "11.6.1"
 
 node_exporter_port: 9100
+# node_exporter's textfile collector reads *.prom here. autorun writes
+# bench_phase.prom on the monitoring host at each phase start and removes it at
+# the end, which is where the dashboards' phase annotations come from.
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile
 prometheus_port: 9090
 grafana_port: 3000
 # loadgen's optional live-metrics endpoint. Nothing listens here unless loadgen

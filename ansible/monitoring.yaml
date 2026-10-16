@@ -50,6 +50,14 @@
             mode: "0755"
             remote_src: true
 
+    # World-writable with the sticky bit, like /tmp: autorun writes its phase
+    # marker here as the ssh user, and node_exporter only needs to read.
+    - name: node_exporter textfile directory
+      ansible.builtin.file:
+        path: "{{ node_exporter_textfile_dir }}"
+        state: directory
+        mode: "1777"
+
     - name: node_exporter unit
       ansible.builtin.template:
         src: node_exporter.service.j2

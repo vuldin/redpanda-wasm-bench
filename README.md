@@ -115,7 +115,9 @@ scripts/    wb (entry point), autorun.sh (unattended plan runs + watchdog),
             lib-capacity.sh, switch-topology.sh, deploy-wasm-cluster.sh,
             verify-each-commit.sh (verifies the redpanda branch commit by commit),
             make-dashboards.py and check-dashboards.py (the Grafana panels and
-            a validator for their queries), check-prometheus-template.py,
+            a validator for their queries), check-counter-resets.py (finds
+            "counters" that rate() misreads), annotate-phases.py (phase
+            regions for runs older than the marker), check-prometheus-template.py,
             cost-guard.sh (cron-friendly reminder that a cluster is billing),
             export-metrics.sh + metrics-windows.py + metrics-bundle.py
             (the metrics bundle that outlives the cluster)

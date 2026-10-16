@@ -14,6 +14,9 @@
 #      teardown, and RESULTS.md is written.
 #   7. pre_up: runs before `wb up`; a failing pre_up stops the run before any
 #      provisioning.
+#   8. phase marker: while each phase runs, the monitoring host's textfile
+#      holds bench_phase_info for that phase (the stub's `ssh` runs the real
+#      remote command locally); it is removed after the phase.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 AUTORUN="$HERE/../../scripts/autorun.sh"
@@ -26,6 +29,8 @@ cat > "$T/wb" <<'STUB'
 printf '%s\n' "$(date +%s) ARGC=$# $*" >> "$STUB_LOG"
 case "$1" in
   run)
+    # What the dashboards would see while this phase runs.
+    cat "$PHASE_MARK_DIR/bench_phase.prom" >> "$STUB_LOG.marker" 2>/dev/null || echo "no marker" >> "$STUB_LOG.marker"
     case "$*" in
       *HANG*) sleep 600 ;;
       *FAILONCE*) if [ ! -f "$STUB_LOG.failed" ]; then touch "$STUB_LOG.failed"; exit 1; fi ;;
@@ -37,6 +42,7 @@ case "$1" in
       export) mkdir -p "$3/metrics-bundle" ;;
     esac ;;
   env) echo 'BROKER_PUB="1.1.1.1"' ;;
+  ssh) [ "$2" = monitor ] && bash -c "$3" ;;
 esac
 exit 0
 STUB
@@ -53,7 +59,8 @@ sed 's/phase first 1 run e2/phase first 1 run e2 HANG=1/' "$T/test.plan" > "$T/h
 
 # ARCHIVE_DIR is pinned inside $T: autorun reads the user's wb.local.env, and an
 # ARCHIVE_DIR set there would otherwise collect every self-test run.
-base() { env DRY_RUN=1 EST_UNIT_S=0 WB="$T/wb" STUB_LOG="$1" RUN_DIR="$2" ARCHIVE_DIR="$T/archive" "${@:3}"; }
+mkdir -p "$T/textfile"
+base() { env DRY_RUN=1 EST_UNIT_S=0 WB="$T/wb" STUB_LOG="$1" RUN_DIR="$2" ARCHIVE_DIR="$T/archive" PHASE_MARK_DIR="$T/textfile" "${@:3}"; }
 
 # 1: check
 out="$(bash "$AUTORUN" check "$T/test.plan" 2>&1)"
@@ -75,6 +82,12 @@ check "provisioning ran before phases (up, deploy, ready)" "grep -q 'ARGC=2 up s
 check "quoting: a spaced value stays one argument" "grep -q 'ARGC=4 run e2 LEVELS=0 100 MARK' '$T/s3'"
 check "@RUN_DIR@ substituted" "grep -q 'OUT=$R3/second' '$T/s3'"
 check "retry: one teardown" "[ \"\$(wc -l < '$T/s3.teardowns')\" = 1 ]"
+
+# 8: phase marker (run 3): set during each phase, gone afterwards
+check "marker: set while 'first' ran" "grep -q '^bench_phase_info{plan=\"test\",phase=\"first\",attempt=\"1\"} 1\$' '$T/s3.marker'"
+check "marker: retry carries attempt 2" "grep -q 'phase=\"second\",attempt=\"2\"' '$T/s3.marker'"
+check "marker: typed as a gauge" "grep -q '^# TYPE bench_phase_info gauge\$' '$T/s3.marker'"
+check "marker: removed after the last phase" "[ ! -e '$T/textfile/bench_phase.prom' ] && [ ! -e '$T/textfile/bench_phase.prom.tmp' ]"
 
 # 6: observability on the normal path (run 3's logs)
 check "observability: Grafana URL logged" "grep -q 'WATCH: Grafana http://203.0.113.9:3000' '$R3/autorun.log'"

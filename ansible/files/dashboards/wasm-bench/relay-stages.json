@@ -818,7 +818,41 @@
     }
   ],
   "annotations": {
-    "list": []
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "name": "autorun phase",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "enable": true,
+        "hide": false,
+        "iconColor": "rgba(130, 110, 220, 0.6)",
+        "expr": "max by (plan, phase, attempt) (bench_phase_info)",
+        "target": {
+          "refId": "Anno",
+          "expr": "max by (plan, phase, attempt) (bench_phase_info)",
+          "interval": "10s"
+        },
+        "step": "10s",
+        "titleFormat": "{{phase}}",
+        "textFormat": "plan {{plan}}, phase {{phase}}, attempt {{attempt}}",
+        "tagKeys": "plan,phase",
+        "useValueForTime": false
+      }
+    ]
   },
   "templating": {
     "list": []

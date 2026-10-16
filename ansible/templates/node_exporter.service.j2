@@ -12,7 +12,8 @@ Type=simple
 # collector's cost is not competing with the workload for a reserved core.
 ExecStart=/usr/local/bin/node_exporter \
   --web.listen-address=:{{ node_exporter_port }} \
-  --collector.processes
+  --collector.processes \
+  --collector.textfile.directory={{ node_exporter_textfile_dir }}
 Restart=always
 RestartSec=2
 

@@ -53,6 +53,19 @@ cr.query = fake_query
 got = cr.check("stub", ["good_total", "bad_total"], "20m", 6)
 expect("check() flags only the series resetting more than the limit",
        [(m, l["instance"]) for m, l, _ in got] == [("bad_total", "b0")])
+ap = load("ap", "scripts/annotate-phases.py")
+log = """[2026-10-16T12:30:14Z] WATCH: Grafana http://203.0.113.9:3000
+[2026-10-16T12:30:20Z] START off attempt 1 (est 7min, cap 10min): wb run e2 X=1
+[2026-10-16T12:36:52Z] OK off in 6m32s
+[2026-10-16T12:37:10Z] START inline-t1 attempt 1 (est 7min, cap 10min): wb run e2
+[2026-10-16T12:38:10Z] FAIL inline-t1 attempt 1 rc=1 after 1m0s (tail of inline-t1.log below)
+[2026-10-16T12:38:20Z] START inline-t1 attempt 2 (est 7min, cap 10min): wb run e2
+"""
+got = [(n, a, o) for n, a, _, _, o in ap.phases(log, now_ms=1)]
+expect("annotate-phases: attempts, outcomes and the running phase",
+       got == [("off", 1, "ok"), ("inline-t1", 1, "failed"), ("inline-t1", 2, "running")])
+t = ap.phases(log, now_ms=1)[0]
+expect("annotate-phases: region spans START to OK", (t[3] - t[2]) == 392_000)
 sys.exit(1 if bad else 0)
 PY
 

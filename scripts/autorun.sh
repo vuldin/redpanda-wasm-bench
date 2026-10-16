@@ -110,6 +110,30 @@ creds_expiry_epoch() {
 # ---------------------------------------------------------------------------
 # phases
 # ---------------------------------------------------------------------------
+# The dashboards' phase marker: a node_exporter textfile on the monitoring
+# host, so Prometheus records which phase is running as
+# bench_phase_info{plan,phase,attempt} 1. Being a scraped series, the phase
+# boundaries are in an exported bundle too, not only in the live Grafana. Best
+# effort and never fatal: a cluster deployed before the textfile collector
+# existed has no directory, and the marker is skipped without a warning.
+# The directory is ansible's node_exporter_textfile_dir; overridden only by the
+# self-test, whose stub `wb ssh` runs the command locally.
+PHASE_MARK_DIR="${PHASE_MARK_DIR:-/var/lib/node_exporter/textfile}"
+phase_marker() { # phase_marker NAME ATTEMPT | phase_marker clear
+  grep -q 'Grafana' "$RUN_DIR/MONITORING.txt" 2>/dev/null || return 0
+  local f="$PHASE_MARK_DIR/bench_phase.prom" cmd
+  if [ "$1" = clear ]; then
+    cmd="rm -f $f"
+  else
+    local plan="${PLAN_NAME:-}"
+    local line; line="$(printf 'bench_phase_info{plan="%s",phase="%s",attempt="%s"} 1' \
+      "${plan//[^A-Za-z0-9_.-]/_}" "${1//[^A-Za-z0-9_.-]/_}" "${2//[^0-9]/}")"
+    cmd="[ -d $PHASE_MARK_DIR ] || exit 0; printf '%s\\n' '# TYPE bench_phase_info gauge' '$line' > $f.tmp && mv $f.tmp $f"
+  fi
+  timeout 30 "$WB" ssh monitor "$cmd" < /dev/null > /dev/null 2>&1 \
+    || log "WARN: could not update the phase marker on the monitoring host"
+}
+
 # run_phase NAME EST_MIN CMD-STRING: budget check, timeout at 1.5x the
 # estimate, one retry. Returns 0 ok, 1 failed, 2 skipped for time.
 run_phase() {
@@ -131,8 +155,10 @@ run_phase() {
     [ "$cap" -le 0 ] && { log "SKIP $name: phase window closed"; record "$name" skipped-time "$est" "-"; return 2; }
     log "START $name attempt $attempt (est ${est}min, cap $((cap / 60))min): wb $cmd"
     local t0; t0=$(date +%s)
+    phase_marker "$name" "$attempt"
     eval "timeout --kill-after=60 $cap \"\$WB\" $cmd" >> "$RUN_DIR/$name.log" 2>&1
     rc=$?
+    phase_marker clear
     local dt=$(( $(date +%s) - t0 ))
     if [ "$rc" -eq 0 ]; then
       log "OK $name in $((dt / 60))m$((dt % 60))s"
@@ -299,6 +325,7 @@ heads() {
 run() {
   local plan="$1" existing="$2"
   load_plan "$plan"
+  PLAN_NAME="$(basename "$plan" .plan)"
   echo $$ > "$RUN_DIR/autorun.pid"
   log "autorun run pid=$$ plan=$plan existing_cluster=$existing hard_deadline=$(date -u -d @"$HARD_DEADLINE_EPOCH" +%FT%TZ) phase_end=$(date -u -d @"$PHASE_END" +%FT%TZ)"
 
@@ -365,6 +392,7 @@ run() {
 
 finish() {
   local why="$1"
+  phase_marker clear
   fetch_results
   export_metrics
   summarize
