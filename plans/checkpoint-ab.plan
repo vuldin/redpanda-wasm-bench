@@ -1,0 +1,31 @@
+# Does the broker's guest-state checkpoint still stall produces once it no
+# longer forces a flush or blocks the transform loop?
+#
+# With the live snapshot region (book-matcher SNAPSHOT_MODE=live) the guest no
+# longer stalls, but at 10,000 resting orders per side the produce leg's p99.9
+# was still ~2.9ms (2026-10-16, state-and-jitter), against ~1ms with no state:
+# every 5s the broker replicated the ~2 MB region through the input partition
+# with a forced flush, awaited inline. data_transforms_state_checkpoint_inline
+# picks the behaviour live: true is the original, false (the default) copies
+# the region inline and replicates it in the background without forcing a
+# flush. The two are interleaved on one cluster, plus a no-state baseline.
+#
+#   scripts/autorun.sh check plans/checkpoint-ab.plan
+#   scripts/autorun.sh start plans/checkpoint-ab.plan
+#
+# 6 brokers + 3 clients + monitoring, ~$55/hr; ~45 min of phases, ~1.4h in all.
+# Needs a broker with data_transforms_state_checkpoint_inline.
+
+TOPOLOGY=six-broker
+DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
+
+E2=(ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 ACKS=all RF=3
+    WARMUP=10s DRAIN=30s RELAY_STAGE_METRICS=true WRITE_CACHING=true
+    LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=1 GUEST=book-matcher CANCEL_FRACTION=0.3
+    DURATION=90s MODE=bookdepth 'BOOKDEPTH_LEVELS=1000 10000' FANOUT=20)
+
+phase off 7 run e2 "${E2[@]}" STATE=off
+for t in 1 2 3; do
+  phase "inline-t$t" 7 run e2 "${E2[@]}" STATE=snapshot SNAPSHOT_MODE=live CHECKPOINT_INLINE=true
+  phase "background-t$t" 7 run e2 "${E2[@]}" STATE=snapshot SNAPSHOT_MODE=live CHECKPOINT_INLINE=false
+done

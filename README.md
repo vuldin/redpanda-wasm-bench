@@ -44,6 +44,7 @@ scripts/autorun.sh status               # progress, the Grafana URL, where resul
 | `production-shape.plan` | in-broker vs external vs co-located (also on isolated cores), all with a 1,000-deep book and cancels; p99.99; rate with that book; kills with failover | ~1.8 h | $120 |
 | `relay-modes.plan` | the latency cost of delivering to in-broker consumers only after the output is quorum-acknowledged (`RELAY_DELIVERY=committed`) instead of before (`precommit`, the default) | ~30 min | $70 |
 | `state-and-jitter.plan` | durable state without the tail (full vs live snapshots, graceful moves), every deployment on one cluster with p99.99, and where the in-broker tail comes from | ~4.5 h | $250 |
+| `checkpoint-ab.plan` | whether the broker's guest-state checkpoint still stalls produces once it runs in the background without a forced flush | ~1.4 h | $80 |
 
 `scripts/autorun.sh check <plan>` lists a plan's phases and whether they fit
 the time cap, without spending anything. Each run writes to its own
@@ -77,7 +78,7 @@ While a run is going, Grafana's URL is in `autorun.log` and in `status`.
 ## Repo layout
 
 ```
-plans/      test plans for scripts/autorun.sh (smoke, published, resilience, book-durability, production-shape, relay-modes, state-and-jitter)
+plans/      test plans for scripts/autorun.sh (smoke, published, resilience, book-durability, production-shape, relay-modes, state-and-jitter, checkpoint-ab)
 scripts/    wb (entry point), autorun.sh (unattended plan runs + watchdog),
             offline-gate.sh (every free check; autorun requires it),
             summarize-run.py (a run directory -> RESULTS.md),

@@ -161,6 +161,11 @@ SNAPSHOT_EVERY_MS="${SNAPSHOT_EVERY_MS:-500}"
 # fetch and produce). Unset leaves the cluster's value alone; set, it applies
 # for the run and is restored afterwards.
 TRANSFORM_SHARES="${TRANSFORM_SHARES:-}"
+# Broker data_transforms_state_checkpoint_inline (true: the transform loop
+# waits for each guest-state checkpoint and it forces a flush - the original
+# behaviour; false: background, unforced). Unset leaves the cluster's value;
+# set, it applies for the run and is restored. Needs a broker that has it.
+CHECKPOINT_INLINE="${CHECKPOINT_INLINE:-}"
 # loadgen -timeline-ms: per-interval latency and lag buckets in the report, so
 # a stall can be placed in time. 0 turns it off.
 TIMELINE_MS="${TIMELINE_MS:-500}"
@@ -658,7 +663,7 @@ EOF
   echo "# fanout_shards=${FANOUT_SHARDS:-all($NUM_SHARDS)} fanout_shard_base=$FANOUT_SHARD_BASE"
   echo "# producer_acks=$ACKS"
   echo "# orders_per_record=$ORDERS_PER_RECORD mass_levels=${MASS_LEVELS} book_depth=$BOOK_DEPTH bookdepth_levels=${BOOKDEPTH_LEVELS}"
-  echo "# cancel_fraction=$CANCEL_FRACTION state=$STATE snapshot_mode=$SNAPSHOT_MODE snapshot_every_ms=$SNAPSHOT_EVERY_MS relay_delivery=$RELAY_DELIVERY transform_shares=${TRANSFORM_SHARES:-cluster} guest_sha256=$(guest_sha256 "$GUEST")"
+  echo "# cancel_fraction=$CANCEL_FRACTION state=$STATE snapshot_mode=$SNAPSHOT_MODE snapshot_every_ms=$SNAPSHOT_EVERY_MS relay_delivery=$RELAY_DELIVERY transform_shares=${TRANSFORM_SHARES:-cluster} checkpoint_inline=${CHECKPOINT_INLINE:-cluster} guest_sha256=$(guest_sha256 "$GUEST")"
   echo "# fresh_topics_per_level=$FRESH_TOPICS_PER_LEVEL settle=${SETTLE}s"
   echo "# admin_endpoints_scraped=$(echo "$ADMIN_URLS" | tr ',' '\n' | grep -c .)"
   # New columns are APPENDED, never inserted: a summary.txt from an earlier
@@ -699,6 +704,10 @@ fi
 if [ -n "$TRANSFORM_SHARES" ]; then
   echo "--- transforms scheduling group shares for this sweep: $TRANSFORM_SHARES ---"
   cfg_set data_transforms_scheduling_group_shares "$TRANSFORM_SHARES"
+fi
+if [ -n "$CHECKPOINT_INLINE" ]; then
+  echo "--- guest-state checkpoint inline for this sweep: $CHECKPOINT_INLINE ---"
+  cfg_set data_transforms_state_checkpoint_inline "$CHECKPOINT_INLINE"
 fi
 
 # READ_LINGER_US used to be applied ONLY in MODE=readlinger, while every mode

@@ -124,6 +124,7 @@ Shipped plans:
 | `production-shape.plan` | the in-broker matcher against external, co-located and co-located-on-isolated-cores deployments with the same production-shaped book and order flow; long windows for p99.99; rate with that book; kills with the victim held down | ~107 min | 6 brokers |
 | `relay-modes.plan` | what waiting for the output quorum costs in-broker consumers: `RELAY_DELIVERY=precommit` vs `committed`, interleaved, at fan-out 1 and 20 | ~30 min | 6 brokers |
 | `state-and-jitter.plan` | snapshot cost full vs live; graceful moves with the live region; every deployment on one cluster with 90s windows (p99.99 for each); the transforms scheduler share A/B; tail against rate | ~3.6h | 6 brokers |
+| `checkpoint-ab.plan` | the broker's guest-state checkpoint inline (original) vs background, interleaved, with the live region at depth 1,000 and 10,000 | ~49 min | 6 brokers |
 
 `smoke`, `published` and `book-durability`, one after the other, is the full
 set (`published` already includes the resilience series). They use different
@@ -196,7 +197,10 @@ be zero, are in [MONITORING.md](MONITORING.md).
   keeps the region current after every record and registers only what is in
   use; `full` re-serialises the whole book every `SNAPSHOT_EVERY_MS`, the
   original format. `TRANSFORM_SHARES=<n>` sets
-  `data_transforms_scheduling_group_shares` for the run and restores it.
+  `data_transforms_scheduling_group_shares` for the run and restores it;
+  `CHECKPOINT_INLINE=true|false` does the same for
+  `data_transforms_state_checkpoint_inline` (true: the original checkpoint
+  that blocks the transform loop and forces a flush; false: background).
   `TIMELINE_MS` (500) gives every report a per-interval timeline so a stall
   can be placed in time. Each level's RESULTS.md row splits the end-to-end
   p99.99 into the produce leg and the in-broker relay leg.
