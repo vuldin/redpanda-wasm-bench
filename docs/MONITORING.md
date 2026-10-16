@@ -202,9 +202,11 @@ scripts/annotate-phases.py results/run-<date>-<plan> http://localhost:3000   # a
 ```
 
 A phase still running is drawn up to now. Run it again to extend it; it
-replaces that run's annotations rather than duplicating them. `--follow [N]`
-redraws every N seconds (default 30) until the run's `DONE` file appears, so
-the phase in progress stays shaded while it runs.
+updates that run's annotations in place (creates new phases, extends the
+running one, removes only stale ones), so a dashboard refreshing during an
+update never sees phases vanish. `--follow [N]` does that every N seconds
+(default 10) until the run's `DONE` file appears, so the phase in progress
+stays shaded while it runs.
 
 ### Latency panels: gaps, warmup and "measured only"
 

@@ -82,6 +82,22 @@ expect("annotate-phases: attempts, outcomes and the running phase",
        got == [("off", 1, "ok"), ("inline-t1", 1, "failed"), ("inline-t1", 2, "running")])
 t = ap.phases(log, now_ms=1)[0]
 expect("annotate-phases: region spans START to OK", (t[3] - t[2]) == 392_000)
+# In-place updates: a closed phase that matches is untouched, the running one
+# is extended, a new one created, a stale or old-format one removed.
+body = lambda u, n, a, t1, o: {"dashboardUID": u, "time": 0, "timeEnd": t1,
+    "tags": ["wasm-bench-phase", "run:r", f"phase:{n}", f"attempt:{a}", o], "text": f"{n} {o}"}
+desired = {("d", "off", "1"): body("d", "off", "1", 10, "ok"),
+           ("d", "inline", "1"): body("d", "inline", "1", 30, "running"),
+           ("d", "bg", "1"): body("d", "bg", "1", 40, "running")}
+existing = [dict(body("d", "off", "1", 10, "ok"), id=1),
+            dict(body("d", "inline", "1", 20, "running"), id=2),
+            dict(body("d", "gone", "1", 5, "ok"), id=3),
+            {"id": 4, "dashboardUID": "d", "time": 0, "timeEnd": 9, "tags": ["phase:off"], "text": "old"}]
+c, u, dl = ap.plan_changes(existing, desired)
+expect("annotate-phases: in place - matching phase untouched, running extended, new created, stale removed",
+       [b["tags"][2] for b in c] == ["phase:bg"] and [i for i, _ in u] == [2] and sorted(dl) == [3, 4])
+c, u, dl = ap.plan_changes([dict(b, id=i) for i, b in enumerate(desired.values())], desired)
+expect("annotate-phases: a second pass over an unchanged log changes nothing", (c, u, dl) == ([], [], []))
 sys.exit(1 if bad else 0)
 PY
 

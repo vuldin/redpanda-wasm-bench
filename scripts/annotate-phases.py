@@ -8,9 +8,11 @@ a run whose cluster was deployed before the marker existed, or an exported
 bundle of such a run opened in its local Grafana. It reads the START / OK /
 FAIL lines in <run-dir>/autorun.log and posts one region annotation per phase
 attempt to each wasm-bench dashboard. A phase still running is drawn up to
-now. Re-running replaces this run's annotations rather than adding duplicates,
-and --follow does that every N seconds (default 30) until the run's DONE file
-appears, so a live run's current phase is shaded while it runs.
+now. Re-running updates this run's annotations in place - creates new phases,
+extends or closes the running one, removes only what no longer exists - so a
+dashboard refreshing mid-update never sees a partial set. --follow does that
+every N seconds (default 10) until the run's DONE file appears, so a live
+run's current phase is shaded while it runs.
 
   scripts/annotate-phases.py <run-dir> [grafana-url] [--follow [seconds]]
 
@@ -79,7 +81,7 @@ def main():
     follow = None
     if "--follow" in args:
         i = args.index("--follow")
-        follow = 30
+        follow = 10
         if i + 1 < len(args) and args[i + 1].isdigit():
             follow = int(args.pop(i + 1))
         args.pop(i)
@@ -99,6 +101,36 @@ def main():
         time.sleep(follow)
 
 
+def plan_changes(existing, desired):
+    """Diff this run's annotations against what autorun.log now says.
+
+    existing: Grafana annotations (dicts with id, dashboardUID, time, timeEnd,
+    tags, text). desired: {(uid, phase, attempt): body}. Returns
+    (creates, updates, deletes): bodies to POST, (id, body) to PUT, ids to
+    DELETE. Closed phases that already match are left alone, which is what
+    keeps a refreshing dashboard from ever seeing them disappear."""
+    have = {}
+    deletes = []
+    for a in existing:
+        tags = a.get("tags") or []
+        ph = next((t[6:] for t in tags if t.startswith("phase:")), None)
+        at = next((t[8:] for t in tags if t.startswith("attempt:")), None)
+        key = (a.get("dashboardUID"), ph, at)
+        if ph is None or at is None or key in have or key not in desired:
+            deletes.append(a["id"])  # pre-diff format, duplicate, or gone
+        else:
+            have[key] = a
+    creates, updates = [], []
+    for key, body in desired.items():
+        a = have.get(key)
+        if a is None:
+            creates.append(body)
+        elif (a.get("time"), a.get("timeEnd"), a.get("text"), sorted(a.get("tags") or [])) != \
+                (body["time"], body["timeEnd"], body["text"], sorted(body["tags"])):
+            updates.append((a["id"], body))
+    return creates, updates, deletes
+
+
 def draw(args):
     run_dir = Path(args[0])
     base = args[1] if len(args) > 1 else grafana_from(run_dir)
@@ -113,24 +145,32 @@ def draw(args):
         print(f"no phases in {run_dir}/autorun.log yet")
         return 0
 
-    # Replace, never accumulate: drop this run's earlier annotations first.
-    q = urllib.parse.urlencode([("tags", TAG), ("tags", run_tag), ("matchAny", "false"), ("limit", "5000")])
-    for a in call(base, auth, "GET", f"/api/annotations?{q}") or []:
-        call(base, auth, "DELETE", f"/api/annotations/{a['id']}")
-
-    n = 0
+    uids = []
     for uid in DASHBOARDS:
         try:
             call(base, auth, "GET", f"/api/dashboards/uid/{uid}")
+            uids.append(uid)
         except urllib.error.HTTPError:
             continue  # not on this Grafana
+    desired = {}
+    for uid in uids:
         for name, attempt, t0, t1, outcome in ps:
-            call(base, auth, "POST", "/api/annotations", {
+            desired[(uid, name, str(attempt))] = {
                 "dashboardUID": uid, "time": t0, "timeEnd": t1,
-                "tags": [TAG, run_tag, f"phase:{name}", outcome],
-                "text": f"{name} (attempt {attempt}, {outcome}) - plan {plan}"})
-            n += 1
-    print(f"{len(ps)} phase attempts drawn on {n // max(len(ps), 1)} dashboards at {base}")
+                "tags": [TAG, run_tag, f"phase:{name}", f"attempt:{attempt}", outcome],
+                "text": f"{name} (attempt {attempt}, {outcome}) - plan {plan}"}
+
+    q = urllib.parse.urlencode([("tags", TAG), ("tags", run_tag), ("matchAny", "false"), ("limit", "5000")])
+    creates, updates, deletes = plan_changes(call(base, auth, "GET", f"/api/annotations?{q}") or [], desired)
+    # Create and update before deleting, so nothing is ever missing at once.
+    for body in creates:
+        call(base, auth, "POST", "/api/annotations", body)
+    for aid, body in updates:
+        call(base, auth, "PUT", f"/api/annotations/{aid}", body)
+    for aid in deletes:
+        call(base, auth, "DELETE", f"/api/annotations/{aid}")
+    print(f"{len(ps)} phase attempts on {len(uids)} dashboards at {base}: "
+          f"{len(creates)} created, {len(updates)} updated, {len(deletes)} removed")
     return 0
 
 
