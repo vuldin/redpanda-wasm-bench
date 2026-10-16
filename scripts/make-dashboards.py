@@ -244,7 +244,15 @@ PHASE_FRESH, LOADGEN_FRESH = "11s", "3s"
 # top of the overview. Markers from before the descriptions carry only plan,
 # phase and attempt; every query below falls back to those.
 PHASE_LABELS = "plan, phase, attempt, step, steps, test, title, about, display"
-PHASE_EXPR = f"max by ({PHASE_LABELS}) (max_over_time(bench_phase_info[{PHASE_FRESH}]))"
+# A bundle of a run from before the titles holds both the live marker as it
+# was scraped (ids only) and bench-series.py's rebuild (titled): where a
+# titled one exists within 5 minutes either side, only it is drawn, or every
+# phase would show twice (their edges differ by a scrape, so "at the same
+# instant" left a one-sample duplicate at each boundary).
+_PHASE_BY = f"max by ({PHASE_LABELS})"
+PHASE_EXPR = (f'({_PHASE_BY} (max_over_time(bench_phase_info{{display!=""}}[{PHASE_FRESH}])) '
+              f'or on() ({_PHASE_BY} (max_over_time(bench_phase_info[{PHASE_FRESH}])) '
+              'unless on() count(max_over_time(bench_phase_info{display!=""}[10m] offset -5m))))')
 MEASURE_EXPR = f'max_over_time(loadgen_phase_info{{phase="measure"}}[{LOADGEN_FRESH}])'
 PHASE_ANNOTATION = {
     "name": "autorun phase",
