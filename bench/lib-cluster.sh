@@ -197,13 +197,21 @@ transfer_leadership_to_node() {
   local cur_node
   read -r cur_node _ <<< "$(partition_placement "$topic" "$partition")"
   [ "$cur_node" = "$node" ] && return 0
-  curl -sfL -X POST \
-    "$ADMIN_URL/v1/partitions/kafka/$topic/$partition/transfer_leadership?target=$node" \
-    >/dev/null 2>&1 || true
-  for _ in $(seq 1 30); do
+  # Re-issued every 10s rather than sent once: a partition created moments
+  # ago can ignore a transfer while its raft group settles, and a single
+  # dropped request used to fail the whole sweep after 60s (2026-10-16,
+  # MODE=fanout with fresh topics per level: "leadership never moved to
+  # node 5 (still 0)" at the third level of four).
+  local i
+  for i in $(seq 0 44); do
+    if [ $((i % 5)) -eq 0 ]; then
+      curl -sfL -X POST \
+        "$ADMIN_URL/v1/partitions/kafka/$topic/$partition/transfer_leadership?target=$node" \
+        >/dev/null 2>&1 || true
+    fi
+    sleep 2
     read -r cur_node _ <<< "$(partition_placement "$topic" "$partition")"
     [ "$cur_node" = "$node" ] && return 0
-    sleep 2
   done
   echo "    WARNING: $topic/$partition leadership never moved to node $node (still ${cur_node:-unknown})" >&2
   return 1
