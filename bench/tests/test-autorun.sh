@@ -51,7 +51,9 @@ phase third 1 run e2 LAST
 PLAN
 sed 's/phase first 1 run e2/phase first 1 run e2 HANG=1/' "$T/test.plan" > "$T/hang.plan"
 
-base() { env DRY_RUN=1 EST_UNIT_S=0 WB="$T/wb" STUB_LOG="$1" RUN_DIR="$2" "${@:3}"; }
+# ARCHIVE_DIR is pinned inside $T: autorun reads the user's wb.local.env, and an
+# ARCHIVE_DIR set there would otherwise collect every self-test run.
+base() { env DRY_RUN=1 EST_UNIT_S=0 WB="$T/wb" STUB_LOG="$1" RUN_DIR="$2" ARCHIVE_DIR="$T/archive" "${@:3}"; }
 
 # 1: check
 out="$(bash "$AUTORUN" check "$T/test.plan" 2>&1)"
@@ -108,7 +110,7 @@ check "watchdog: run process is gone" "! kill -0 \$(cat '$R5/autorun.pid') 2>/de
 # placeholder plans see while loading (it once became the run directory).
 cp "$T/test.plan" "$T/autorun-selftest.plan"
 before="$(ls -d "$HERE"/../../results/run-*-autorun-selftest 2>/dev/null)"
-( unset RUN_DIR; cd "$T" && env DRY_RUN=1 EST_UNIT_S=0 WB="$T/wb" STUB_LOG="$T/s9" RESERVE_MIN=0 \
+( unset RUN_DIR; cd "$T" && env DRY_RUN=1 EST_UNIT_S=0 WB="$T/wb" STUB_LOG="$T/s9" RESERVE_MIN=0 ARCHIVE_DIR="$T/archive" \
     HARD_DEADLINE_EPOCH=$(( $(date +%s) + 120 )) bash "$AUTORUN" start "$T/autorun-selftest.plan" >/dev/null 2>&1 )
 R9="$(ls -d "$HERE"/../../results/run-*-autorun-selftest 2>/dev/null | grep -vxF "$before" | head -1)"
 for _ in $(seq 1 60); do [ -n "$R9" ] && [ -f "$R9/DONE" ] && break; sleep 1; done
@@ -118,7 +120,7 @@ check "start: no placeholder directory created" "[ ! -e '$T/<run-dir>' ]"
 
 # 9: a new run never reuses a directory that already holds one
 R10="$T/r10"; mkdir -p "$R10"; touch "$R10/phases.tsv"
-out="$(env DRY_RUN=1 RUN_DIR="$R10" WB="$T/wb" STUB_LOG="$T/s10" bash "$AUTORUN" start "$T/test.plan" 2>&1)"
+out="$(env DRY_RUN=1 RUN_DIR="$R10" WB="$T/wb" STUB_LOG="$T/s10" ARCHIVE_DIR="$T/archive" bash "$AUTORUN" start "$T/test.plan" 2>&1)"
 check "start: refuses an explicit RUN_DIR that holds a run" "echo \"\$out\" | grep -q 'already holds a run'"
 
 echo "$pass passed, $fail failed  (scratch: $T)"
