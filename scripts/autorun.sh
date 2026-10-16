@@ -259,10 +259,11 @@ monitor_health() {
   mins=$(( (now - since) / 60 + 1 ))
   timeout 300 python3 "$ROOT/scripts/check-counter-resets.py" "$prom" "${mins}m" \
     > "$RUN_DIR/counter-resets.txt" 2>&1
-  log "counter check: $(tail -1 "$RUN_DIR/counter-resets.txt" 2>/dev/null)"
+  # Both scripts start their summary line with their own name.
+  log "$(tail -1 "$RUN_DIR/counter-resets.txt" 2>/dev/null)"
   timeout 300 python3 "$ROOT/scripts/check-scrapes.py" "$prom" "$since" "$now" 'redpanda.*' \
     --tsv "$RUN_DIR/scrape-failures.tsv" > "$RUN_DIR/scrape-health.txt" 2>&1
-  log "scrape check: $(head -1 "$RUN_DIR/scrape-health.txt" 2>/dev/null)"
+  log "$(head -1 "$RUN_DIR/scrape-health.txt" 2>/dev/null)"
 }
 
 summarize() {
