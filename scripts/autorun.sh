@@ -31,7 +31,8 @@
 #
 # Environment (all optional):
 #   RUN_DIR          where everything is written (default results/run-<date>-<plan>)
-#   CAP_HOURS        wall-clock cap from start (default 5)
+#   CAP_HOURS        optional wall-clock cap from start (default: none - the
+#                    run takes as long as the plan; credentials still bound it)
 #   RESERVE_MIN      teardown/archive reserve before the deadline (default 25)
 #   ARCHIVE_DIR      also copy the run + a sha256-checked tarball here
 #   KEEP_CLUSTER=1   skip the end-of-run teardown (the watchdog still tears
@@ -420,6 +421,22 @@ watchdog() {
 # ---------------------------------------------------------------------------
 # entry points
 # ---------------------------------------------------------------------------
+# Minutes a plan needs from start to verified teardown: its phases at their
+# estimates, provisioning (unless continuing on a cluster), and the reserve.
+plan_need_minutes() {
+  local existing="${1:-0}" total; total=$(plan_minutes)
+  echo $(( total + (existing == 1 ? 0 : 35) + RESERVE_MIN ))
+}
+
+# The optional wall-clock cap in minutes, or empty for none. A run takes as
+# long as its plan takes: by default nothing but the credentials limits it,
+# and that limit is real - teardown needs live credentials - so the deadline
+# (and the watchdog) sit at their expiry minus the teardown reserve, and start
+# refuses a run they cannot cover. CAP_HOURS adds a spending limit on top.
+cap_minutes() {
+  [ -n "${CAP_HOURS:-}" ] && echo $(( CAP_HOURS * 60 ))
+}
+
 cmd_check() {
   local plan="$1"
   load_plan "$plan"
@@ -429,10 +446,15 @@ cmd_check() {
   local i; for i in "${!PHASE_NAMES[@]}"; do
     printf '  %-34s %5s  %s\n' "${PHASE_NAMES[$i]}" "${PHASE_EST[$i]}" "${PHASE_CMD[$i]}"
   done
-  echo "  phases: $total min; + provisioning ~25-35 min + teardown reserve ${RESERVE_MIN} min; cap ${CAP_HOURS:-5}h"
-  local need=$(( total + 35 + RESERVE_MIN ))
-  [ "$need" -le $(( ${CAP_HOURS:-5} * 60 )) ] && echo "  fits the cap" \
-    || echo "  WILL NOT FIT: ~${need} min needed - later phases will be skipped for time"
+  local need cap; need=$(plan_need_minutes 0); cap=$(cap_minutes 0)
+  echo "  phases: $total min; + provisioning ~25-35 min + teardown reserve ${RESERVE_MIN} min = ~${need} min"
+  if [ -z "$cap" ]; then
+    echo "  no cap: runs until the plan is done; credentials must last ~$(( need + 10 )) min (start checks)"
+  elif [ "$need" -le "$cap" ]; then
+    echo "  fits CAP_HOURS=${CAP_HOURS}"
+  else
+    echo "  WILL NOT FIT CAP_HOURS=${CAP_HOURS}: ~${need} min needed - later phases will be skipped for time"
+  fi
 }
 
 cmd_start() {
@@ -460,12 +482,20 @@ cmd_start() {
     die "a run is already active in $RUN_DIR (pid $(cat "$RUN_DIR/autorun.pid"))"
   fi
   load_creds || die "cannot export AWS credentials - run: $(aws_login_hint)"
-  local now cap exp hard
-  now=$(date +%s); cap=$(( now + ${CAP_HOURS:-5} * 3600 )); exp="$(creds_expiry_epoch)"
+  local now cap exp hard need
+  need=$(plan_need_minutes "$existing")
+  now=$(date +%s); exp="$(creds_expiry_epoch)"
   hard=$(( exp - (RESERVE_MIN + 10) * 60 ))
-  [ "$cap" -lt "$hard" ] && hard="$cap"
+  cap="$(cap_minutes "$existing")"
+  [ -n "$cap" ] && [ $(( now + cap * 60 )) -lt "$hard" ] && hard=$(( now + cap * 60 ))
   [ $(( hard - now )) -gt $(( (RESERVE_MIN + 30) * 60 )) ] \
-    || die "credentials expire $(date -u -d @"$exp" +%FT%TZ): not enough time for a run. Log in again."
+    || die "credentials expire $(date -u -d @"$exp" +%FT%TZ): not enough time for a run. Log in again: $(aws_login_hint)"
+  # Credentials, not the plan, would set the deadline and the budget rule would
+  # quietly skip the last phases. Say so before anything is spent.
+  if [ $(( (hard - now) / 60 )) -lt "$need" ] && [ "${ALLOW_SHORT_RUN:-0}" != 1 ] && [ -z "${HARD_DEADLINE_EPOCH:-}" ]; then
+    die "this plan needs ~${need} min, but credentials expiring $(date -u -d @"$exp" +%FT%TZ) leave $(( (hard - now) / 60 )) min.
+       Log in again ($(aws_login_hint)) for a full run, or set ALLOW_SHORT_RUN=1 to run what fits."
+  fi
   [ -n "${HARD_DEADLINE_EPOCH:-}" ] && hard="$HARD_DEADLINE_EPOCH"
   # Continuing a run whose watchdog is still armed: that watchdog's deadline
   # is the real one, so plan against it rather than against a fresh cap.
@@ -488,7 +518,7 @@ cmd_start() {
   setsid nohup "${e[@]}" bash "$SELF" __run "$plan" "$existing" > "$RUN_DIR/run.out" 2>&1 < /dev/null &
   sleep 2
   echo "autorun started: $RUN_DIR"
-  echo "  deadline $(date -u -d @"$hard" +%FT%TZ) (cap ${CAP_HOURS:-5}h, credentials until $(date -u -d @"$exp" +%FT%TZ))"
+  echo "  deadline $(date -u -d @"$hard" +%FT%TZ) (plan needs ~${need} min; ${CAP_HOURS:+cap ${CAP_HOURS}h, }credentials until $(date -u -d @"$exp" +%FT%TZ))"
   echo "  follow:  tail -f $RUN_DIR/autorun.log"
   echo "  status:  $SELF status $RUN_DIR"
 }

@@ -57,7 +57,9 @@ base() { env DRY_RUN=1 EST_UNIT_S=0 WB="$T/wb" STUB_LOG="$1" RUN_DIR="$2" ARCHIV
 
 # 1: check
 out="$(bash "$AUTORUN" check "$T/test.plan" 2>&1)"
-check "check lists all phases" "echo \"\$out\" | grep -q 'third' && echo \"\$out\" | grep -q 'fits the cap'"
+check "check lists all phases" "echo \"\$out\" | grep -q 'third' && echo \"\$out\" | grep -q 'no cap: runs until the plan is done'"
+out_cap="$(CAP_HOURS=3 bash "$AUTORUN" check "$T/test.plan" 2>&1)"
+check "check: CAP_HOURS is an opt-in limit" "echo \"\$out_cap\" | grep -q 'fits CAP_HOURS=3'"
 
 # 2: budget - deadline already passed, reserve 0
 R2="$T/r2"; mkdir -p "$R2"

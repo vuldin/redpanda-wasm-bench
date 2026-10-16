@@ -149,7 +149,7 @@ refer to `$RUN_DIR`.
 |---|---|
 | `autorun.sh start PLAN` | provision, run, tear down |
 | `autorun.sh start --existing PLAN` | run on a cluster you brought up with `wb up` / `wb deploy` (keeps an armed watchdog for that RUN_DIR) |
-| `CAP_HOURS` (5) | wall-clock cap; the deadline is also pulled in to your credentials' expiry minus the reserve |
+| `CAP_HOURS` (none) | optional wall-clock cap. By default a run takes as long as its plan takes; the only deadline is your AWS credentials' expiry minus the reserve (teardown needs live credentials), and `start` refuses a plan they cannot cover - log in again, or set `ALLOW_SHORT_RUN=1` to run what fits |
 | `RESERVE_MIN` (25) | time held back for fetch, archive, teardown, verify |
 | `KEEP_CLUSTER=1` | skip the end-of-run teardown to keep iterating; the watchdog still tears down at the deadline |
 | `EXPORT_RESERVE_S` (900), `EXPORT_MIN_S` (600), `EXPORT_MAX_S` (3600) | the end-of-run metrics export gets the time left before the deadline less `EXPORT_RESERVE_S`, clamped to [min, max]; a full-scope dump runs ~50s per measured window |
