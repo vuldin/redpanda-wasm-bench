@@ -187,10 +187,10 @@ hygiene() {
   # A timed-out phase leaves its remote runner going. The [t] keeps each
   # pattern from matching this very ssh command line, which pkill -f would
   # otherwise kill along with its target.
-  timeout 300 "$WB" ssh client0 "cd /opt/wasm-bench && pkill -f 'run-e2-throughpu[t]'; pkill -x loadgen; pkill -x statecheck; \
+  timeout 300 "$WB" ssh client0 "cd /opt/wasm-bench && pkill -f 'run-e2-throughpu[t]'; pkill -x loadgen; pkill -x statecheck; pkill -x gateways; \
     for t in \$($R transform list 2>/dev/null | awk 'NR>1{print \$1}'); do $R transform delete \$t --no-confirm >/dev/null 2>&1; done; \
     sleep 3; \
-    for t in \$($R topic list 2>/dev/null | awk 'NR>1 && \$1 ~ /^(orders|fills|probe)/ {print \$1}'); do $R topic delete \$t >/dev/null 2>&1; done; \
+    for t in \$($R topic list 2>/dev/null | awk 'NR>1 && \$1 ~ /^(orders|fills|probe|gwevents-|gw-|gwk-)/ {print \$1}'); do $R topic delete \$t >/dev/null 2>&1; done; \
     for n in \$(curl -sf ${ADMIN_URL:-}/v1/brokers 2>/dev/null | jq -r '.[].node_id' 2>/dev/null); do $R cluster maintenance disable \$n >/dev/null 2>&1; done; \
     $R cluster config set enable_leader_balancer true >/dev/null 2>&1; \
     $R cluster config set core_balancing_continuous true >/dev/null 2>&1; \

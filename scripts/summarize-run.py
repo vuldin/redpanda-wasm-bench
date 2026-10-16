@@ -94,7 +94,7 @@ def stalls(timeline):
 WANT = ["level", "offered/s", "achieved/s", "total_p50us", "total_p999us", "relay_p99us",
         "match_us/order", "records/s", "clean"]
 e2 = sorted(s for s in glob.glob(f"{R}/client-results/*/summary.txt")
-            if not os.path.basename(os.path.dirname(s)).startswith("resilience-"))
+            if not os.path.basename(os.path.dirname(s)).startswith(("resilience-", "gateways-")))
 # `wb results` copies everything on the client, which on a cluster reused with
 # --existing includes earlier runs' sweeps. Keep only this run's: each sweep
 # directory ends in its runner's start (unix seconds).
@@ -159,6 +159,48 @@ for s in e2:
                       stalls(rep.get("timeline")), f"{t.get('samples', 0):,}"]
         except (OSError, ValueError):
             cells += ["-", "-", "-", "-", "-", "-"]
+        w("| " + " | ".join(cells) + " |")
+    w("")
+
+# ---------------------------------------------------------------------------
+# Gateway filtering (run gateways): one table per sweep, the runner's own rows.
+gw = sorted(glob.glob(f"{R}/client-results/gateways-*/summary.txt"))
+if gw:
+    w("## Gateway filtering (run gateways)\n")
+    w("Per level: N gateways each want only their own events. firehose = every "
+      "gateway reads the whole events topic (no transform); topics / keyed = the "
+      "in-broker gateway-demux routes each event to the gateway's own topic, or to "
+      "a partition keyed by gateway id. egress is broker fetch bytes "
+      "(vectorized_kafka_handler_sent_bytes_total{handler=\"fetch\"}) per produced "
+      "event; kept is the fraction of what gateways received that was theirs; "
+      "CPU is the gateway processes' own. clean = every event reached its gateway "
+      "exactly once.\n")
+cols = ["level", "produced", "kept_fraction", "bytes_per_gateway", "egress_per_event",
+        "cpu_us_per_kept", "p50_us", "p99_us", "p999_us", "clean"]
+for s in gw:
+    txt = read(s)
+    hdr = next((l.split() for l in txt.splitlines() if l.startswith("level ")), None)
+    w(f"### `{os.path.basename(os.path.dirname(s))}`\n")
+    for f in (l.lstrip("# ").strip() for l in txt.splitlines() if l.startswith("#")):
+        w(f"- `{f}`")
+    rows = [l.split() for l in txt.splitlines() if hdr and l and not l.startswith(("#", "level "))]
+    if not rows:
+        w("\n_no completed levels_\n")
+        continue
+    w("")
+    w("| " + " | ".join(cols) + " |")
+    w("|" + "---|" * len(cols))
+    for r in rows:
+        d = dict(zip(hdr, r))
+        cells = []
+        for c in cols:
+            v = d.get(c, "-")
+            try:
+                f = float(v)
+                v = f"{f:,.0f}" if c in ("produced", "bytes_per_gateway", "egress_per_event") else v
+            except ValueError:
+                pass
+            cells.append(v)
         w("| " + " | ".join(cells) + " |")
     w("")
 

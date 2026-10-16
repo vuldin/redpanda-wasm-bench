@@ -16,7 +16,9 @@
 # the partition the request needs answers 503 "Leader not available", which
 # rpk retries elsewhere and so must this.
 #
-# usage: deploy-transform.sh ADMIN_URL[,ADMIN_URL...] NAME INPUT_TOPIC OUTPUT_TOPIC WASM \
+# OUTPUT_TOPIC may be a comma-separated list (a transform has at most 8).
+#
+# usage: deploy-transform.sh ADMIN_URL[,ADMIN_URL...] NAME INPUT_TOPIC OUTPUT_TOPIC[,OUTPUT_TOPIC...] WASM \
 #          [--require-state-recovery] [--from-start] [--env K=V]...
 set -euo pipefail
 admin="$1" name="$2" input="$3" output="$4" wasm="$5"
@@ -100,7 +102,7 @@ if merged != mods:
     time.sleep(2)
 print(f"deploy-transform: {sha[:12]} trusted (shared_memory)")
 
-doc = {"name": name, "input_topic": inp, "output_topics": [out],
+doc = {"name": name, "input_topic": inp, "output_topics": [t for t in out.split(",") if t],
        "environment": [{"key": k, "value": v} for k, v in (e.split("=", 1) for e in envs)]}
 if require == "true":
     doc["state_options"] = {"require_state_recovery": True}

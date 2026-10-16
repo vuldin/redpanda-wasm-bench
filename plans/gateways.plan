@@ -1,0 +1,36 @@
+# Server-side filtering for FIX gateways (josh-391): what each gateway pays,
+# in broker egress and its own CPU, to get only its own events - with every
+# gateway reading the whole events topic (firehose, today's shape) against the
+# in-broker gateway-demux transform routing each event to its gateway.
+#
+#   firehose  N gateways each read the whole events topic and keep 1/N
+#   topics    gateway-demux MODE=topics: one output topic per gateway (exact;
+#             at most 8, the broker's output-topic limit)
+#   keyed     gateway-demux MODE=keyed: one topic with 4N partitions keyed by
+#             gateway id; each reads its partition plus any colliding
+#             gateways' traffic. Also at N=20, Mike's realistic count.
+#
+# Stateless, so none of the checkpoint questions apply. 30,000 events/sec of
+# 650 B (Mike's 512 B - 1 KB), N = 2, 4, 8 for all arms and 20 for keyed, two
+# trials interleaved. Read RESULTS.md's "Gateway filtering" table: egress per
+# event should fall from ~N x 650 B (firehose) to ~650 B (topics), with the
+# gateways' CPU per kept event falling with it.
+#
+#   scripts/autorun.sh check plans/gateways.plan
+#   scripts/autorun.sh start plans/gateways.plan
+#
+# 6 brokers + 3 clients + monitoring, ~$55/hr; ~40 min of phases, ~1h20 in all.
+
+TOPOLOGY=six-broker
+# Region preference for autorun's region selection (first with capacity wins).
+# us-west-2 first: every six-broker series so far ran in us-west-2a, and the
+# region is part of a result's fingerprint. The environment wins.
+: "${REGIONS:=us-west-2 us-east-1 us-east-2 eu-west-1}"; export REGIONS
+DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
+
+GW=(RATE=30000 SIZE=650 DURATION=60s RF=3 WRITE_CACHING=true ACKS=-1
+    'GATEWAY_LEVELS=2 4 8' KEYED_EXTRA_LEVELS=20 KEYED_PARTITIONS_PER_GATEWAY=4)
+
+for t in 1 2; do
+  phase "gateways-t$t" 20 run gateways "${GW[@]}"
+done

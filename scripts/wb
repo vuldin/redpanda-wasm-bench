@@ -666,7 +666,10 @@ cmd_run() {
     # recording the relay stage histograms at saturation is the entire
     # point. Takes the same KEY=VALUE args as e2.
     round4) script=run-round4.sh ;;
-    *) die "unknown phase '$phase' (want e1, e2, round3, josh236, round4 or resilience)" ;;
+    # Server-side filtering for FIX gateways: firehose vs gateway-demux by
+    # topic or by key, measured in bytes and CPU per gateway.
+    gateways) script=run-gateways.sh ;;
+    *) die "unknown phase '$phase' (want e1, e2, round3, josh236, round4, resilience or gateways)" ;;
   esac
   # e1, round3, round4 and josh236 live in the wasm-transforms-fanout-bench
   # tree this repo was extracted from; their scripts are not here. Without

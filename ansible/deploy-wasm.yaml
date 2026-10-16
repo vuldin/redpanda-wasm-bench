@@ -790,6 +790,7 @@
         - fanout-load
         - loadgen
         - statecheck
+        - gateways
 
     - name: Ship the wasm guest binaries (architecture-independent bytecode)
       copy:
@@ -805,8 +806,9 @@
       # shipped here, so it could not actually be deployed - now it can.
       # book-matcher is the depth-tolerant, snapshot-capable guest; it must be
       # trusted by sha256 (deploy-transform.sh does that) or it won't link.
+      # gateway-demux is the stateless per-gateway demux (run-gateways.sh).
       loop: [wasm-matcher.wasm, relay-probe.wasm, relay-sink.wasm, passthrough.wasm,
-             position-tracker.wasm, mass-matcher.wasm, book-matcher.wasm]
+             position-tracker.wasm, mass-matcher.wasm, book-matcher.wasm, gateway-demux.wasm]
 
     # The push-relay systemd unit that used to live here is gone along with the
     # external Go relay stub it ran: the relay is part of the broker binary now
@@ -872,6 +874,8 @@
         # admin-API deploy helper it (and e2's book-matcher path) uses.
         - run-durability.sh
         - deploy-transform.sh
+        # Server-side gateway filtering (cmd/gateways + gateway-demux).
+        - run-gateways.sh
 
     - name: Own the tool directory
       file: { path: /opt/wasm-bench, state: directory, owner: ubuntu, group: ubuntu, recurse: true }

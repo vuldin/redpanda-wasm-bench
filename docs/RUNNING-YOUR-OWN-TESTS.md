@@ -76,8 +76,13 @@ back - and `bench/local-relay-delivery.sh`, which runs the e2 harness on one
 local broker with `RELAY_DELIVERY=precommit` and then `committed` and checks
 that both deliver every record and that committed waits for the output write
 (it is measurably slower on the relay hop; a broker without the option
-measures the same in both). It records the commits of all three repos in
-`results/GATE-PASSED`.
+measures the same in both). `bench/local-gateways.sh` runs the real
+`run-gateways.sh` on one local broker, scaled down, and checks each arm's
+shape (firehose keeps 1/N, topics keeps everything, keyed keeps its own plus
+collisions, every event reaches its gateway once, firehose egress per event
+well above topics). The gate also runs the rehearsal a second time with
+`CHECKPOINT_CHUNK_BYTES=16384`, which must restore a chunked checkpoint. It
+records the commits of all three repos in `results/GATE-PASSED`.
 
 Before the first run of a new or changed plan, `bench/local-plan-smoke.sh
 plans/<plan>.plan` runs each distinct `run e2` phase of it, scaled down, on a
@@ -125,6 +130,7 @@ Shipped plans:
 | `relay-modes.plan` | what waiting for the output quorum costs in-broker consumers: `RELAY_DELIVERY=precommit` vs `committed`, interleaved, at fan-out 1 and 20 | ~30 min | 6 brokers |
 | `state-and-jitter.plan` | snapshot cost full vs live; graceful moves with the live region; every deployment on one cluster with 90s windows (p99.99 for each); the transforms scheduler share A/B; tail against rate | ~3.6h | 6 brokers |
 | `checkpoint-ab.plan` | the broker's guest-state checkpoint inline (original) vs background, interleaved, with the live region at depth 1,000 and 10,000 | ~49 min | 6 brokers |
+| `gateways.plan` | server-side filtering for FIX gateways: every gateway reading the whole events topic (firehose) against the in-broker `gateway-demux` routing each event to its gateway's own topic (N = 2, 4, 8) or to a partition keyed by gateway id (also N = 20); broker egress and gateway CPU per event, two trials | ~40 min | 6 brokers |
 | `checkpoint-chunks.plan` | whether splitting the checkpoint into chunks (64 KiB, 16 KiB) or checkpointing every 30s instead of 5s removes the depth-10,000 stall; plus a partition scale-out sweep (1-8 partitions at 120k and 240k orders/sec) and the committed relay at fan-out 50 | ~2 h | 6 brokers |
 
 `smoke`, `published` and `book-durability`, one after the other, is the full
@@ -299,6 +305,22 @@ Things that trip people up:
   when in-broker relay consumers get the producer's output: before its
   durable write (default) or after a quorum has acknowledged it. It is set on
   the producing transform and recorded in the report fingerprint.
+- **`run gateways`** (on client0) - server-side filtering for FIX gateways.
+  Per level (arm x gateway count): fresh topics; for `topics` and `keyed`,
+  deploy `gateway-demux` (`MODE=topics`, one output topic per gateway, at
+  most 8; or `MODE=keyed`, one topic of `N x KEYED_PARTITIONS_PER_GATEWAY`
+  partitions keyed by gateway id); then `cmd/gateways consume` (one client per
+  gateway, reading its slice: the whole events topic for `firehose`) and
+  `cmd/gateways produce` (`RATE` events/sec of `SIZE` bytes, round-robin over
+  the gateways, random padding, no compression so egress is real bytes) as
+  separate processes on client0. Knobs: `ARMS`, `GATEWAY_LEVELS` (2 4 8),
+  `KEYED_EXTRA_LEVELS` (20), `RATE`, `SIZE`, `DURATION`, `EVENTS_PARTITIONS`,
+  `RF`, `WRITE_CACHING`, `ACKS`. Each row: what the gateways received and kept,
+  `egress_per_event` (broker fetch bytes, summed over brokers, per produced
+  event), gateway CPU per kept event, latency, and `clean` (every event
+  reached its gateway exactly once). A keyed gateway finds its partition as
+  the broker does, `murmur2(id) % P` on the unsigned hash, which differs from
+  Kafka clients' `toPositive`.
 - **`run durability`** (from your machine, because a kill needs ssh to the
   leader) - per trial: fresh topics, deploy book-matcher, traffic over a
   preloaded book, sentinel orders in waves at T-10/-6/-3/-1/-0.3s, the action
