@@ -246,6 +246,10 @@ Things that trip people up:
   logs, which are quiet once both are up, so it looks hung when it is serving;
   if the bundle was already running it only attaches. Ctrl-C there stops it.
   `docker compose ps` shows whether it is running.
+- Grafana keeps dashboard variables in the page URL, so reloading an old tab
+  brings back its old choices (for instance "latency samples: all") over new
+  defaults. Open `http://localhost:3000/d/wasm-bench-overview` fresh, or set
+  the dropdown.
 - One bundle at a time: they all use ports 3000 and 9090, so
   `docker compose down` the previous one first.
 - Prometheus reads the blocks only at startup. After adding blocks (below),
