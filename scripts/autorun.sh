@@ -236,7 +236,7 @@ export_metrics() {
   grep -q 'Grafana' "$RUN_DIR/MONITORING.txt" 2>/dev/null || { [ "${DRY_RUN:-0}" = 1 ] || return 0; }
   log "exporting the scraped metrics (measured windows) to metrics-bundle/ (time box ${cap}s)"
   if timeout "$cap" "$WB" monitor export "$RUN_DIR" >> "$RUN_DIR/metrics-export.log" 2>&1; then
-    log "metrics exported: $RUN_DIR/metrics-bundle (open: cd metrics-bundle && docker compose up)"
+    log "metrics exported: $RUN_DIR/metrics-bundle (open: cd metrics-bundle && docker compose up -d, then http://localhost:3000)"
   elif [ "${KEEP_CLUSTER:-0}" = 1 ]; then
     log "WARN: metrics export failed or timed out (see metrics-export.log); KEEP_CLUSTER=1, so the cluster stays up - retry with: wb monitor export $RUN_DIR"
   else
