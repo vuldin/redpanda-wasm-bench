@@ -94,3 +94,47 @@ func TestStageMarker(t *testing.T) {
 		t.Errorf("render: %q", m.render())
 	}
 }
+
+// Lag is summed for the named function only, across output-topic series, and
+// a longer name sharing the prefix is not counted.
+func TestTransformLag(t *testing.T) {
+	body := strings.Join([]string{
+		`# TYPE redpanda_transform_lag gauge`,
+		`redpanda_transform_lag{function_name="gwdemux-1-topics-8",output_topic="gw-1-0"} 120`,
+		`redpanda_transform_lag{output_topic="gw-1-1",function_name="gwdemux-1-topics-8"} 30`,
+		`redpanda_transform_lag{function_name="gwdemux-1-topics-8x",output_topic="gw-1-0"} 999999`,
+		`redpanda_transform_failures{function_name="gwdemux-1-topics-8"} 7`,
+	}, "\n")
+	v, ok := transformLag(strings.NewReader(body), "gwdemux-1-topics-8")
+	if !ok || v != 150 {
+		t.Fatalf("transformLag = %v, %v; want 150, true", v, ok)
+	}
+	if _, ok := transformLag(strings.NewReader(body), "other"); ok {
+		t.Error("a function with no series must not count as seen")
+	}
+}
+
+// The verdict: loadgen's threshold (a quarter-second of input, at least
+// 1,000), no transform means usable, no samples means not.
+func TestLatencyUsable(t *testing.T) {
+	if got := lagThreshold(30000); got != 7500 {
+		t.Errorf("lagThreshold(30000) = %v, want 7500", got)
+	}
+	if got := lagThreshold(2000); got != 1000 {
+		t.Errorf("lagThreshold(2000) = %v, want the 1000 floor", got)
+	}
+	for _, c := range []struct {
+		fn   string
+		st   lagStats
+		want bool
+	}{
+		{"", lagStats{}, true},
+		{"d", lagStats{Samples: 50, Peak: 232, Threshold: 7500}, true},
+		{"d", lagStats{Samples: 50, Peak: 123794, Threshold: 7500}, false}, // 2026-10-16 topics-8, trial 2
+		{"d", lagStats{Samples: 0, Threshold: 7500}, false},
+	} {
+		if got := latencyUsable(c.fn, c.st); got != c.want {
+			t.Errorf("latencyUsable(%q, %+v) = %v, want %v", c.fn, c.st, got, c.want)
+		}
+	}
+}

@@ -255,11 +255,13 @@ if gw:
       "(vectorized_kafka_handler_sent_bytes_total{handler=\"fetch\"}) per produced "
       "event; kept is the fraction of what gateways received that was theirs; "
       "CPU is the gateway processes' own. clean = every event reached its gateway "
-      "exactly once. leader_changes = raft leadership changes during the level "
+      "exactly once. latency_usable = false when the demux fell more than a "
+      "quarter-second of input behind (lag_peak records): that level's percentiles "
+      "are a queue age, not a latency. leader_changes = raft leadership changes during the level "
       "(should be 0: the runner pauses the leader balancer; summaries without the "
       "column predate that).\n")
 cols = ["level", "produced", "kept_fraction", "bytes_per_gateway", "egress_per_event",
-        "cpu_us_per_kept", "p50_us", "p99_us", "p999_us", "clean", "leader_changes"]
+        "cpu_us_per_kept", "p50_us", "p99_us", "p999_us", "clean", "latency_usable", "lag_peak", "leader_changes"]
 for s in gw:
     txt = read(s)
     hdr = next((l.split() for l in txt.splitlines() if l.startswith("level ")), None)

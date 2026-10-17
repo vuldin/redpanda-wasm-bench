@@ -107,6 +107,12 @@ type produceReport struct {
 	WallSeconds float64 `json:"wall_seconds"`
 	StartUnixMs int64   `json:"start_unix_ms"`
 	EndUnixMs   int64   `json:"end_unix_ms"`
+	// The demux's lag while sending, summed over brokers, and the verdict:
+	// latency is a queue age, not a latency, once the transform falls more
+	// than a quarter-second of input behind (lag.go).
+	Transform     string   `json:"transform,omitempty"`
+	TransformLag  lagStats `json:"transform_lag"`
+	LatencyUsable bool     `json:"latency_usable"`
 }
 
 func produce(args []string) {
@@ -123,6 +129,8 @@ func produce(args []string) {
 	warmup := fs.Duration("warmup", 5*time.Second, "the stage marker's warmup: match consume's -warmup")
 	label := fs.String("label", "", "the level's tag, carried on the stage marker")
 	arm := fs.String("arm", "", "the arm, carried on the stage marker")
+	adminURLs := fs.String("admin-urls", "", "comma-separated broker admin URLs: sample -transform's lag from their /public_metrics every second while sending (in this process, not the consumer, whose CPU is the measured gateway cost)")
+	transform := fs.String("transform", "", "the demux transform's name, for its lag; empty (firehose) for none")
 	metricsListen := fs.String("metrics-listen", "", "serve loadgen_phase_info (warmup, measure, drain) on this address (\":9110\" or \"9110\"), loadgen's port. Off when empty")
 	_ = fs.Parse(args)
 	if *size < header {
@@ -146,6 +154,12 @@ func produce(args []string) {
 	interval := time.Duration(float64(time.Second) / *rate)
 	marker := &stageMarker{arm: *arm, label: *label}
 	marker.serve(*metricsListen)
+	lagCtx, stopLag := context.WithCancel(context.Background())
+	defer stopLag()
+	finishLag := func() lagStats { return lagStats{} }
+	if *transform != "" && *adminURLs != "" {
+		finishLag = sampleLag(lagCtx, strings.Split(*adminURLs, ","), *transform, time.Second)
+	}
 	cpu0, start := cpuSeconds(), time.Now()
 	deadline := start.Add(*duration)
 	var seq uint64
@@ -175,11 +189,15 @@ func produce(args []string) {
 	marker.set(stageAt(time.Since(start), *warmup, false))
 	_ = cl.Flush(context.Background())
 	wall := time.Since(start).Seconds()
+	stopLag()
+	lag := finishLag()
+	lag.Threshold = lagThreshold(*rate)
 	writeJSON(*out, produceReport{
 		Topic: *topic, Gateways: *gateways, Rate: *rate, Achieved: float64(seq) / duration.Seconds(),
 		Size: *size, Compression: *compression, Sent: int64(seq), Acked: acked.Load(), Errors: errs.Load(), Bytes: int64(seq) * int64(*size),
 		CPUSeconds: cpuSeconds() - cpu0, WallSeconds: wall,
 		StartUnixMs: start.UnixMilli(), EndUnixMs: time.Now().UnixMilli(),
+		Transform: *transform, TransformLag: lag, LatencyUsable: latencyUsable(*transform, lag),
 	})
 }
 

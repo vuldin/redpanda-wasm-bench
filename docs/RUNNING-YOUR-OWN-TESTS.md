@@ -473,6 +473,15 @@ it, so you can regenerate the tables (RESULTS.md in that plan's run directory).
 - `wb run` returns the remote runner's exit code, so a failed phase is
   retried and recorded as failed - but a level can still be unclean with rc 0.
   Read RESULTS.md's clean column, not only the phase outcome.
+- A level can deliver every record exactly once (clean) and still have
+  unusable latency: if the transform falls behind, the percentiles measure how
+  long records queued. loadgen-driven levels say so in their unclean reasons
+  ("latency not usable: transform lag peaked at N records"); gateways levels
+  have a latency_usable column, false once the demux's lag passed a
+  quarter-second of input. On 2026-10-16 a gateways level read clean at p99
+  849ms: a client connection had landed on the demux's already saturated shard
+  (Kafka work has 1000 scheduler shares, transforms 100), and it fell 124k
+  records behind.
 - Don't rebuild the broker in `REDPANDA_SRC` while a run is in progress. Every
   `wb run` phase checks that each broker runs exactly your local build (the
   binary gate) and refuses to measure otherwise, so a mid-run rebuild fails

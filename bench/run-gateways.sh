@@ -31,6 +31,12 @@
 # offset commit: on 2026-10-16 that alone put a ~4.5s p99 on 7 of 10 levels and
 # duplicates on 3 of them.
 #
+# The producer also samples the demux's transform lag every second, and a level
+# whose lag peaked above a quarter-second of input (at least 1,000 records,
+# loadgen's own rule) reports latency_usable=false: its percentiles are a queue
+# age. On 2026-10-16 one such level reported p99 849ms as clean, the demux 124k
+# records behind on a saturated shard.
+#
 # Runs on client0 from /opt/wasm-bench, through `wb run gateways KEY=VALUE...`.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -95,7 +101,7 @@ cfg_set enable_leader_balancer false
 {
   echo "# fingerprint: MODE=gateways RF=$RF write.caching=$WRITE_CACHING"
   echo "# rate=$RATE size=$SIZE duration=$DURATION events_partitions=$EVENTS_PARTITIONS acks=$ACKS arms=$ARMS gateway_levels=$GATEWAY_LEVELS keyed_extra=$KEYED_EXTRA_LEVELS keyed_partitions_per_gateway=$KEYED_PARTITIONS_PER_GATEWAY guest_sha256=$(sha256sum "$WASM" 2>/dev/null | cut -c1-64)"
-  echo "level arm gateways produced records bytes kept kept_fraction bytes_per_gateway egress_bytes egress_per_event cpu_s cpu_us_per_kept p50_us p99_us p999_us clean leader_changes"
+  echo "level arm gateways produced records bytes kept kept_fraction bytes_per_gateway egress_bytes egress_per_event cpu_s cpu_us_per_kept p50_us p99_us p999_us clean leader_changes lag_peak latency_usable"
 } > "$SUMMARY"
 
 d_s="$(dur_s "$DURATION")"
@@ -153,6 +159,7 @@ for arm in $ARMS; do
     ./gateways produce -brokers "$BROKERS" -topic "$events" -gateways "$gw_n" -rate "$RATE" -size "$SIZE" \
       -duration "$DURATION" -acks "$ACKS" -out "$RESULTS_DIR/$tag.produce.json" \
       -warmup 5s -arm "$arm" -label "$tag" -metrics-listen "${LOADGEN_METRICS_LISTEN:-}" \
+      -admin-urls "$ADMIN_URLS" -transform "$([ "$arm" = firehose ] || echo "$tname")" \
       > "$RESULTS_DIR/$tag.produce.log" 2>&1 || echo "WARN: producer exited non-zero (see $tag.produce.log)"
     wait "$cpid" || echo "WARN: consumer exited non-zero (see $tag.consume.log)"
     e1="$(fetch_bytes)"; l1="$(leader_changes)"
@@ -163,7 +170,7 @@ pf, cf, tag, arm, n, egress, moves = sys.argv[1], sys.argv[2], sys.argv[3], sys.
 try:
     p, c = json.load(open(pf)), json.load(open(cf))
 except (OSError, ValueError) as e:
-    print(f"{tag} {arm} {n} - - - - - - - - - - - - - false {moves}")
+    print(f"{tag} {arm} {n} - - - - - - - - - - - - - false {moves} - false")
     sys.exit(0)
 lat = c.get("latency_micros") or {}
 produced = p["acked"]
@@ -174,10 +181,14 @@ print(" ".join(str(x) for x in [
     f"{c['bytes_per_gateway']:.0f}", egress, f"{egress / produced:.1f}" if produced else "-",
     f"{c['cpu_seconds']:.2f}", f"{c['cpu_micros_per_kept_event']:.2f}",
     f"{lat.get('p50', 0):.0f}", f"{lat.get('p99', 0):.0f}", f"{lat.get('p999', 0):.0f}",
-    str(clean).lower(), moves]))
+    str(clean).lower(), moves,
+    f"{(p.get('transform_lag') or {}).get('peak', 0):.0f}" if p.get("transform") else "-",
+    str(p.get("latency_usable", True)).lower()]))
 PY
     tail -1 "$SUMMARY"
     [ "$(( l1 - l0 ))" -gt 0 ] && echo "WARN: $(( l1 - l0 )) leadership change(s) during $tag - its latency and clean columns include them"
+    [ "$(tail -1 "$SUMMARY" | awk '{print $NF}')" = false ] \
+      && echo "WARN: $tag latency not usable - the demux fell behind (lag peak $(tail -1 "$SUMMARY" | awk '{print $(NF-1)}') records, above a quarter-second of input): its percentiles are a queue age"
     delete_level
   done
 done

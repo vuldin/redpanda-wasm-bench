@@ -9,6 +9,8 @@
 #   topics:   they keep everything and read nothing foreign
 #   keyed:    they keep all their own events, plus whatever collides
 #   egress per event (broker fetch bytes): firehose > 2x topics
+#   the demux's lag sampled in every transform level, and every level's
+#   latency usable (the lag never passed a quarter-second of input)
 #   no leadership changes in any level, and the leader balancer the runner
 #   paused is back on afterwards
 #   the producer serves loadgen_phase_info{phase="measure"} while it sends,
@@ -120,7 +122,8 @@ for line in open(sys.argv[1]):
     f = line.split()
     rows[f[0]] = dict(zip(["level", "arm", "gateways", "produced", "records", "bytes", "kept", "kept_fraction",
                            "bytes_per_gateway", "egress_bytes", "egress_per_event", "cpu_s", "cpu_us_per_kept",
-                           "p50_us", "p99_us", "p999_us", "clean", "leader_changes"], f))
+                           "p50_us", "p99_us", "p999_us", "clean", "leader_changes", "lag_peak",
+                           "latency_usable"], f))
 bad = []
 def need(ok, what):
     print(("  ok    " if ok else "  FAIL  ") + what)
@@ -129,6 +132,9 @@ for lvl in ("firehose-4", "topics-4", "keyed-4", "keyed-8"):
     r = rows.get(lvl)
     need(r is not None and r["clean"] == "true", f"{lvl}: every event reached its gateway once")
     need(r is not None and r.get("leader_changes") == "0", f"{lvl}: no leadership changes during the level")
+    need(r is not None and r.get("latency_usable") == "true", f"{lvl}: latency usable (lag peak {r and r.get('lag_peak')})")
+    if lvl != "firehose-4":
+        need(r is not None and r.get("lag_peak", "-") not in ("-", ""), f"{lvl}: the demux's lag was sampled")
 if len(bad) == 0:
     fh, tp, k4 = rows["firehose-4"], rows["topics-4"], rows["keyed-4"]
     need(abs(float(fh["kept_fraction"]) - 0.25) < 0.01, f"firehose keeps 1/4 (kept_fraction {fh['kept_fraction']})")
