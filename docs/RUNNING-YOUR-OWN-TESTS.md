@@ -138,6 +138,7 @@ validate a change.
 
 | plan | what | phases | cluster |
 |---|---|---|---|
+| `relay-and-durability.plan` | validates the 2026-10-17 broker changes on one cluster: keyed-and-shares' phases (josh-418, josh-422), in-broker committed vs precommit with the output-write timer (josh-425), and broker kills held down and restarted in place, expecting every sentinel to survive (josh-426) | ~2h45 | 6 brokers |
 | `keyed-and-shares.plan` | two gateway follow-ups on one cluster: the keyed demux with concurrent output-partition writes at 2-20 gateways (josh-418), and the topics demux at 8 gateways with transform shares 100 vs 1000, four interleaved trials each (josh-422) | ~55 min | 6 brokers |
 | **`baseline.plan`** | **the default: the same matcher (book-matcher, 1,000-deep book, 30% cancels, 30k orders/sec in 15-order envelopes) in-broker with precommit and committed delivery, and as an external, co-located and co-located-on-isolated-cores client, run and reported highest latency first, at fan-out 1 and 20, 90s windows, two interleaved trials. RESULTS.md opens with an "Architecture comparison" table per fan-out** | ~90 min | 6 brokers |
 | `smoke.plan` | proves your build, keys and account end to end | ~22 min | 3 brokers |

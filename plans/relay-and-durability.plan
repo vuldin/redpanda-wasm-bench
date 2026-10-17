@@ -1,0 +1,91 @@
+# Validates three broker changes and one setting on one cluster: the gateway
+# follow-ups first (they leave no transform state behind), then the relay
+# comparison, then the broker kills, the most disruptive, last.
+#
+#   josh-418  keyed demux output with output partitions written concurrently
+#             (fork c76e4587a1): keyed latency should stay roughly flat in the
+#             number of gateways, near the topics arm's.
+#   josh-422  transform shares 100 vs 1000 for the topics demux at 8
+#             gateways, the level that starved when a client connection
+#             landed on its saturated shard.
+#
+#   josh-425  what committed relay delivery's wait is made of. The broker now
+#             times every output write (transform_output_write_latency_
+#             seconds); the relay-stages dashboard's "output write vs broker
+#             produce, mean" sets it against the broker's own acks=all
+#             produce. The gap is the write path around replication - the
+#             most a delivery change that keeps the commit gate could remove.
+#             The first baseline put the committed relay penalty at
+#             ~185-205us p50 with replication ~130us by coarse buckets.
+#   josh-426  a broker kill loses nothing: a guest-state checkpoint carries
+#             the input offset it reflects, is written only once the outputs
+#             are written through it, and a restart replays the input from
+#             there. Before it, a kill could lose the last 1-3s of orders
+#             (the snapshot and the committed offset were independent). The
+#             local SIGKILL rehearsal now keeps every sentinel; here the
+#             cluster does it with a surviving replica taking over (down) and
+#             with the killed broker restarting in place (systemd).
+#
+# Workload as baseline.plan's in-broker arms: book-matcher, 1,000-deep book,
+# 30% cancels, 30k orders/sec in 15-order envelopes, 650 B, RF=3, acks=all.
+#
+#   scripts/autorun.sh check plans/relay-and-durability.plan
+#   scripts/autorun.sh start plans/relay-and-durability.plan
+#
+# 6 brokers + 3 clients + monitoring, ~$55/hr; ~2h45 of phases, ~3h40 in all.
+# Needs a broker with josh-418, josh-425 and josh-426 (fork 2f3a8f30d8 or
+# later).
+
+TEST="Keyed writes, shares, relay delivery and crash recovery"
+TEST_ABOUT="Concurrent keyed output writes (josh-418), transform shares on a saturated shard (josh-422), what committed relay delivery's wait is made of (josh-425), and whether a broker kill now loses no acknowledged order (josh-426)."
+TOPOLOGY=six-broker
+# Region preference for autorun's region selection (first with capacity wins).
+# us-west-2 first: every six-broker series so far ran in us-west-2a, and the
+# region is part of a result's fingerprint. The environment wins.
+: "${REGIONS:=us-west-2 us-east-1 us-east-2 eu-west-1}"; export REGIONS
+DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
+
+E2=(ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 ACKS=all RF=3
+    WARMUP=10s DRAIN=30s RELAY_STAGE_METRICS=true WRITE_CACHING=true
+    LINGER_MS=0 SAMPLE_EVERY=10 PRODUCERS=1 GUEST=book-matcher CANCEL_FRACTION=0.3
+    DURATION=90s STATE=off MODE=fanout 'FANOUT_LEVELS=1 20' FRESH_TOPICS_PER_LEVEL=1 BOOK_DEPTH=1000)
+
+GW=(RATE=30000 SIZE=650 DURATION=60s RF=3 WRITE_CACHING=true ACKS=-1)
+
+# 0a. josh-418: the keyed arm alone, as in gateways.plan.
+for t in 1 2; do
+  about "trial $t of 2: keyed demux, concurrent partition writes" \
+    "2, 4, 8 and 20 gateways (8 to 80 output partitions). Watch transform e2e: it should stay flat in N."
+  phase "keyed-t$t" 10 run gateways "${GW[@]}" ARMS=keyed 'GATEWAY_LEVELS=2 4 8' KEYED_EXTRA_LEVELS=20 KEYED_PARTITIONS_PER_GATEWAY=4
+done
+
+# 0b. josh-422: topics demux at 8 gateways, transform shares default vs 1000.
+for t in 1 2 3 4; do
+  about "trial $t of 4: topics demux at 8 gateways, default transform shares (100)" \
+    "The level that starved on 2026-10-16. Watch transform lag and the reactor heatmap of the input leader's broker."
+  phase "shares-default-t$t" 4 run gateways "${GW[@]}" ARMS=topics GATEWAY_LEVELS=8
+  about "trial $t of 4: topics demux at 8 gateways, 1000 transform shares" \
+    "The same with the transforms group on equal shares with Kafka work. Compare lag and p99 with the default trial before it."
+  phase "shares-1000-t$t" 4 run gateways "${GW[@]}" ARMS=topics GATEWAY_LEVELS=8 TRANSFORM_SHARES=1000
+done
+
+# 1. josh-425: committed vs precommit, interleaved.
+for t in 1 2; do
+  about "trial $t of 2: in-broker, committed delivery" \
+    "Fan-out 1 and 20. Watch relay stages: output write vs broker produce, mean - the gap is the write path around replication."
+  phase "relay-committed-t$t" 10 run e2 "${E2[@]}" RELAY_DELIVERY=committed
+  about "trial $t of 2: in-broker, precommit delivery" \
+    "The same, delivered before the output write: the committed penalty is the difference on the relay leg."
+  phase "relay-precommit-t$t" 10 run e2 "${E2[@]}" RELAY_DELIVERY=precommit
+done
+
+# 2. josh-426: broker kills. Every sentinel wave should survive now, the ones
+# placed after the last checkpoint (T-1s, T-0.3s) included.
+about "broker kills, killed broker held down: a replica takes over" \
+  "SIGKILL the input partition's leader at depth 1,000 and 10,000, three trials. Watch the stateful-transforms row; every sentinel should survive."
+phase kill-failover 35 run durability ACTIONS=kill 'DEPTHS=1000 10000' TRIALS=3 KILL_MODE=down \
+  SNAPSHOT_MODE=live OUT=@RUN_DIR@/kill-failover
+about "broker kills, killed broker restarts in place" \
+  "The same with systemd restarting the broker, which can keep leadership: a crash-restart rather than a failover."
+phase kill-restart 35 run durability ACTIONS=kill 'DEPTHS=1000 10000' TRIALS=3 KILL_MODE=systemd \
+  SNAPSHOT_MODE=live OUT=@RUN_DIR@/kill-restart
