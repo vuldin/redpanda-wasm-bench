@@ -96,8 +96,10 @@ def stalls(timeline):
 # traditional's placements. Both are loadgen's own end-to-end report, so the
 # columns mean the same thing in every row. Sweeps are numbered per arm in the
 # order they ran; a phase retried after a failure can add a partial one.
-ARM_ORDER = ["in-broker, precommit", "in-broker, committed", "external", "co-located",
-             "co-located, isolated cores"]
+# Highest latency first, as the first baseline measured them (2026-10-17) and
+# as baseline.plan runs them.
+ARM_ORDER = ["external", "co-located", "co-located, isolated cores",
+             "in-broker, committed", "in-broker, precommit"]
 PLACEMENT = {"external": "external", "loopback": "co-located", "loopback-isolated": "co-located, isolated cores"}
 
 

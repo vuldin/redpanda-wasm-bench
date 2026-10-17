@@ -1,14 +1,19 @@
 # The default run: in-broker WASM against the other architectures, and
 # nothing else. The same matcher (book-matcher), book and order flow in every
-# deployment:
+# deployment, run (and reported) highest latency first, as measured by the
+# first baseline (2026-10-17, p50 against external, fan-out 1 / 20):
 #
-#   in-broker, precommit   delivered from the transform before its output write
+#   external               the matcher on its own client instance (1x)
+#   co-located             on the input partition leader's broker, over
+#                          loopback, unpinned (0.70x / 0.94x)
+#   co-located, isolated   the same, pinned to cores Redpanda does not use
+#                          (0.75x / 0.78x)
 #   in-broker, committed   delivered once the output quorum has it - what a
 #                          Kafka consumer of the output could fetch, so the
-#                          like-for-like comparison with the arms below
-#   external               the matcher on its own client instance
-#   co-located             on the input partition leader's broker, over loopback
-#   co-located, isolated   the same, pinned to cores Redpanda does not use
+#                          like-for-like comparison with the arms above
+#                          (0.44x / 0.39x)
+#   in-broker, precommit   delivered from the transform before its output
+#                          write (0.33x / 0.24x)
 #
 # at fan-out 1 (the pure path) and 20 (the production shape), 90s windows so
 # p99.99 rests on >=100k samples, two trials interleaved so cluster drift lands
@@ -27,7 +32,7 @@
 # Needs a broker with RELAY_DELIVERY (the offline gate checks it locally).
 
 TEST="Architecture comparison"
-TEST_ABOUT="The same matcher, book and order flow in-broker (precommit and committed delivery) and as a traditional external, co-located and isolated-core client, at fan-out 1 and 20."
+TEST_ABOUT="The same matcher, book and order flow in-broker (precommit and committed delivery) and as a traditional external, co-located and co-located-on-isolated-cores client, highest latency first, at fan-out 1 and 20."
 TOPOLOGY=six-broker
 # Region preference for autorun's region selection (first with capacity wins).
 # us-west-2 first: every six-broker series so far ran in us-west-2a, and the
@@ -41,14 +46,14 @@ E2=(ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 ACKS=all RF=3
     DURATION=90s STATE=off MODE=fanout 'FANOUT_LEVELS=1 20' FRESH_TOPICS_PER_LEVEL=1 BOOK_DEPTH=1000)
 
 for t in 1 2; do
-  about "trial $t of 2: in-broker, precommit delivery" \
-    "Fan-out 1 and 20, fresh topics per level, 90s windows. Watch the headline latency."
-  phase "inbroker-precommit-t$t" 10 run e2 "${E2[@]}" RELAY_DELIVERY=precommit
-  about "trial $t of 2: in-broker, committed delivery" \
-    "The same, delivered once the output quorum has it: the like-for-like arm. Compare with precommit."
-  phase "inbroker-committed-t$t" 10 run e2 "${E2[@]}" RELAY_DELIVERY=committed
-  about "trial $t of 2: traditional: external, co-located, isolated cores" \
-    "The same module and book outside the broker, fan-out 1 and 20. Its latency is in the client results; the broker charts show only the cluster side."
+  about "trial $t of 2: traditional: external, co-located, co-located on isolated cores" \
+    "The same module and book outside the broker, fan-out 1 and 20. Watch the end-to-end panel; the broker-side latency panels stay empty (no transform or relay runs)."
   phase "traditional-t$t" 25 run traditional 'PLACEMENTS=external loopback loopback-isolated' 'FANOUT_LADDER=1 20' \
     GUEST_MODULE=book-matcher.wasm BOOK_DEPTH=1000 CANCEL_FRACTION=0.3 ORDERS_PER_RECORD=15 RATE=30000 PAYLOAD=650 DURATION=90s
+  about "trial $t of 2: in-broker, committed delivery" \
+    "Delivered once the output quorum has it: the like-for-like arm against the traditional ones before it. Fan-out 1 and 20, fresh topics per level, 90s windows. Watch the headline latency."
+  phase "inbroker-committed-t$t" 10 run e2 "${E2[@]}" RELAY_DELIVERY=committed
+  about "trial $t of 2: in-broker, precommit delivery" \
+    "The same, delivered from the transform before its output write. Compare with committed before it."
+  phase "inbroker-precommit-t$t" 10 run e2 "${E2[@]}" RELAY_DELIVERY=precommit
 done

@@ -139,7 +139,7 @@ validate a change.
 | plan | what | phases | cluster |
 |---|---|---|---|
 | `keyed-and-shares.plan` | two gateway follow-ups on one cluster: the keyed demux with concurrent output-partition writes at 2-20 gateways (josh-418), and the topics demux at 8 gateways with transform shares 100 vs 1000, four interleaved trials each (josh-422) | ~55 min | 6 brokers |
-| **`baseline.plan`** | **the default: the same matcher (book-matcher, 1,000-deep book, 30% cancels, 30k orders/sec in 15-order envelopes) in-broker with precommit and committed delivery, and as an external, co-located and co-located-on-isolated-cores client, at fan-out 1 and 20, 90s windows, two interleaved trials. RESULTS.md opens with an "Architecture comparison" table per fan-out** | ~90 min | 6 brokers |
+| **`baseline.plan`** | **the default: the same matcher (book-matcher, 1,000-deep book, 30% cancels, 30k orders/sec in 15-order envelopes) in-broker with precommit and committed delivery, and as an external, co-located and co-located-on-isolated-cores client, run and reported highest latency first, at fan-out 1 and 20, 90s windows, two interleaved trials. RESULTS.md opens with an "Architecture comparison" table per fan-out** | ~90 min | 6 brokers |
 | `smoke.plan` | proves your build, keys and account end to end | ~22 min | 3 brokers |
 | `published.plan` | the published in-broker vs external comparison (REPRODUCE.md) and the resilience series | ~145 min | 3 brokers + 8 clients |
 | `resilience.plan` | the resilience series on its own: maintenance mode and leadership transfer, graceful drain unset vs set, then the module-residency A/B ([RESILIENCE.md](RESILIENCE.md)) | ~90 min | 3 brokers + 8 clients |

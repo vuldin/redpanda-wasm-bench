@@ -174,8 +174,17 @@ with _tf.TemporaryDirectory() as td:
     sec2 = md2.split("## Architecture comparison", 1)[-1].split("\n## ", 1)[0]
     expect("comparison: p50 vs external is against the median of an even number of external sweeps",
            "| co-located | 1 | 800 | 1,600 | 2,400 | 3,200 | 180,000 | 0.67x | true |" in sec2)
-    expect("comparison: arms in the fixed order (in-broker first, external before co-located)",
-           sec.index("in-broker, precommit") < sec.index("in-broker, committed") < sec.index("| external") < sec.index("| co-located"))
+    order = ["external", "co-located", "co-located, isolated cores", "in-broker, committed", "in-broker, precommit"]
+    def arms_in(table):
+        seen = []
+        for line in table.splitlines():
+            cell = line.split("|")[1].strip() if line.startswith("| ") else ""
+            if cell in order and cell not in seen:
+                seen.append(cell)
+        return seen
+    tables = [t for t in sec.split("### fan-out ")[1:]]
+    expect("comparison: arms highest latency first (external, co-located, isolated, in-broker) in every table",
+           len(tables) == 2 and all(arms_in(t) == sorted(arms_in(t), key=order.index) and len(arms_in(t)) >= 3 for t in tables))
 
 # metrics-windows.py: loadgen up-periods are named by the reports they
 # overlap in time, whatever order the reports were listed in.

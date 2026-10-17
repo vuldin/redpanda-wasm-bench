@@ -60,7 +60,7 @@ scripts/autorun.sh status                  # progress, the Grafana URL, where re
 | plan | what it tests | phases | cost, roughly |
 |---|---|---|---|
 | `smoke.plan` | your build, keys and account work end to end; start here | ~22 min | $15-40 |
-| **`baseline.plan`** | **the default: the same matcher, book and order flow in-broker (precommit and committed delivery) and as an external, co-located and isolated-core client, at fan-out 1 and 20, two interleaved trials** | ~1.5 h | $110 |
+| **`baseline.plan`** | **the default: the same matcher, book and order flow in-broker (precommit and committed delivery) and as an external, co-located and isolated-core client, highest latency first, at fan-out 1 and 20, two interleaved trials** | ~1.5 h | $110 |
 | `published.plan` | the published in-broker vs external comparison ([REPRODUCE.md](REPRODUCE.md)), then the resilience series | ~2.5 h | $130 |
 | `resilience.plan` | latency and correctness while a broker goes into maintenance mode or leadership is transferred, graceful drain on vs off ([RESILIENCE.md](docs/RESILIENCE.md)) | ~1.5 h | $90 |
 | `book-durability.plan` | a stateful matcher's book: depth up to 10,000 orders, and whether it survives maintenance, transfers and broker kills | ~3 h | $200 |
