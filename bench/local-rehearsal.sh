@@ -4,11 +4,15 @@
 # over a 1,000-deep book, places sentinel waves, SIGKILLs the broker at T,
 # restarts it, and checks the book came back.
 #
-# Passes when the restarted guest logged `STATE restored` and every sentinel
-# placed >= 6s before the kill survived (older than one 5s checkpoint
-# interval). Later waves may be lost or kept depending on how the snapshot and
-# the committed offset fall - that window is what the cluster series measures,
-# not what this checks.
+# Passes when the restarted guest logged `STATE restored`, the broker logged
+# that it resumed the input after the restored state's own offset, and EVERY
+# sentinel survived - the waves placed after the last checkpoint (T-1s,
+# T-0.3s) included - with none duplicated. Before checkpoints carried their
+# input offset (josh-426) only the waves older than one 5s checkpoint
+# interval were guaranteed: the restart resumed at the committed offsets, so
+# whatever arrived between the snapshot and them was lost from the book.
+# Now the input after the state's offset is replayed into it exactly, and an
+# acknowledged order survives a crash.
 #
 # This is the test that found the shared_engine forwarding bug (snapshots were
 # never taken in a real broker while unit tests passed). Run it after any
@@ -116,14 +120,16 @@ if [ -n "${CHECKPOINT_CHUNK_BYTES:-}" ]; then
   grep -m1 "as [0-9]* chunks of" "$W/broker.log" | sed 's/^/  /'
   [ "$chunked" -ge 1 ] || chunked_ok=false
 fi
-old_ok=$(jq '[.waves[] | select(.wave_seconds_before_t >= 6) | (.recovered == .placed)] | all' "$W/verdict.json")
+all_ok=$(jq '([.waves[] | (.recovered == .placed)] | all) and .duplicated == 0' "$W/verdict.json")
+resumed=$(grep -c "after the restored state's" "$W/broker.log")
 echo "--- verdict"
 jq -r '"placed=\(.placed) recovered=\(.recovered) lost=\(.lost) duplicated=\(.duplicated)", (.waves[] | "  wave T-\(.wave_seconds_before_t)s: \(.recovered)/\(.placed)")' "$W/verdict.json"
 grep "STATE restored" "$W/state.log" | head -1
-if [ "$restored" -ge 1 ] && [ "$old_ok" = true ] && [ "$chunked_ok" = true ]; then
-  echo "REHEARSAL PASSED: snapshot restored, every sentinel older than one checkpoint interval survived"
+grep -m1 "after the restored state's" "$W/broker.log" | sed 's/^.* - //; s/^/  /'
+if [ "$restored" -ge 1 ] && [ "$resumed" -ge 1 ] && [ "$all_ok" = true ] && [ "$chunked_ok" = true ]; then
+  echo "REHEARSAL PASSED: snapshot restored, the input replayed from its offset, every sentinel survived, none duplicated"
   rc=0
 else
-  echo "REHEARSAL FAILED: restored_lines=$restored older_waves_survived=$old_ok chunked_ok=$chunked_ok (logs: $W)" >&2
+  echo "REHEARSAL FAILED: restored_lines=$restored resumed_from_state=$resumed all_survived_no_dups=$all_ok chunked_ok=$chunked_ok (logs: $W)" >&2
 fi
 exit "$rc"

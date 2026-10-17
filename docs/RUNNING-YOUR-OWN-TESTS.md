@@ -420,11 +420,19 @@ it, so you can regenerate the tables (RESULTS.md in that plan's run directory).
   like crashes. With `data_transforms_graceful_transfer_timeout_ms=5000` and
   book-matcher's live region, every move restored every acknowledged order
   (`book-durability.plan`, `state-and-jitter.plan`).
-- A broker kill can lose the last few seconds: the snapshot (5s) and the
-  committed offset (3s) are independent, so the loss depends on where the
-  kill lands - some trials lose nothing, others the last 1-3s. With the dead
-  broker held down, a transform runs again on a surviving replica in ~1s
-  (`production-shape.plan`, `KILL_MODE=down`).
+- A broker kill used to lose the last few seconds: the snapshot (5s) and the
+  committed offset (3s) were independent, so the loss depended on where the
+  kill landed - some trials lost nothing, others the last 1-3s (cluster runs
+  before 2026-10-17). With a broker that has josh-426 (fork `5488fa26e7`) a
+  checkpoint carries the input offset its state reflects, is written only
+  once the outputs are written through it, and a restart replays the input
+  from that offset: in the local SIGKILL rehearsal every acknowledged order
+  survives, those placed after the last checkpoint included, with none
+  duplicated. (There the state was at input offset 61,849 and the committed
+  outputs at 56,854: the old restart would have re-applied ~5,000 records.)
+  Not yet measured on a cluster. With the dead broker held down, a transform
+  runs again on a surviving replica in ~1s (`production-shape.plan`,
+  `KILL_MODE=down`).
 - With the live region, state costs nothing at depth 1,000 (p99.9 ~1ms, as
   with no state); at 10,000 the broker's checkpoint still adds ~3ms at p99.9
   (`state-and-jitter.plan`). It is a stall on every 5s checkpoint, on the
