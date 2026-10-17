@@ -80,7 +80,12 @@ measures the same in both). `bench/local-gateways.sh` runs the real
 `run-gateways.sh` on one local broker, scaled down, and checks each arm's
 shape (firehose keeps 1/N, topics keeps everything, keyed keeps its own plus
 collisions, every event reaches its gateway once, firehose egress per event
-well above topics). The gate also runs the rehearsal a second time with
+well above topics). `bench/local-idle-transform.sh` deploys a gateway-demux
+on an idle topic and checks that it uses almost no CPU while caught up (a
+broker whose wait for new input returns at once spins at ~90% of a core),
+and that records sent after idle gaps still come through promptly (mean
+broker e2e under 100ms, which a wait that sleeps until a timer fails). The
+gate also runs the rehearsal a second time with
 `CHECKPOINT_CHUNK_BYTES=16384`, which must restore a chunked checkpoint. It
 records the commits of all three repos in `results/GATE-PASSED`.
 

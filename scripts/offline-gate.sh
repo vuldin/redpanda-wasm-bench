@@ -89,6 +89,8 @@ if [ "${REHEARSAL:-1}" = 1 ]; then
   CHECKPOINT_CHUNK_BYTES=16384 REDPANDA_BIN="$REDPANDA_BIN" WASM_DIR="$CLIENTS_REPO/bin" bash "$ROOT/bench/local-rehearsal.sh" || bad "local rehearsal (chunked)"
   step "local gateway-filtering check (firehose vs gateway-demux by topic and by key)"
   REDPANDA_BIN="$REDPANDA_BIN" WASM_DIR="$CLIENTS_REPO/bin" bash "$ROOT/bench/local-gateways.sh" || bad "local gateway-filtering check"
+  step "local idle-transform check (a caught-up transform sleeps, and wakes on new input)"
+  REDPANDA_BIN="$REDPANDA_BIN" WASM_DIR="$CLIENTS_REPO/bin" bash "$ROOT/bench/local-idle-transform.sh" || bad "local idle-transform check"
   step "local relay-delivery check (RELAY_DELIVERY=committed waits for the output write)"
   PAIRS=1 REDPANDA_BIN="$REDPANDA_BIN" WASM_DIR="$CLIENTS_REPO/bin" bash "$ROOT/bench/local-relay-delivery.sh" || bad "local relay-delivery check"
 fi

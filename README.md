@@ -172,7 +172,8 @@ bench/      the measurement scripts both arms run, plus run-resilience.sh
             (the optional maintenance/leadership-move series),
             run-durability.sh (does a stateful guest's book survive moves and
             kills), local-rehearsal.sh (the same on one local broker) and
-            local-relay-delivery.sh (RELAY_DELIVERY on one local broker) and
+            local-relay-delivery.sh (RELAY_DELIVERY on one local broker),
+            local-idle-transform.sh (a caught-up transform sleeps) and
             local-plan-smoke.sh (a plan's e2 phases, scaled down, locally)
 cmd/        loadgen (rate-paced generator, source of every published number),
             fanout-load (background consumer groups), statecheck (sentinel
