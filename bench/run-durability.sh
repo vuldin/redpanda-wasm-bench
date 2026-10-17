@@ -71,6 +71,8 @@ mkdir -p "$OUT"
 SUMMARY="$OUT/summary.txt"
 
 say() { echo "$@" | tee -a "$SUMMARY"; }
+# shellcheck source=lib-durability.sh
+source "$HERE/lib-durability.sh"
 C() { "$WB" ssh client0 "cd $TOOLS && $*"; }
 # Background launch on client0. The shell's own fds are pointed away from the
 # ssh channel FIRST: with `cd && nohup x &` the backgrounded list is a subshell
@@ -142,8 +144,11 @@ collect_logs() {
   C "timeout 30 $RPKR transform logs $name 2>/dev/null" > "$dst.transform-logs.txt" 2>/dev/null || true
   local t
   : > "$dst.broker-state-lines.txt"
+  # -15min covers a whole held-down kill trial (~8 min), whose restart is
+  # logged near its start. The startup config dump (application.cc) repeats
+  # these words in property descriptions, so it is dropped.
   for t in $(all_brokers); do
-    "$WB" ssh "$t" "sudo journalctl -u redpanda --since '-6min' --no-pager 2>/dev/null | grep -E 'guest-state|restored a persisted|state_recovery|failed to checkpoint|starting transform $name|transform_processor.cc:5[01][0-9]'" \
+    "$WB" ssh "$t" "sudo journalctl -u redpanda --since '-15min' --no-pager 2>/dev/null | grep -E 'guest-state|restored a persisted|state_recovery|failed to checkpoint|starting transform $name|$name/[0-9]+ - .*resuming at input offset|transform_processor.cc:5[01][0-9]' | grep -v 'application.cc:'" \
       2>/dev/null | sed "s/^/$t /" >> "$dst.broker-state-lines.txt" || true
     "$WB" ssh "$t" "curl -sf http://localhost:9644/public_metrics | grep -E 'transform_(state_restore|startup|offset_load|engine_start)_latency_seconds_(sum|count)|transform_state_recovery_failures' | grep '$name'" \
       2>/dev/null | sed "s/^/$t /" >> "$dst.metrics.txt" || true
@@ -276,6 +281,10 @@ run_trial() {
   collect_logs "$name" "$base"
   local v; v=$(jq -r '"placed=\(.placed) recovered=\(.recovered) lost=\(.lost) duplicated=\(.duplicated) strays=\(.strays_swept) ok=\(.ok) waves=" + ([.waves[] | "\(.wave_seconds_before_t)s:\(.recovered)/\(.placed)"] | join(","))' "$base.verdict.json" 2>/dev/null)
   say "  VERDICT $tag ${v:-<no verdict>}"
+  # Where the restart resumed: the checkpoint's own input offset (josh-426),
+  # and how far it was from the committed outputs. Absent on a broker
+  # without the checkpoint envelope, or when no restart happened.
+  resume_lines "$base.broker-state-lines.txt" | sed 's/^/  /' | tee -a "$SUMMARY" >/dev/null
   grep -h "STATE \(restored\|fresh\|gap\)" "$base.transform-logs.txt" 2>/dev/null | sed 's/^/  guest: /' | tee -a "$SUMMARY" >/dev/null
   grep -h "STATE stats" "$base.transform-logs.txt" 2>/dev/null | tail -1 | sed 's/^/  guest: /' | tee -a "$SUMMARY" >/dev/null
   if [ "$REPLAY" = "1" ] && [ "$action" = "${REPLAY_ACTION:-transfer}" ]; then

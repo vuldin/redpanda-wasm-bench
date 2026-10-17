@@ -138,7 +138,7 @@ validate a change.
 
 | plan | what | phases | cluster |
 |---|---|---|---|
-| `relay-and-durability.plan` | validates the 2026-10-17 broker changes on one cluster: keyed-and-shares' phases (josh-418, josh-422), in-broker committed vs precommit with the output-write timer (josh-425), and broker kills held down and restarted in place, expecting every sentinel to survive (josh-426) | ~2h45 | 6 brokers |
+| `relay-and-durability.plan` | validates the 2026-10-17 broker changes on one cluster: keyed-and-shares' phases (josh-418, josh-422), in-broker committed vs precommit with the output-write timer (josh-425), and broker kills held down and restarted in place, expecting every sentinel to survive (josh-426) | ~2h50 | 6 brokers |
 | `keyed-and-shares.plan` | two gateway follow-ups on one cluster: the keyed demux with concurrent output-partition writes at 2-20 gateways (josh-418), and the topics demux at 8 gateways with transform shares 100 vs 1000, four interleaved trials each (josh-422) | ~55 min | 6 brokers |
 | **`baseline.plan`** | **the default: the same matcher (book-matcher, 1,000-deep book, 30% cancels, 30k orders/sec in 15-order envelopes) in-broker with precommit and committed delivery, and as an external, co-located and co-located-on-isolated-cores client, run and reported highest latency first, at fan-out 1 and 20, 90s windows, two interleaved trials. RESULTS.md opens with an "Architecture comparison" table per fan-out** | ~90 min | 6 brokers |
 | `smoke.plan` | proves your build, keys and account end to end | ~22 min | 3 brokers |
@@ -357,6 +357,18 @@ Things that trip people up:
 Every durability trial line says whether traffic spanned T and whether
 leadership actually moved. A trial that says `LEADERSHIP-DID-NOT-MOVE` tested
 nothing; exclude it.
+
+A trial whose transform restarted also gets a `RESUME <broker> input=X
+state=Y committed=Z` line, from the broker's log: the processor resumed at
+input offset X, just after the offset Y its restored checkpoint reflects,
+where before the checkpoint carried its offset it would have resumed at the
+committed outputs' Z. RESULTS.md's "resumed from" column gives Y and its
+distance from the committed outputs: ahead (+) means those records' outputs
+were already written before the checkpoint saved and are skipped; behind (-)
+means they are re-applied to the book with nothing rewritten or relayed
+again. No RESUME line on a broker with the checkpoint envelope means no
+restart happened. A held-down kill trial takes ~8 minutes, a systemd restart
+~3, so budget a phase of 3 trials at 2 depths at ~50 and ~20 minutes.
 
 ## Testing your own guest
 

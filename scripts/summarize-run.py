@@ -89,6 +89,19 @@ def stalls(timeline):
     return str(len(slow))
 
 
+
+def resume_cell(trial_block):
+    """Where a killed transform resumed, from run-durability's RESUME lines:
+    the checkpoint's own input offset and how far that was from the committed
+    outputs (+ ahead: skipped, their outputs written before the checkpoint
+    saved; - behind: re-applied to the book, nothing rewritten). '-' when the
+    broker logged none (no restart, or a broker without the envelope)."""
+    out = []
+    for m in re.finditer(r"RESUME (broker\d+) input=(\d+) state=(\d+) committed=(\d+)", trial_block):
+        d = int(m.group(3)) - (int(m.group(4)) - 1)
+        out.append(f"{m.group(1)}: state {int(m.group(3)):,} ({d:+,} vs committed)")
+    return "; ".join(dict.fromkeys(out)) or "-"
+
 # ---------------------------------------------------------------------------
 # Architecture comparison (plans/baseline.plan): the same matcher, book and
 # order flow in every deployment, side by side per fan-out. In-broker arms are
@@ -320,8 +333,8 @@ for d in dur:
     txt = read(d)
     hdr = txt.splitlines()[0].lstrip("# ") if txt else ""
     w(f"### `{os.path.basename(os.path.dirname(d))}`\n\n`{hdr}`\n")
-    w("| trial | moved | traffic spans T | failover ms | recovered/placed | strays | waves | restore | gap seqs |")
-    w("|---|---|---|---|---|---|---|---|---|")
+    w("| trial | moved | traffic spans T | failover ms | recovered/placed | strays | waves | restore | gap seqs | resumed from |")
+    w("|---|---|---|---|---|---|---|---|---|---|")
     for b in re.split(r"\n############ ", txt)[1:]:
         tag = b.split(" ", 1)[0]
         moved = "no - EXCLUDE" if "LEADERSHIP-DID-NOT-MOVE" in b else ("yes" if "leadership moved" in b else "-")
@@ -332,6 +345,7 @@ for d in dur:
         v = re.search(r"VERDICT \S+ placed=(\d+) recovered=(\d+) lost=(\d+) duplicated=(\d+) strays=(\d+) ok=\S+ waves=(\S+)", b)
         rest = re.search(r"STATE restored .*?orders=(\d+) .*?bytes=(\d+) restore_us=(\d+)", b)
         gap = re.search(r"STATE gap .*?skipped_seqs=(\d+)", b)
+        res = resume_cell(b)
         if rest:
             rs = f"{int(rest.group(1)):,} orders, {int(rest.group(2))/1024:,.0f} KiB, {int(rest.group(3))/1000:.1f} ms"
         elif "STATE fresh" in b or "STATE off" in b:
@@ -340,9 +354,9 @@ for d in dur:
             rs = "-"
         if v:
             w(f"| {tag} | {moved} | {span} | {fo.group(1) if fo else '-'} | {v.group(2)}/{v.group(1)} | "
-              f"{v.group(5)} | {v.group(6)} | {rs} | {gap.group(1) if gap else 0} |")
+              f"{v.group(5)} | {v.group(6)} | {rs} | {gap.group(1) if gap else 0} | {res} |")
         else:
-            w(f"| {tag} | {moved} | {span} | - | no verdict | | | | |")
+            w(f"| {tag} | {moved} | {span} | - | no verdict | | | | | {res} |")
     reps = re.findall(r"REPLAY (\S+) history_records=(\d*) deploy_to_running_ms=(-?\d+) deploy_to_caught_up_ms=(-?\d+)", txt)
     rv = dict((a, f"{c}/{b}") for a, b, c, _ in re.findall(r"REPLAY-VERDICT (\S+) placed=(\d+) recovered=(\d+) lost=(\d+)", txt))
     if reps:

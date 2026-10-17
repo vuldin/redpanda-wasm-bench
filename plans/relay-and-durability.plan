@@ -32,7 +32,9 @@
 #   scripts/autorun.sh check plans/relay-and-durability.plan
 #   scripts/autorun.sh start plans/relay-and-durability.plan
 #
-# 6 brokers + 3 clients + monitoring, ~$55/hr; ~2h45 of phases, ~3h40 in all.
+# 6 brokers + 3 clients + monitoring, ~$55/hr; ~2h50 of phases, ~3h50 in all.
+# The 2026-10-17 run took 2h45 of phases: kill-failover 48 min (~8 per
+# held-down trial), kill-restart 18.
 # Needs a broker with josh-418, josh-425 and josh-426 (fork 2f3a8f30d8 or
 # later).
 
@@ -83,9 +85,9 @@ done
 # placed after the last checkpoint (T-1s, T-0.3s) included.
 about "broker kills, killed broker held down: a replica takes over" \
   "SIGKILL the input partition's leader at depth 1,000 and 10,000, three trials. Watch the stateful-transforms row; every sentinel should survive."
-phase kill-failover 35 run durability ACTIONS=kill 'DEPTHS=1000 10000' TRIALS=3 KILL_MODE=down \
+phase kill-failover 50 run durability ACTIONS=kill 'DEPTHS=1000 10000' TRIALS=3 KILL_MODE=down \
   SNAPSHOT_MODE=live OUT=@RUN_DIR@/kill-failover
 about "broker kills, killed broker restarts in place" \
   "The same with systemd restarting the broker, which can keep leadership: a crash-restart rather than a failover."
-phase kill-restart 35 run durability ACTIONS=kill 'DEPTHS=1000 10000' TRIALS=3 KILL_MODE=systemd \
+phase kill-restart 25 run durability ACTIONS=kill 'DEPTHS=1000 10000' TRIALS=3 KILL_MODE=systemd \
   SNAPSHOT_MODE=live OUT=@RUN_DIR@/kill-restart
