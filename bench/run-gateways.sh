@@ -57,6 +57,10 @@ RF="${RF:-3}"
 WRITE_CACHING="${WRITE_CACHING:-true}"
 ACKS="${ACKS:--1}"
 SETTLE="${SETTLE:-10}"
+# data_transforms_scheduling_group_shares for the sweep (empty: the cluster's,
+# 100 by default). Kafka work has 1000 shares; on a saturated shard the demux
+# loses to a client connection's fetch handling at 100 (josh-422).
+TRANSFORM_SHARES="${TRANSFORM_SHARES:-}"
 WASM="${WASM:-$BIN/gateway-demux.wasm}"
 RESULTS_DIR="${RESULTS_DIR:-./results/gateways-$RUN_ID}"
 mkdir -p "$RESULTS_DIR"
@@ -97,9 +101,13 @@ leader_changes() { raft_leader_changes "(gwevents|gw|gwk)-$RUN_ID"; }
 trap 'delete_level; cfg_restore_all' EXIT
 # Restored by cfg_restore_all on exit.
 cfg_set enable_leader_balancer false
+if [ -n "$TRANSFORM_SHARES" ]; then
+  echo "--- transforms scheduling group shares for this sweep: $TRANSFORM_SHARES ---"
+  cfg_set data_transforms_scheduling_group_shares "$TRANSFORM_SHARES"
+fi
 
 {
-  echo "# fingerprint: MODE=gateways RF=$RF write.caching=$WRITE_CACHING"
+  echo "# fingerprint: MODE=gateways RF=$RF write.caching=$WRITE_CACHING transform_shares=${TRANSFORM_SHARES:-cluster}"
   echo "# rate=$RATE size=$SIZE duration=$DURATION events_partitions=$EVENTS_PARTITIONS acks=$ACKS arms=$ARMS gateway_levels=$GATEWAY_LEVELS keyed_extra=$KEYED_EXTRA_LEVELS keyed_partitions_per_gateway=$KEYED_PARTITIONS_PER_GATEWAY guest_sha256=$(sha256sum "$WASM" 2>/dev/null | cut -c1-64)"
   echo "level arm gateways produced records bytes kept kept_fraction bytes_per_gateway egress_bytes egress_per_event cpu_s cpu_us_per_kept p50_us p99_us p999_us clean leader_changes lag_peak latency_usable"
 } > "$SUMMARY"

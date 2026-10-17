@@ -1,0 +1,48 @@
+# Two follow-ups to the 2026-10-16 gateway series, on one cluster:
+#
+#   1. josh-418: keyed demux output with the broker writing its output
+#      partitions concurrently (fork c76e4587a1). Before, a keyed demux to
+#      4N partitions wrote them one after another, each awaiting a quorum ack:
+#      transform e2e p50 1.1 / 3.2 / 7.5 / 24.5ms and gateway p50 1.7 / 4.0 /
+#      8.7 / 20.9ms at N = 2 / 4 / 8 / 20. With the fix keyed latency should
+#      sit near the topics arm's (~1.2-1.5ms p50), flat in N.
+#   2. josh-422: does a larger transforms scheduler share protect a demux on
+#      a saturated shard? The topics demux at N=8 saturates its input
+#      leader's shard; when a client connection also landed there, the demux
+#      (100 shares, against Kafka's 1000) fell 124k records behind and the
+#      level read p99 849ms. Default vs 1000, interleaved, four trials each:
+#      where the connection lands is luck, so it needs several. Read
+#      latency_usable / lag_peak per trial, and the p99s.
+#
+#   scripts/autorun.sh check plans/keyed-and-shares.plan
+#   scripts/autorun.sh start plans/keyed-and-shares.plan
+#
+# 6 brokers + 3 clients + monitoring, ~$55/hr; ~55 min of phases, ~1.5h in all.
+
+TEST="Keyed writes and transform shares"
+TEST_ABOUT="Whether concurrent output-partition writes flatten keyed demux latency (josh-418), and whether 1000 transform shares stop a demux starving on a saturated shard (josh-422)."
+TOPOLOGY=six-broker
+# Region preference for autorun's region selection (first with capacity wins).
+# us-west-2 first: every six-broker series so far ran in us-west-2a, and the
+# region is part of a result's fingerprint. The environment wins.
+: "${REGIONS:=us-west-2 us-east-1 us-east-2 eu-west-1}"; export REGIONS
+DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
+
+GW=(RATE=30000 SIZE=650 DURATION=60s RF=3 WRITE_CACHING=true ACKS=-1)
+
+# 1. josh-418: the keyed arm alone, as in gateways.plan.
+for t in 1 2; do
+  about "trial $t of 2: keyed demux, concurrent partition writes" \
+    "2, 4, 8 and 20 gateways (8 to 80 output partitions). Watch transform e2e: it should stay flat in N."
+  phase "keyed-t$t" 10 run gateways "${GW[@]}" ARMS=keyed 'GATEWAY_LEVELS=2 4 8' KEYED_EXTRA_LEVELS=20 KEYED_PARTITIONS_PER_GATEWAY=4
+done
+
+# 2. josh-422: topics demux at 8 gateways, transform shares default vs 1000.
+for t in 1 2 3 4; do
+  about "trial $t of 4: topics demux at 8 gateways, default transform shares (100)" \
+    "The level that starved on 2026-10-16. Watch transform lag and the reactor heatmap of the input leader's broker."
+  phase "shares-default-t$t" 4 run gateways "${GW[@]}" ARMS=topics GATEWAY_LEVELS=8
+  about "trial $t of 4: topics demux at 8 gateways, 1000 transform shares" \
+    "The same with the transforms group on equal shares with Kafka work. Compare lag and p99 with the default trial before it."
+  phase "shares-1000-t$t" 4 run gateways "${GW[@]}" ARMS=topics GATEWAY_LEVELS=8 TRANSFORM_SHARES=1000
+done

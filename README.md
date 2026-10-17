@@ -108,7 +108,11 @@ exported before 2026-10-17 has older dashboards: stop it, run
 `scripts/bundle-add-phases.sh results/run-...` (it replaces the rebuilt
 series and dashboards, and refuses while the bundle is running), and start it
 again. Bundles from before 2026-10-17 all share the compose project name
-`metrics-bundle`; stop one of those with `docker compose -p metrics-bundle down`. More, including archived tarballs:
+`metrics-bundle`; stop one of those with `docker compose -p metrics-bundle down`.
+If every panel errors with `lookup prometheus ... server misbehaving`, the
+Prometheus container is up but was left without its network (seen when it was
+first created while another bundle held port 9090): `docker compose down &&
+docker compose up -d` in the bundle recreates it. More, including archived tarballs:
 [Looking at a finished run](docs/RUNNING-YOUR-OWN-TESTS.md#looking-at-a-finished-run).
 
 ### When something goes wrong
