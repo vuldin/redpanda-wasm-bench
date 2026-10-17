@@ -102,9 +102,13 @@ the strip at the top names the phase at the end of the selected range, and
 latency shows only the measured samples by default (the "latency samples"
 switch brings back each level's start-up spike). Only the measured windows hold data,
 so the gaps between them are empty by design. One bundle at a time (they share
-ports 3000 and 9090). A bundle exported before 2026-10-16 has no phase
-shading: stop it, run `scripts/bundle-add-phases.sh results/run-...`, and
-start it again. More, including archived tarballs:
+ports 3000 and 9090): `docker compose down` in the open one before `up` in
+another. A bundle exported before 2026-10-16 has no phase shading, and one
+exported before 2026-10-17 has older dashboards: stop it, run
+`scripts/bundle-add-phases.sh results/run-...` (it replaces the rebuilt
+series and dashboards, and refuses while the bundle is running), and start it
+again. Bundles from before 2026-10-17 all share the compose project name
+`metrics-bundle`; stop one of those with `docker compose -p metrics-bundle down`. More, including archived tarballs:
 [Looking at a finished run](docs/RUNNING-YOUR-OWN-TESTS.md#looking-at-a-finished-run).
 
 ### When something goes wrong

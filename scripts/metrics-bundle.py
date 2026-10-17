@@ -35,6 +35,7 @@ Usage: metrics-bundle.py <out-dir> <windows-file> [--prom V] [--grafana V]
 """
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -84,6 +85,14 @@ scrape_configs: []
 """)
 
     # ------------------------------------------------------------------- compose
+    # A project name per bundle. Without one every bundle is project
+    # "metrics-bundle" (the directory's name), so bringing up a second bundle
+    # silently replaced the first one's Prometheus under its still-open
+    # Grafana, which then showed the other run's data (2026-10-16). Now the
+    # second `up` fails on the port instead, and `docker compose down` in a
+    # bundle only touches that bundle.
+    run_name = Path(a.results).name if a.results else out.resolve().parent.name
+    project = re.sub(r"[^a-z0-9_-]", "-", f"wasm-bench-{run_name}".lower())
     (out / "docker-compose.yml").write_text(f"""\
 # Bring the recording up:  docker compose up -d   (stop: docker compose down)
 # Without -d, `up` stays attached to the containers' logs and looks idle - it is
@@ -93,6 +102,7 @@ scrape_configs: []
 # Versions are pinned to the ones that produced ./data. TSDB format
 # compatibility is not guaranteed across Prometheus majors, so a newer image
 # may refuse these blocks.
+name: {project}
 services:
   prometheus:
     image: prom/prometheus:v{a.prom}

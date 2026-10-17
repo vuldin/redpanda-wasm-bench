@@ -8,9 +8,10 @@
 # (from the bundle's manifest) into the bundle's TSDB as one extra block, built
 # with the bundle's own Prometheus image so the block format matches, then
 # re-renders the viewer half (dashboards, compose, manifest) with
-# scripts/metrics-bundle.py. Safe to re-run: the block it added last time is
-# replaced. Needs docker and python3; stop the bundle first if it is running
-# (docker compose down in it) - Prometheus only reads blocks at startup.
+# scripts/metrics-bundle.py. Safe to re-run: every series an earlier build
+# wrote is deleted first. Needs docker and python3; stop the bundle first if it
+# is running (docker compose down in it) - Prometheus only reads blocks at
+# startup.
 set -euo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 RUN="${1:?usage: bundle-add-phases.sh <run-dir>}"
@@ -37,20 +38,34 @@ with open(sys.argv[2], "w") as f:
         f.write("%s %d %d\n" % (w["label"], w["start_ms"], w["end_ms"]))
 ' "$B/manifest.json" "$T/windows"
 
-# Replace the block a previous run of this script (or the export) added.
-python3 - "$B/data" <<'PY'
-import json, shutil, sys
-from pathlib import Path
-d = Path(sys.argv[1])
-try:
-    old = json.loads((d / "bench-series.json").read_text()).get("blocks", [])
-except (OSError, ValueError):
-    old = []
-for b in old:
-    if len(b) == 26 and b.startswith("01") and (d / b).is_dir():
-        shutil.rmtree(d / b)
-        print(f"  removed the previous series block {b}")
-PY
+# Delete what an earlier build (or the export) wrote, by series rather than by
+# block: opening a bundle lets Prometheus compact its blocks, which merges the
+# series block into the data blocks under new IDs, so removing the recorded
+# block ID silently removed nothing and every rebuild added another copy
+# (2026-10-16). The rebuilt series all carry a source label (bench_window_info
+# is only ever rebuilt); the live-scraped markers carry none and are kept.
+REBUILT=('bench_phase_info{source!=""}' 'loadgen_phase_info{source!=""}' 'bench_window_info')
+running="$(docker ps --format '{{.ID}}' | while read -r id; do
+  if docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$id" | tr ' ' '\n' | grep -qxF "$B/data"; then echo "$id"; fi
+done || true)"
+[ -z "$running" ] || die "the bundle's Prometheus is running ($running): docker compose down in $B first"
+CNAME="bundle-add-phases-$$"
+PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+trap 'docker stop "$CNAME" >/dev/null 2>&1 || true; rm -rf -- "${T:?}"' EXIT
+docker run -d --rm --name "$CNAME" -p "127.0.0.1:$PORT:9090" \
+  -v "$B/prometheus.yml:/etc/prometheus/prometheus.yml:ro" -v "$B/data:/prometheus" "prom/prometheus:v$PROM" \
+  --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus \
+  --storage.tsdb.retention.time=100y --web.enable-admin-api >/dev/null \
+  || die "could not start the bundle's Prometheus to delete the old series"
+for _ in $(seq 1 60); do curl -sf "http://127.0.0.1:$PORT/-/ready" >/dev/null && break; sleep 1; done
+args=(); for m in "${REBUILT[@]}"; do args+=(--data-urlencode "match[]=$m"); done
+curl -sf -X POST "http://127.0.0.1:$PORT/api/v1/admin/tsdb/delete_series" "${args[@]}" \
+  && curl -sf -X POST "http://127.0.0.1:$PORT/api/v1/admin/tsdb/clean_tombstones" \
+  || die "could not delete the previously rebuilt series"
+left="$(curl -sf "http://127.0.0.1:$PORT/api/v1/series" "${args[@]}" | python3 -c 'import json, sys; print(len(json.load(sys.stdin)["data"]))')"
+[ "$left" = 0 ] || die "$left rebuilt series survived the delete"
+docker stop "$CNAME" >/dev/null
+echo "  deleted the previously rebuilt phase and window series"
 
 mkdir -p "$T/blocks"
 docker run --rm --user "$(id -u):$(id -g)" --entrypoint promtool \

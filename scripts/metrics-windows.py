@@ -149,6 +149,23 @@ def loadgen_windows(prom, lo, hi, step=5):
     return [(a, b) for a, b in merged if b - a >= 5]
 
 
+def label_live(live, wins, slack=5.0):
+    """Name each loadgen up-period after the report windows it overlaps.
+
+    By time, not by position: the reports are listed in path order, which is
+    not run order (sweep directories of different modes interleave), and an
+    up-period can split or merge, so labelling the i-th period with the i-th
+    report put most windows of a long run under another level's name
+    (2026-10-16: checkpoint-chunks windows 12-22 one sweep off,
+    production-shape's rate levels under trad-loopback). A period no report
+    overlaps is windowN."""
+    out = []
+    for i, (s0, e0) in enumerate(live):
+        hit = [l for l, s, e in sorted(wins, key=lambda w: w[1]) if s < e0 + slack and e > s0 - slack]
+        out.append(("+".join(dict.fromkeys(hit)) or f"window{i + 1}", s0, e0))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("results")
@@ -202,11 +219,7 @@ def main():
             print(f"metrics-windows: using {len(live)} loadgen up-period(s) "
                   f"from {a.prometheus} rather than run_id arithmetic",
                   file=sys.stderr)
-            labels = [l for l, _, _ in wins]
-            wins = []
-            for i, (s0, e0) in enumerate(live):
-                lbl = labels[i] if i < len(labels) else f"window{i + 1}"
-                wins.append((lbl, s0, e0))
+            wins = label_live(live, wins)
         else:
             print("metrics-windows: WARNING - no loadgen target uptime found. "
                   "Falling back to run_id arithmetic, which anchors on when "

@@ -164,6 +164,18 @@ with _tf.TemporaryDirectory() as td:
     expect("comparison: arms in the fixed order (in-broker first, external before co-located)",
            sec.index("in-broker, precommit") < sec.index("in-broker, committed") < sec.index("| external") < sec.index("| co-located"))
 
+# metrics-windows.py: loadgen up-periods are named by the reports they
+# overlap in time, whatever order the reports were listed in.
+mw = load("mw", "scripts/metrics-windows.py")
+reports = [("partitions-2", 3000, 3100), ("bookdepth-1000", 1000, 1100), ("bookdepth-10000", 1200, 1300),
+           ("partitions-1", 2800, 2900)]
+live = [(1002, 1098), (1203, 1301), (2801, 2899), (3001, 3099), (5000, 5050)]
+expect("metrics-windows: up-periods labelled by time overlap, not list position",
+       [l for l, _, _ in mw.label_live(live, reports)]
+       == ["bookdepth-1000", "bookdepth-10000", "partitions-1", "partitions-2", "window5"])
+expect("metrics-windows: an up-period spanning two reports carries both",
+       mw.label_live([(990, 1310)], reports)[0][0] == "bookdepth-1000+bookdepth-10000")
+
 cs = load("cs", "scripts/check-scrapes.py")
 cfg = """global:
   scrape_interval: 15s
@@ -254,6 +266,17 @@ with tempfile.TemporaryDirectory() as td:
     expect("metrics-bundle: series block recorded; dashboards keep phases and gain windows",
            ok and m["series_blocks"] == ["01SERIES0000000000000000AA"]
            and {"autorun phase", "measured windows"} <= set(names))
+    # One compose project per bundle, named after its run: with the default
+    # (the directory name, "metrics-bundle" for every bundle) a second bundle's
+    # `up` replaced the first one's Prometheus under its open Grafana.
+    import re as _re
+    run = Path(td) / "run-2026-10-17-010203-Baseline_x"; run.mkdir()
+    wf = Path(td) / "w"; wf.write_text("w1 1000 61000\nw2 100000 160000\n")
+    subprocess.run(["python3", f"{root}/scripts/metrics-bundle.py", str(out), str(wf), "--results", str(run)],
+                   capture_output=True, text=True)
+    compose = (out / "docker-compose.yml").read_text()
+    expect("metrics-bundle: compose project named after the run",
+           _re.search(r"^name: wasm-bench-run-2026-10-17-010203-baseline_x$", compose, _re.M) is not None)
 sys.exit(1 if bad else 0)
 PY
 
