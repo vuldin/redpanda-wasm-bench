@@ -12,6 +12,8 @@ already draw as shaded regions:
   bench_window_info{window} 1                          from the export's windows
   loadgen_phase_info{label, phase} 1                   from each phase's log, and
                                                        gateways' produce reports
+  bench_e2e_latency_seconds{label, quantile} <value>   from each loadgen report's
+                                                       500ms timeline
 
 The last is loadgen's own stage marker (preload, warmup, measure, drain per
 level), rebuilt from the timestamped lines loadgen prints and the runner's
@@ -25,7 +27,7 @@ same series for a cluster that has it; this makes every bundle carry phases,
 including runs whose cluster predates the marker. Feed the output to
 `promtool tsdb create-blocks-from openmetrics`.
 
-  scripts/bench-series.py <run-dir> [--windows FILE] [--step 5]
+  scripts/bench-series.py <run-dir> [--windows FILE] [--step 5] [--anchors FILE]
 
 FILE has one window per line, "<label> <start_ms> <end_ms>" (what
 metrics-windows.py prints); without it, windows are read from
@@ -156,6 +158,53 @@ def gateway_stages(run_dir):
     return out
 
 
+TIMELINE_QUANTILES = (("0.5", "p50_micros"), ("0.99", "p99_micros"), ("0.999", "p999_micros"), ("1", "max_micros"))
+
+
+def load_anchors(path):
+    """{label: [measure start, seconds]} from "label start_s" lines."""
+    out = {}
+    if path:
+        for line in Path(path).read_text().splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                out.setdefault(parts[0], []).append(float(parts[1]))
+    return out
+
+
+def e2e_timelines(run_dir, anchors=None):
+    """[(label, quantile, t_s, seconds)] from every loadgen report's timeline.
+
+    A timeline bucket's offset is from the window's first timed send. A
+    current loadgen records that instant (timeline_start_unix_nanos); for an
+    older report it is the start of the level's measure stage
+    (loadgen_phase_info{phase="measure"}) that follows the report's run_id,
+    from `anchors` - bundle-add-phases.sh reads them out of the bundle."""
+    anchors = anchors or {}
+    out = []
+    for f in sorted(run_dir.glob("client-results/**/*.json")):
+        try:
+            r = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        tl, label = r.get("timeline"), r.get("label", "")
+        if not tl or "total" not in r or not label or label.startswith("precheck"):
+            continue
+        t0 = (r.get("timeline_start_unix_nanos") or 0) / 1e9
+        if not t0:
+            rid = (r.get("run_id") or 0) / 1e9
+            cand = [s for s in anchors.get(label, []) if rid <= s <= rid + 300]
+            if not cand:
+                continue
+            t0 = min(cand)
+        for b in tl:
+            t = t0 + b.get("offset_ms", 0) / 1000
+            for q, key in TIMELINE_QUANTILES:
+                if b.get(key) is not None:
+                    out.append((label, q, t, b[key] / 1e6))
+    return out
+
+
 def windows_from(path):
     out = []
     for line in Path(path).read_text().splitlines():
@@ -187,7 +236,7 @@ def series(name, labels, start, end, step):
     return out
 
 
-def render(run_dir, windows, step=5.0):
+def render(run_dir, windows, step=5.0, anchors=None):
     plan = (run_dir.name.split("-", 5) + [""])[5] or "unknown"
     log = run_dir / "autorun.log"
     lines = []
@@ -214,6 +263,12 @@ def render(run_dir, windows, step=5.0):
         for label, stage, t0, t1 in sorted(stages, key=lambda s: (s[0], s[1], s[2])):
             lines += series("loadgen_phase_info", {"label": label, "phase": stage,
                                                    "source": "phase-log"}, t0, t1, 1.0)
+    tls = e2e_timelines(run_dir, anchors)
+    if tls:
+        lines.append("# TYPE bench_e2e_latency_seconds gauge")
+        lines.append("# HELP bench_e2e_latency_seconds loadgen end to end per 500ms bucket (rebuilt from the reports' timelines).")
+        for label, q, t, v in sorted(tls, key=lambda x: (x[0], x[1], x[2])):
+            lines.append(f'bench_e2e_latency_seconds{{label="{esc(label)}",quantile="{q}",source="report-timeline"}} {v:.9g} {t:.3f}')
     if windows:
         lines.append("# TYPE bench_window_info gauge")
         lines.append("# HELP bench_window_info Measured window captured by the metrics export.")
@@ -230,12 +285,15 @@ def main():
         i = args.index("--step"); step = float(args[i + 1]); del args[i:i + 2]
     if "--windows" in args:
         i = args.index("--windows"); wfile = args[i + 1]; del args[i:i + 2]
+    afile = None
+    if "--anchors" in args:
+        i = args.index("--anchors"); afile = args[i + 1]; del args[i:i + 2]
     if not args:
         print(__doc__, file=sys.stderr)
         return 2
     run_dir = Path(args[0]).resolve()
     windows = windows_from(wfile) if wfile else windows_from_manifest(run_dir)
-    text, np, nw = render(run_dir, windows, step)
+    text, np, nw = render(run_dir, windows, step, load_anchors(afile))
     sys.stdout.write(text)
     print(f"bench-series: {np} phase attempts, {nw} windows", file=sys.stderr)
     return 0

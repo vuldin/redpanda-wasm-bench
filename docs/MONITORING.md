@@ -240,6 +240,19 @@ stays shaded while it runs.
 
 ### Latency panels: gaps, warmup and "measured only"
 
+The overview's headline opens with **end to end, send -> receipt: every
+deployment**: loadgen's own latency per level, the number RESULTS.md compares,
+and the only latency the traditional arms (external, co-located, isolated
+cores) have at all - the broker-side panels beside it need a transform or the
+relay, so they are empty for those arms. Live it is loadgen's
+`loadgen_e2e_latency_seconds` histogram (labelled `arm`, `label`). A run from
+before it shows the same per-level p50 and p99 rebuilt from each report's
+500ms timeline (`bench_e2e_latency_seconds`, by `bench-series.py`), placed in
+time by the report's `timeline_start_unix_nanos` or, for older reports, by
+the level's measure stage in the bundle - `bundle-add-phases.sh` adds them to
+an existing bundle. In-broker precommit and committed levels share a label
+(`fanout-1`, `fanout-20`); the phase shading says which is which.
+
 Latency panels break their lines wherever there was no traffic: a phase's
 deploy, the book preload, the settle between levels. They used to draw across
 those gaps, which joined the last point of one level to the first point of the

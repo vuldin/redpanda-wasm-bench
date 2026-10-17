@@ -29,7 +29,6 @@ print(m.get("prometheus_version", "3.5.0"), m.get("grafana_version", "11.6.1"), 
 ' "$B/manifest.json")
 
 T="$(mktemp -d)"; trap 'rm -rf -- "${T:?}"' EXIT
-python3 "$HERE/bench-series.py" "$RUN" > "$T/series.om"
 python3 -c '
 import json, sys
 m = json.load(open(sys.argv[1]))
@@ -44,7 +43,7 @@ with open(sys.argv[2], "w") as f:
 # block ID silently removed nothing and every rebuild added another copy
 # (2026-10-16). The rebuilt series all carry a source label (bench_window_info
 # is only ever rebuilt); the live-scraped markers carry none and are kept.
-REBUILT=('bench_phase_info{source!=""}' 'loadgen_phase_info{source!=""}' 'bench_window_info')
+REBUILT=('bench_phase_info{source!=""}' 'loadgen_phase_info{source!=""}' 'bench_window_info' 'bench_e2e_latency_seconds')
 running="$(docker ps --format '{{.ID}}' | while read -r id; do
   if docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$id" | tr ' ' '\n' | grep -qxF "$B/data"; then echo "$id"; fi
 done || true)"
@@ -58,6 +57,22 @@ docker run -d --rm --name "$CNAME" -p "127.0.0.1:$PORT:9090" \
   --storage.tsdb.retention.time=100y --web.enable-admin-api >/dev/null \
   || die "could not start the bundle's Prometheus to delete the old series"
 for _ in $(seq 1 60); do curl -sf "http://127.0.0.1:$PORT/-/ready" >/dev/null && break; sleep 1; done
+# Each level's measure start, which places an older report's latency timeline
+# in time (its offsets are from the window's first timed send, and only a
+# current loadgen records that instant).
+python3 - "http://127.0.0.1:$PORT" "$B/manifest.json" > "$T/anchors" <<'PY' || die "could not read the measure starts"
+import json, sys, urllib.parse, urllib.request
+prom, man = sys.argv[1], json.load(open(sys.argv[2]))
+lo = min(w["start_ms"] for w in man["windows"]) / 1000
+hi = max(w["end_ms"] for w in man["windows"]) / 1000
+q = urllib.parse.urlencode({"query": 'max by (label) (loadgen_phase_info{phase="measure"})',
+                            "start": lo, "end": hi, "step": "1"})
+for s in json.load(urllib.request.urlopen(f"{prom}/api/v1/query_range?{q}"))["data"]["result"]:
+    ts = [float(t) for t, _ in s["values"]]
+    # A new measure stage starts wherever the marker reappears after a gap.
+    for t in [ts[0]] + [b for a, b in zip(ts, ts[1:]) if b - a > 5]:
+        print(s["metric"].get("label", ""), int(t))
+PY
 args=(); for m in "${REBUILT[@]}"; do args+=(--data-urlencode "match[]=$m"); done
 curl -sf -X POST "http://127.0.0.1:$PORT/api/v1/admin/tsdb/delete_series" "${args[@]}" \
   && curl -sf -X POST "http://127.0.0.1:$PORT/api/v1/admin/tsdb/clean_tombstones" \
@@ -65,7 +80,8 @@ curl -sf -X POST "http://127.0.0.1:$PORT/api/v1/admin/tsdb/delete_series" "${arg
 left="$(curl -sf "http://127.0.0.1:$PORT/api/v1/series" "${args[@]}" | python3 -c 'import json, sys; print(len(json.load(sys.stdin)["data"]))')"
 [ "$left" = 0 ] || die "$left rebuilt series survived the delete"
 docker stop "$CNAME" >/dev/null
-echo "  deleted the previously rebuilt phase and window series"
+echo "  deleted the previously rebuilt phase, window and latency series"
+python3 "$HERE/bench-series.py" "$RUN" --anchors "$T/anchors" > "$T/series.om"
 
 mkdir -p "$T/blocks"
 docker run --rm --user "$(id -u):$(id -g)" --entrypoint promtool \

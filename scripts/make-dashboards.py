@@ -97,6 +97,23 @@ def hist_quantile(metric, q, extra=""):
             f"(rate({metric}_bucket{sel}[$__rate_interval]))) $window")
 
 
+def e2e_quantile(q):
+    """loadgen's end to end (send -> receipt), per level label: the one
+    latency every deployment shares, in-broker and traditional alike.
+
+    Live it is loadgen's own histogram. A finished run whose loadgen predates
+    it has bench_e2e_latency_seconds instead, rebuilt by bench-series.py from
+    the reports' 500ms timelines (p50 / p99 / p99.9 / max per bucket, so q
+    must be one of those). `or` takes the live series wherever it exists and
+    the rebuilt one only where it does not, so a bundle holding both draws
+    each level once. Rebuilt series carry no staleness markers, hence the
+    short max_over_time."""
+    live = (f"histogram_quantile({q}, sum by (le, label) "
+            f"(rate(loadgen_e2e_latency_seconds_bucket[$__rate_interval])))")
+    rebuilt = f'max by (label) (max_over_time(bench_e2e_latency_seconds{{quantile="{q}"}}[2s]))'
+    return f"(({live}) or ({rebuilt})) $window"
+
+
 def event_quantile(metric, q, window="10m"):
     """A quantile over a histogram of rare events (a processor starting, a
     snapshot being restored), over a fixed trailing window.
@@ -346,7 +363,10 @@ def now_running(pid, y):
 _MEASURE_MASK = (f'(max({MEASURE_EXPR}) '
                  f'and on() max(max_over_time(loadgen_phase_info{{phase="measure"}}[{LOADGEN_FRESH}] offset $__rate_interval)) '
                  'or on() vector(0))')
-MEASURED_ONLY = f"* on() {_MEASURE_MASK} / on() {_MEASURE_MASK}"
+# group_left() keeps the left side's labels: a bare on() returns the result
+# with none, which merged the end-to-end panel's per-level series into one
+# unlabelled line (2026-10-17).
+MEASURED_ONLY = f"* on() group_left() {_MEASURE_MASK} / on() group_left() {_MEASURE_MASK}"
 ALL_SAMPLES = "* 1"
 WINDOW_VARIABLE = {
     "name": "window",
@@ -425,6 +445,19 @@ def overview():
     p.extend(now_running(9, y)); y += 6
 
     p.append(row(1, "Headline: in-broker fan-out latency", y)); y += 1
+    p.append(panel(
+        12, "end to end, send -> receipt: every deployment (loadgen)", 0, y, 24, 8,
+        [(e2e_quantile(q), f"{{{{label}}}} {lab}") for q, lab in (("0.5", "p50"), ("0.99", "p99"))],
+        unit="s", legend_table=True,
+        desc=("loadgen's own end-to-end latency, send to receipt, per level: "
+              "the number RESULTS.md compares, and the only latency every "
+              "deployment has - in-broker and traditional (external, "
+              "co-located, isolated cores) alike. The two panels below are "
+              "broker-side and only exist where a transform or the relay "
+              "runs. Live from loadgen's histogram; a finished run from "
+              "before it shows the same from the reports' 500ms timelines."),
+    ))
+    y += 8
     p.append(panel(
         10, "emit -> guest, the whole in-broker path", 0, y, 12, 8,
         [(hist_quantile("redpanda_relay_emit_to_guest_duration_seconds", q), lab)

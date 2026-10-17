@@ -806,11 +806,11 @@
         "name": "window",
         "label": "latency samples",
         "type": "custom",
-        "query": "measured only : * on() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0)) / on() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0)),all : * 1",
+        "query": "measured only : * on() group_left() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0)) / on() group_left() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0)),all : * 1",
         "options": [
           {
             "text": "measured only",
-            "value": "* on() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0)) / on() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0))",
+            "value": "* on() group_left() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0)) / on() group_left() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0))",
             "selected": true
           },
           {
@@ -821,7 +821,7 @@
         ],
         "current": {
           "text": "measured only",
-          "value": "* on() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0)) / on() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0))",
+          "value": "* on() group_left() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0)) / on() group_left() (max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s])) and on() max(max_over_time(loadgen_phase_info{phase=\"measure\"}[3s] offset $__rate_interval)) or on() vector(0))",
           "selected": true
         },
         "hide": 0

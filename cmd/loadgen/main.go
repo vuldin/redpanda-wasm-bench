@@ -578,6 +578,10 @@ type report struct {
 	// Per-interval slices of the same window, present only when -timeline-ms
 	// is set. Additive: consumers that do not know about it are unaffected.
 	Timeline []timelineBucket `json:"timeline,omitempty"`
+	// The send instant of the timeline's offset 0 (the window's first timed
+	// send), so a finished run's timeline can be placed in time - e.g. drawn
+	// on the dashboards from a metrics bundle (bench-series.py).
+	TimelineStartUnixNanos int64 `json:"timeline_start_unix_nanos,omitempty"`
 
 	Lag       lagReport       `json:"lag"`
 	Resources resourcesReport `json:"resources"`
@@ -1094,7 +1098,10 @@ type collector struct {
 	timedReceipts  atomic.Int64
 	warmupReceipts atomic.Int64
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// Live end-to-end histogram, fed alongside totalLat (set with setE2E,
+	// under mu; nil until then, and when -metrics-listen is off).
+	e2e      func(micros float64)
 	totalLat []float64
 	// Send instant for each totalLat sample, same index. Kept so a window can
 	// be sliced in time; an aggregate cannot say when a stall began or how
@@ -1126,6 +1133,14 @@ type collector struct {
 type orderKey struct {
 	Seq int64
 	K   int
+}
+
+// setE2E hooks the live end-to-end histogram in, under the same lock the
+// receipt paths hold when they append a sample.
+func (c *collector) setE2E(fn func(micros float64)) {
+	c.mu.Lock()
+	c.e2e = fn
+	c.mu.Unlock()
 }
 
 func newCollector(runID int64, numProbes, sampleEvery int) *collector {
@@ -1274,8 +1289,12 @@ func (c *collector) onFill(value []byte, observedAt time.Time) {
 		// adding nothing, and OverMicros' documented meaning is a count of
 		// affected units.
 		if pid.k == 0 {
-			c.totalLat = append(c.totalLat, float64(observedAt.Sub(sendT).Nanoseconds())/1000)
+			us := float64(observedAt.Sub(sendT).Nanoseconds()) / 1000
+			c.totalLat = append(c.totalLat, us)
 			c.totalSend = append(c.totalSend, sendT.UnixNano())
+			if c.e2e != nil {
+				c.e2e(us)
+			}
 		}
 		c.noteOrderSeenLocked(pid)
 		c.mu.Unlock()
@@ -1333,8 +1352,12 @@ func (c *collector) onReceipt(value string, observedAt time.Time) {
 	// match does not vary per probe either (same envelope, same matcher
 	// run), so it is recorded once, on the first receipt seen for it.
 	if pid.k == 0 {
-		c.totalLat = append(c.totalLat, float64(receiptT.Sub(sendT).Nanoseconds())/1000)
+		us := float64(receiptT.Sub(sendT).Nanoseconds()) / 1000
+		c.totalLat = append(c.totalLat, us)
 		c.totalSend = append(c.totalSend, sendT.UnixNano())
+		if c.e2e != nil {
+			c.e2e(us)
+		}
 		c.relayLat = append(c.relayLat, float64(receiptT.Sub(matchedT).Nanoseconds())/1000)
 	}
 
@@ -1678,6 +1701,9 @@ func main() {
 	// lateness sample, so the histogram update is free of extra locking.
 	live := newLiveMetrics()
 	live.enabled = *metricsListen != ""
+	if live.enabled {
+		coll.setE2E(live.recordE2E)
+	}
 	live.offeredRate = *rate
 	if *rate > 0 {
 		live.pacingInterval = 1 / *rate
@@ -2072,16 +2098,17 @@ func main() {
 			ProduceErrorsByKind:    errTally.snapshot(),
 			ElapsedSeconds:         elapsed,
 		},
-		ExpectedReceipts: expected,
-		ReceivedReceipts: received,
-		WarmupReceipts:   coll.warmupReceipts.Load(),
-		ClientBound:      clientBound,
-		SendLateness:     newStageStats(latenessCopy),
-		Produce:          newStageStats(coll.produceStage()),
-		Match:            newStageStats(matchCopy),
-		RelayConsume:     newStageStats(relayCopy),
-		Total:            newStageStats(totalCopy),
-		Timeline:         buildTimeline(timelineSend, timelineLat, int64(*timelineMs)),
+		ExpectedReceipts:       expected,
+		ReceivedReceipts:       received,
+		WarmupReceipts:         coll.warmupReceipts.Load(),
+		ClientBound:            clientBound,
+		SendLateness:           newStageStats(latenessCopy),
+		Produce:                newStageStats(coll.produceStage()),
+		Match:                  newStageStats(matchCopy),
+		RelayConsume:           newStageStats(relayCopy),
+		Total:                  newStageStats(totalCopy),
+		Timeline:               buildTimeline(timelineSend, timelineLat, int64(*timelineMs)),
+		TimelineStartUnixNanos: minInt64(timelineSend),
 	}
 	if expected > received {
 		rep.MissingReceipts = expected - received
@@ -2555,4 +2582,16 @@ func judge(rep *report) (bool, []string) {
 		reasons = append(reasons, "no -admin-url: latency without resource attribution, which is the gap this tool exists to close")
 	}
 	return len(reasons) == 0, reasons
+}
+
+// minInt64 is the smallest value, or 0 for none.
+func minInt64(xs []int64) int64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	m := xs[0]
+	for _, x := range xs[1:] {
+		m = min(m, x)
+	}
+	return m
 }

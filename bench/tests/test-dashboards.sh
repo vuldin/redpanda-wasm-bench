@@ -44,6 +44,12 @@ expect("latency queries keep NaN (no >= 0 filter) and carry $window",
 expect("spanNulls is off on every time series panel",
        all(p["fieldConfig"]["defaults"]["custom"].get("spanNulls") is False
            for fn in md.DASHBOARDS.values() for p in fn()["panels"] if p.get("type") == "timeseries"))
+ov = md.DASHBOARDS["bench-overview.json"]()
+e2e_exprs = [t["expr"] for pn in (ov or {}).get("panels", []) if pn.get("title", "").startswith("end to end, send -> receipt")
+             for t in pn.get("targets", [])]
+expect("overview: an end-to-end panel for every deployment, live histogram or rebuilt timeline",
+       len(e2e_exprs) == 2 and all("loadgen_e2e_latency_seconds_bucket" in e and "bench_e2e_latency_seconds" in e
+                                   and " or " in e for e in e2e_exprs))
 expect("latency samples default to measured only",
        md.WINDOW_VARIABLE["current"]["value"] == md.MEASURED_ONLY)
 expect("measured-only is a NaN mask (X * M / M), not an `and` filter",
@@ -232,6 +238,24 @@ with tempfile.TemporaryDirectory() as td:
     st = bs.gateway_stages(rd)
     expect("bench-series: gateway stages from produce reports (5s warmup, then measure)",
            st == [("topics-4", "warmup", 1792154000.0, 1792154005.0), ("topics-4", "measure", 1792154005.0, 1792154060.0)])
+    # Latency timelines: a current report anchors itself; an older one takes
+    # the measure start that follows its run_id from the anchors.
+    cr2 = rd / "client-results" / "traditional-sharded-9"; cr2.mkdir(parents=True)
+    tl = [{"offset_ms": 0, "p50_micros": 1500, "p99_micros": 2400, "p999_micros": 3000, "max_micros": 4000},
+          {"offset_ms": 500, "p50_micros": 1600, "p99_micros": 2500, "p999_micros": 3100, "max_micros": 4100}]
+    (cr2 / "trad-1.json").write_text(json.dumps({"label": "trad-external-1", "run_id": 1792154000 * 10**9,
+                                                 "total": {}, "timeline": tl}))
+    (cr2 / "trad-20.json").write_text(json.dumps({"label": "trad-external-20", "run_id": 1792155000 * 10**9,
+                                                  "timeline_start_unix_nanos": 1792155020 * 10**9, "total": {}, "timeline": tl}))
+    got = bs.e2e_timelines(rd, {"trad-external-1": [1792150000.0, 1792154016.0]})
+    by = {(l, q, t): v for l, q, t, v in got}
+    expect("bench-series: an old report's timeline anchored on the measure start after its run_id",
+           by.get(("trad-external-1", "0.5", 1792154016.0)) == 0.0015
+           and by.get(("trad-external-1", "0.99", 1792154016.5)) == 0.0025)
+    expect("bench-series: a current report anchors on timeline_start_unix_nanos",
+           by.get(("trad-external-20", "1", 1792155020.0)) == 0.004)
+    expect("bench-series: no anchor, no timeline (never guessed)",
+           not any(l == "trad-external-1" for l, *_ in bs.e2e_timelines(rd, {})))
     expect("bench-series: titles, descriptions and N of M from plan-phases.tsv",
            any('phase="off",attempt="1",step="1",steps="3",test="Checkpoint A/B",title="no state",about="The \\"baseline\\"."' in l
                and 'display="Checkpoint A/B - phase 1 of 3: no state"' in l for l in text.splitlines()))

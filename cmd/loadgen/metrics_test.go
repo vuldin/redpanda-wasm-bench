@@ -180,3 +180,41 @@ func TestDeltaForLabelDoesNotMatchLabelSuffix(t *testing.T) {
 		t.Errorf("output_function_name leaked into function_name: got %v, want 0", got)
 	}
 }
+
+// The end-to-end histogram the dashboards draw for every deployment: labelled
+// with arm and label on every line, cumulative, +Inf equal to _count, and
+// absent until the first sample (an empty histogram would read as 0 latency).
+func TestE2EHistogramIsLabelledAndCumulative(t *testing.T) {
+	m := newLiveMetrics()
+	m.enabled = true
+	m.arm, m.label = "external", "trad-external-20"
+	var mu sync.Mutex
+	if strings.Contains(m.render(&mu), "loadgen_e2e_latency_seconds") {
+		t.Fatal("no e2e series before the first sample")
+	}
+	for _, us := range []float64{450, 480, 1600, 2400, 45_000_000} { // the last is above every bound
+		m.recordE2E(us)
+	}
+	body := m.render(&mu)
+	for _, want := range []string{
+		`loadgen_e2e_latency_seconds_bucket{arm="external",label="trad-external-20",le="0.0005"} 2`,
+		`loadgen_e2e_latency_seconds_bucket{arm="external",label="trad-external-20",le="0.002"} 3`,
+		`loadgen_e2e_latency_seconds_bucket{arm="external",label="trad-external-20",le="0.0025"} 4`,
+		`loadgen_e2e_latency_seconds_bucket{arm="external",label="trad-external-20",le="30"} 4`,
+		`loadgen_e2e_latency_seconds_bucket{arm="external",label="trad-external-20",le="+Inf"} 5`,
+		`loadgen_e2e_latency_seconds_count{arm="external",label="trad-external-20"} 5`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+}
+
+func TestMinInt64(t *testing.T) {
+	if got := minInt64(nil); got != 0 {
+		t.Errorf("minInt64(nil) = %d", got)
+	}
+	if got := minInt64([]int64{30, 10, 20}); got != 10 {
+		t.Errorf("minInt64 = %d, want 10", got)
+	}
+}

@@ -55,8 +55,50 @@ var latenessBounds = []float64{
 	0.1, 0.25, 0.5, 1.0, // 100, 250, 500ms, 1s
 }
 
+// End-to-end latency bounds in SECONDS: send to receipt, the report's
+// "total". Densest between 200us and 5ms, where every deployment's p50-p99.9
+// sits at the published rate (in-broker ~0.5ms, external ~1.5-2.5ms); then
+// coarse out to 30s so a backlog still lands in a bucket rather than +Inf.
+var e2eBounds = []float64{
+	0.0001, 0.0002, 0.0003, 0.0004, 0.0005, 0.0006, 0.0007, 0.0008, 0.0009, // 100-900us
+	0.001, 0.00125, 0.0015, 0.00175, 0.002, 0.0025, 0.003, 0.0035, 0.004, 0.005, // 1-5ms
+	0.0075, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30,
+}
+
+// e2eHistogram is the report's end-to-end latency as a live histogram, so the
+// dashboards can draw the one latency every deployment shares. The broker's
+// own latency metrics only exist where a transform or the relay runs, which
+// left every traditional arm's window empty (2026-10-17). Fed from the same
+// sampled receipts the report's "total" is built from, under its own mutex:
+// receipts arrive on consumer goroutines, not the send loop.
+type e2eHistogram struct {
+	mu      sync.Mutex
+	buckets []uint64
+	count   uint64
+	sum     float64
+}
+
+func (h *e2eHistogram) observe(micros float64) {
+	secs := micros / 1e6
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.buckets == nil {
+		h.buckets = make([]uint64, len(e2eBounds))
+	}
+	h.count++
+	h.sum += secs
+	for i, b := range e2eBounds {
+		if secs <= b {
+			h.buckets[i]++
+			return
+		}
+	}
+}
+
 type liveMetrics struct {
 	enabled bool
+
+	e2e e2eHistogram
 
 	ordersSent    atomic.Int64
 	ordersAcked   atomic.Int64
@@ -115,6 +157,15 @@ func (m *liveMetrics) recordLateness(micros float64) {
 	}
 	// Above the last bound: counted in _count and the +Inf bucket only, which
 	// is what makes the +Inf bucket equal _count below.
+}
+
+// recordE2E files one end-to-end sample (MICROSECONDS, as the collector
+// computes it). Safe from any goroutine.
+func (m *liveMetrics) recordE2E(micros float64) {
+	if !m.enabled {
+		return
+	}
+	m.e2e.observe(micros)
 }
 
 func (m *liveMetrics) setPhase(p string) {
@@ -178,6 +229,26 @@ func (m *liveMetrics) render(latenessMu *sync.Mutex) string {
 	add("loadgen_send_lateness_seconds_bucket{le=\"+Inf\"} %d\n", cnt)
 	add("loadgen_send_lateness_seconds_sum %s\n", strconv.FormatFloat(sum, 'g', -1, 64))
 	add("loadgen_send_lateness_seconds_count %d\n", cnt)
+
+	m.e2e.mu.Lock()
+	ecnt, esum := m.e2e.count, m.e2e.sum
+	ebuckets := append([]uint64(nil), m.e2e.buckets...)
+	m.e2e.mu.Unlock()
+	if ecnt > 0 {
+		lab := fmt.Sprintf("arm=%q,label=%q", m.arm, m.label)
+		add("# HELP loadgen_e2e_latency_seconds End to end, send to receipt: the report's total, from the same sampled receipts, timed window only.\n")
+		add("# TYPE loadgen_e2e_latency_seconds histogram\n")
+		var ecum uint64
+		for i, bound := range e2eBounds {
+			if i < len(ebuckets) {
+				ecum += ebuckets[i]
+			}
+			add("loadgen_e2e_latency_seconds_bucket{%s,le=\"%s\"} %d\n", lab, strconv.FormatFloat(bound, 'g', -1, 64), ecum)
+		}
+		add("loadgen_e2e_latency_seconds_bucket{%s,le=\"+Inf\"} %d\n", lab, ecnt)
+		add("loadgen_e2e_latency_seconds_sum{%s} %s\n", lab, strconv.FormatFloat(esum, 'g', -1, 64))
+		add("loadgen_e2e_latency_seconds_count{%s} %d\n", lab, ecnt)
+	}
 
 	m.phaseMu.Lock()
 	phase := m.phase
