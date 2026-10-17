@@ -161,6 +161,13 @@ with _tf.TemporaryDirectory() as td:
     expect("comparison: traditional placements named, p50 vs external",
            "| external | 1 | 1,000 |" in sec and "| co-located | 1 | 800 | 1,600 | 2,400 | 3,200 | 180,000 | 0.80x | true |" in sec
            and "| co-located, isolated cores | 1 | 1,500 |" in sec)
+    # Two external sweeps at fan-out 1 (1,000 and 1,400): "vs external" is
+    # against their median, 1,200 - not the upper one.
+    report(rd / "client-results" / "traditional-sharded-1792200340" / "trad-1.json", 1400, "trad-external-1")
+    md2 = _sp.run([sys.executable, f"{root}/scripts/summarize-run.py", str(rd)], capture_output=True, text=True).stdout
+    sec2 = md2.split("## Architecture comparison", 1)[-1].split("\n## ", 1)[0]
+    expect("comparison: p50 vs external is against the median of an even number of external sweeps",
+           "| co-located | 1 | 800 | 1,600 | 2,400 | 3,200 | 180,000 | 0.67x | true |" in sec2)
     expect("comparison: arms in the fixed order (in-broker first, external before co-located)",
            sec.index("in-broker, precommit") < sec.index("in-broker, committed") < sec.index("| external") < sec.index("| co-located"))
 

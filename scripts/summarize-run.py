@@ -159,7 +159,11 @@ if len({arm for _, arm, *_ in cmp_rows}) >= 2:
         rows = sorted((r for r in cmp_rows if r[0] == n),
                       key=lambda r: (ARM_ORDER.index(r[1]) if r[1] in ARM_ORDER else 99, r[2]))
         ext = [r[3].get("p50_micros", 0) for r in rows if r[1] == "external" and r[3].get("p50_micros")]
-        ext50 = sorted(ext)[len(ext) // 2] if ext else 0
+        # The median of the external sweeps: with an even count, the mean of
+        # the middle two (the upper one alone flattered every other arm by up
+        # to ~10% with two trials, 2026-10-17).
+        e = sorted(ext)
+        ext50 = (e[(len(e) - 1) // 2] + e[len(e) // 2]) / 2 if e else 0
         w(f"### fan-out {n}\n")
         w("| arm | sweep | p50 us | p99 | p99.9 | p99.99 | samples | p50 vs external | clean |")
         w("|---|---|---|---|---|---|---|---|---|")
