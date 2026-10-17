@@ -734,6 +734,30 @@ def relay_stages():
     ))
     y += 8
 
+    # josh-425: committed delivery waits for the output write. Means from
+    # _sum/_count are exact where the public histograms' doubling buckets are
+    # not, so this is the split between replication (the broker's own
+    # produce) and the write path around it.
+    mean = lambda m, sel="": (f"sum(rate({m}_sum{sel}[$__rate_interval])) / "
+                              f"sum(rate({m}_count{sel}[$__rate_interval])) $window")
+    p.append(row(5, "Committed delivery: what the wait for the output write is made of", y)); y += 1
+    p.append(panel(
+        12, "output write vs broker produce, mean", 0, y, 24, 8,
+        [(mean("redpanda_transform_output_write_latency_seconds"), "transform output write"),
+         (mean("redpanda_kafka_request_latency_seconds", '{redpanda_request="produce"}'), "broker produce (replication)")],
+        unit="s", legend_table=True,
+        desc=("RELAY_DELIVERY=committed hands a record to relay consumers only "
+              "after its output batch's write returns, quorum-acknowledged: the "
+              "first line. The second is the broker's own handling of a Kafka "
+              "produce at acks=all, i.e. replication. The gap between them is "
+              "the transform's write path around replication (the "
+              "self-produce RPC, scheduling): the most a delivery change that "
+              "keeps the commit gate could remove. Exact means, from "
+              "_sum/_count. Empty for a broker without "
+              "transform_output_write_latency_seconds (fork before josh-425)."),
+    ))
+    y += 8
+
     for i, (metric, label) in enumerate(RELAY_STAGES):
         p.append(row(100 + i, label, y)); y += 1
         p.append(panel(
