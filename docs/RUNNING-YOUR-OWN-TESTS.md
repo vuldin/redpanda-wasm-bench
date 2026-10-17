@@ -150,6 +150,7 @@ validate a change.
 | `state-and-jitter.plan` | snapshot cost full vs live; graceful moves with the live region; every deployment on one cluster with 90s windows (p99.99 for each); the transforms scheduler share A/B; tail against rate | ~3.6h | 6 brokers |
 | `checkpoint-ab.plan` | the broker's guest-state checkpoint inline (original) vs background, interleaved, with the live region at depth 1,000 and 10,000 | ~49 min | 6 brokers |
 | `gateways.plan` | server-side filtering for FIX gateways: every gateway reading the whole events topic (firehose) against the in-broker `gateway-demux` routing each event to its gateway's own topic (N = 2, 4, 8) or to a partition keyed by gateway id (also N = 20); broker egress and gateway CPU per event, two trials | ~40 min | 6 brokers |
+| `gateway-headroom.plan` | the topics demux at 8 gateways with `EVENTS_PARTITIONS=1` against `4`, four interleaved trials, plus 4 partitions at 60k events/sec: on 2026-10-17 the single partition's leader shard carried both the ingest and the demux at ~85% busy and fell behind in 5 of 8 trials (josh-391, josh-422) | ~25 min | 6 brokers |
 | `checkpoint-chunks.plan` | whether splitting the checkpoint into chunks (64 KiB, 16 KiB) or checkpointing every 30s instead of 5s removes the depth-10,000 stall; plus a partition scale-out sweep (1-8 partitions at 120k and 240k orders/sec) and the committed relay at fan-out 50 | ~2 h | 6 brokers |
 
 `smoke`, `published` and `book-durability`, one after the other, is the full
@@ -334,7 +335,10 @@ Things that trip people up:
   the gateways, random padding, no compression so egress is real bytes) as
   separate processes on client0. Knobs: `ARMS`, `GATEWAY_LEVELS` (2 4 8),
   `KEYED_EXTRA_LEVELS` (20), `RATE`, `SIZE`, `DURATION`, `EVENTS_PARTITIONS`,
-  `RF`, `WRITE_CACHING`, `ACKS`. Each row: what the gateways received and kept,
+  `RF`, `WRITE_CACHING`, `ACKS`. With `EVENTS_PARTITIONS` > 1 each input
+  partition runs its own demux on its leader's shard, all writing the
+  gateways' one-partition topics, and a level starts only once every
+  partition's demux reports running. Each row: what the gateways received and kept,
   `egress_per_event` (broker fetch bytes, summed over brokers, per produced
   event), gateway CPU per kept event, latency, and `clean` (every event
   reached its gateway exactly once). A keyed gateway finds its partition as

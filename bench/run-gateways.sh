@@ -98,6 +98,27 @@ delete_level() {
 # which is no move.
 leader_changes() { raft_leader_changes "(gwevents|gw|gwk)-$RUN_ID"; }
 
+# running_processors NAME: the running count rpk reports for NAME ("3 / 4"
+# -> 3), or nothing when it is not listed.
+running_processors() {
+  rpkc transform list 2>/dev/null | awk -v n="$1" '$1 == n {
+    for (i = 2; i < NF; i++) if ($(i + 1) == "/") { print $i; exit } }'
+}
+
+# lib-cluster.sh's wait_for_transforms_running returns once ANY processor of a
+# name runs. With EVENTS_PARTITIONS > 1 the level would then start with some
+# input partitions not yet transformed, and their backlog would read as lag.
+wait_every_partition_running() {
+  local name="$1" want="$2" have=""
+  for _ in $(seq 1 60); do
+    have="$(running_processors "$name")"
+    [ -n "$have" ] && [ "$have" -ge "$want" ] && return 0
+    sleep 1
+  done
+  echo "ERROR: $name has ${have:-no} running processor(s), want $want (one per input partition)" >&2
+  return 1
+}
+
 trap 'delete_level; cfg_restore_all' EXIT
 # Restored by cfg_restore_all on exit.
 cfg_set enable_leader_balancer false
@@ -155,6 +176,8 @@ for arm in $ARMS; do
     esac
     if [ "$arm" != firehose ]; then
       wait_for_transforms_running "$tname" || { echo "FAIL: gateway-demux never ran"; exit 1; }
+      wait_every_partition_running "$tname" "$EVENTS_PARTITIONS" \
+        || { echo "FAIL: gateway-demux not running on every input partition"; exit 1; }
     fi
     sleep "$SETTLE"
 

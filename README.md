@@ -69,6 +69,7 @@ scripts/autorun.sh status                  # progress, the Grafana URL, where re
 | `state-and-jitter.plan` | durable state without the tail (full vs live snapshots, graceful moves), every deployment on one cluster with p99.99, and where the in-broker tail comes from | ~4.5 h | $250 |
 | `checkpoint-ab.plan` | whether the broker's guest-state checkpoint still stalls produces once it runs in the background without a forced flush | ~1.4 h | $80 |
 | `gateways.plan` | server-side filtering for FIX gateways: broker egress and gateway CPU per event with every gateway reading the whole events topic, against the in-broker gateway-demux routing by topic or by key | ~1h20 | $75 |
+| `gateway-headroom.plan` | the topics demux at 8 gateways over 1 events partition against 4 (and 4 at twice the rate): whether spreading the ingest and the demux over several shards stops it falling behind | ~1h | $55 |
 | `checkpoint-chunks.plan` | whether chunked checkpoints (or a longer interval) remove the depth-10,000 checkpoint stall; plus partition scale-out and the committed relay at fan-out 50 | ~3 h | $165 |
 
 ### Results

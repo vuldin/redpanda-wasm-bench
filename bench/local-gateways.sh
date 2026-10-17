@@ -15,6 +15,9 @@
 #   paused is back on afterwards
 #   the producer serves loadgen_phase_info{phase="measure"} while it sends,
 #   which the dashboards' "measured only" view keys on
+#   topics again over a 4-partition events topic (EVENTS_PARTITIONS=4, as
+#   plans/gateway-headroom.plan runs it): every partition's demux running
+#   before the level starts, every event delivered once, latency usable
 #
 #   REDPANDA_BIN=... WASM_DIR=... bench/local-gateways.sh
 #
@@ -113,17 +116,33 @@ if [ "$balancer" != true ]; then
 fi
 echo "  ok    the leader balancer is back on after the run"
 
-python3 - "$W/results/summary.txt" <<'PY' && rc=0
+echo "--- topics over a 4-partition events topic"
+( cd "$W/tools" && RPK="$W/rpk" BROKERS="127.0.0.1:$KAFKA_PORT" ADMIN_URL="$ADMIN" ADMIN_URLS="$ADMIN" \
+    BIN="$W/tools" RF=1 RATE=2000 DURATION=8s SETTLE=2 ARMS=topics GATEWAY_LEVELS=4 EVENTS_PARTITIONS=4 \
+    RESULTS_DIR="$W/results-p4" bash "$HERE/run-gateways.sh" ) > "$W/run-p4.log" 2>&1
+tail -3 "$W/run-p4.log" | sed 's/^/  /'
+
+python3 - "$W/results/summary.txt" "$W/results-p4/summary.txt" <<'PY' && rc=0
 import sys
-rows = {}
-for line in open(sys.argv[1]):
-    if line.startswith(("#", "level ")) or not line.strip():
-        continue
-    f = line.split()
-    rows[f[0]] = dict(zip(["level", "arm", "gateways", "produced", "records", "bytes", "kept", "kept_fraction",
-                           "bytes_per_gateway", "egress_bytes", "egress_per_event", "cpu_s", "cpu_us_per_kept",
-                           "p50_us", "p99_us", "p999_us", "clean", "leader_changes", "lag_peak",
-                           "latency_usable"], f))
+COLS = ["level", "arm", "gateways", "produced", "records", "bytes", "kept", "kept_fraction",
+        "bytes_per_gateway", "egress_bytes", "egress_per_event", "cpu_s", "cpu_us_per_kept",
+        "p50_us", "p99_us", "p999_us", "clean", "leader_changes", "lag_peak", "latency_usable"]
+def summary(path):
+    rows, head = {}, ""
+    try:
+        lines = open(path).read().splitlines()
+    except OSError:
+        return rows, head
+    for line in lines:
+        if line.startswith("# rate="):
+            head = line
+        if line.startswith(("#", "level ")) or not line.strip():
+            continue
+        f = line.split()
+        rows[f[0]] = dict(zip(COLS, f))
+    return rows, head
+rows, _ = summary(sys.argv[1])
+p4, p4_head = summary(sys.argv[2])
 bad = []
 def need(ok, what):
     print(("  ok    " if ok else "  FAIL  ") + what)
@@ -142,6 +161,10 @@ if len(bad) == 0:
     need(int(k4["records"]) >= int(k4["kept"]), "keyed: own events plus collisions")
     e_fh, e_tp = float(fh["egress_per_event"]), float(tp["egress_per_event"])
     need(e_fh > 2 * e_tp, f"egress per event: firehose {e_fh:.0f} B > 2x topics {e_tp:.0f} B")
+r = p4.get("topics-4")
+need("events_partitions=4" in p4_head, "4-partition pass: the summary records events_partitions=4")
+need(r is not None and r["clean"] == "true", "4-partition pass: topics-4, every event reached its gateway once")
+need(r is not None and r.get("latency_usable") == "true", f"4-partition pass: latency usable (lag peak {r and r.get('lag_peak')})")
 if bad:
     print("GATEWAYS CHECK FAILED"); sys.exit(1)
 print("GATEWAYS CHECK PASSED")

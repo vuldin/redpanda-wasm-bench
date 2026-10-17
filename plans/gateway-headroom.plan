@@ -1,0 +1,53 @@
+# Headroom for the gateway demux (josh-391, from josh-422): the topics demux
+# at 8 gateways over a 1-partition events topic against a 4-partition one.
+#
+# On 2026-10-17 (relay-and-durability, 8 trials at 30k events/sec) the shard
+# leading the single events partition was ~80-85% busy in every trial: the
+# partition's own ingest and replication ~40%, the demux ~44%, and the demux
+# runnable but not running more than half the time even when clean. 5 of 8
+# trials fell behind (lag 4.5k-28.5k records, p99 14-120ms), whatever the
+# transforms' scheduler shares. Each input partition runs its own demux on its
+# own leader's shard, so with 4 partitions each shard carries a quarter of
+# both. Expected: every 4-partition trial clean and latency usable, p99 near
+# the 2-3ms of the clean 1-partition trials, at 30k and still at 60k.
+#
+#   p1-t<n>   EVENTS_PARTITIONS=1 (as every gateways run so far), 30k/sec
+#   p4-t<n>   EVENTS_PARTITIONS=4, 30k/sec, interleaved with p1
+#   p4-60k-t<n>  EVENTS_PARTITIONS=4 at twice the rate
+#
+# The gateways' output topics stay at one partition, so the input partition
+# count is the only change. Default transform shares (100), what ships.
+# Read RESULTS.md's "Gateway filtering" tables: lag_peak, p99_us and
+# latency_usable per trial, and the transform e2e panel per arm.
+#
+#   scripts/autorun.sh check plans/gateway-headroom.plan
+#   scripts/autorun.sh start plans/gateway-headroom.plan
+#
+# 6 brokers + 3 clients + monitoring, ~$55/hr; 40 min of phases budgeted
+# (~25 used), ~1h in all.
+
+TEST="Gateway demux headroom"
+TEST_ABOUT="Whether the topics demux at 8 gateways stops falling behind when the events topic has 4 partitions instead of 1, so no single shard carries both the ingest and the demux (josh-391, josh-422)."
+TOPOLOGY=six-broker
+# Region preference for autorun's region selection (first with capacity wins).
+# us-west-2 first: every six-broker series so far ran in us-west-2a, and the
+# region is part of a result's fingerprint. The environment wins.
+: "${REGIONS:=us-west-2 us-east-1 us-east-2 eu-west-1}"; export REGIONS
+DEPLOY_ARGS=(-e transform_memory_limit=16777216 -e transform_instances_per_core=40 -e transform_snapshot_max_size=16777216)
+
+GW=(SIZE=650 DURATION=60s RF=3 WRITE_CACHING=true ACKS=-1 ARMS=topics GATEWAY_LEVELS=8)
+
+for t in 1 2 3 4; do
+  about "trial $t of 4: topics demux at 8 gateways, 1 events partition" \
+    "As on 2026-10-17: one shard carries the ingest and the demux. Watch transform lag and the reactor heatmap of the events leader's broker."
+  phase "p1-t$t" 4 run gateways "${GW[@]}" RATE=30000 EVENTS_PARTITIONS=1
+  about "trial $t of 4: topics demux at 8 gateways, 4 events partitions" \
+    "The same load spread over 4 partitions, each with its own demux on its own leader's shard. Lag should stay near zero; compare p99 with the trial before."
+  phase "p4-t$t" 4 run gateways "${GW[@]}" RATE=30000 EVENTS_PARTITIONS=4
+done
+
+for t in 1 2; do
+  about "trial $t of 2: 4 events partitions at 60k events/sec" \
+    "Twice the rate: each partition's shard now carries about half of what the single partition did at 30k. Watch whether lag stays down."
+  phase "p4-60k-t$t" 4 run gateways "${GW[@]}" RATE=60000 EVENTS_PARTITIONS=4
+done
